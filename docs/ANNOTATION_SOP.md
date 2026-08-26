@@ -55,6 +55,32 @@ Two consequences:
 
 ---
 
+## 2b. Start every case with the setup script
+
+Paste this into Slicer's Python Console (**View → Python Console**):
+
+```python
+BME_CASE = "BME-001"
+exec(open(r"D:/Final yr Prj/bme/ml/scripts/slicer_setup.py").read())
+```
+
+It loads the case, creates the three segments **already named correctly**, turns on
+"editable area: inside `bone_marrow`", switches to Four-Up, and prints the save path.
+
+**Why this exists.** The first real annotation on this project was saved with Slicer's
+auto-generated name `Segment_1`. `seg2nifti.py` rejected it — correctly, because
+`Segment_1` says nothing about which structure it holds, and guessing would mislabel
+anatomy silently. Thirty seconds of setup avoids losing an hour of drawing.
+
+Already saved one with default names? Nothing is lost — state the mapping explicitly:
+
+```bash
+python ml/scripts/rename_segments.py path/to/Segmentation.seg.nrrd
+python ml/scripts/rename_segments.py path/to/Segmentation.seg.nrrd --map Segment_1=bone_marrow
+```
+
+Run with no `--map` to list what is in the file. It backs up before writing.
+
 ## 3. Setup (once)
 
 1. **3D Slicer 5.6+** (stable).

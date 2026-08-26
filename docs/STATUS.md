@@ -47,7 +47,11 @@ Phases are defined in [PRD.md](PRD.md) §8.
 
 In order. Each step's output is the next step's input.
 
-1. **Switch annotation output from `.mrb` to `.seg.nrrd`.** `Annotated/1/2026-08-26-Scene.mrb`
+1. **Use `ml/scripts/slicer_setup.py` to start each case** — it names the three segments
+   correctly and turns on the bone masking. A real annotation was already lost to Slicer's
+   default `Segment_1` name; `ml/scripts/rename_segments.py` salvages those.
+
+2. **Switch annotation output from `.mrb` to `.seg.nrrd`.** `Annotated/1/2026-08-26-Scene.mrb`
    is a Slicer scene bundle — fine as a personal backup, but nothing downstream reads it and
    it bundles the images with the labels. Save the Segmentation node as `.seg.nrrd` as well.
    See [ANNOTATION_SOP.md](ANNOTATION_SOP.md) §1.
@@ -156,6 +160,8 @@ ml/scripts/convert.py   DICOM -> NIfTI + picks each case's primary series
 ml/scripts/seg2nifti.py .seg.nrrd -> validated training labelmap
 ml/scripts/build_dataset.py  nnU-Net layout + patient-level splits
 ml/scripts/train.py     nnU-Net plan/preprocess/train wrapper
+ml/scripts/slicer_setup.py    run INSIDE Slicer to start a case correctly
+ml/scripts/rename_segments.py fix .seg.nrrd saved with default segment names
 BME/, Non BME/, data/   gitignored, never committed
 ```
 
