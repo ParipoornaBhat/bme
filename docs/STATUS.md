@@ -55,8 +55,9 @@ In order. Each step's output is the next step's input.
    annotation is keyed to a patient name and has to be remapped later. `data/deid_map.csv`
    has the correspondence.
 
-3. **Install Python 3.11 or 3.12.** Only 3.14 is on this machine; PyTorch and nnU-Net do not
-   support it. Nothing trains until this is fixed.
+3. **Install MONAI Label in Slicer** — the single biggest annotation speed-up. It trains on
+   the cases you have finished and pre-segments the next one, so each case you label makes
+   the following one faster. See [ANNOTATION_SOP.md](ANNOTATION_SOP.md) §3.
 
 4. **Set up TotalSegmentator-MRI in Slicer** ([ANNOTATION_SOP.md](ANNOTATION_SOP.md) §3) to
    bootstrap bone masks — correct rather than draw, and it shows you what is bone.
@@ -135,7 +136,7 @@ Carried from [PRD.md](PRD.md) §10, updated with what the data answered.
 | `BME/IMRAZ.zip` has no DICOM (PNG only) | −1 case | Re-export or drop. |
 | 17 non-BME cases have a PNG but no volume | −17 potential cases | Numbers 7, 17–25, 28, 29, 32, 33, 35, 36, 43. Re-export or drop. |
 | ~10:1 voxel anisotropy | 3D surfaces look terraced | Taubin smoothing in Stage E is required, not cosmetic. |
-| Python 3.14 only | Cannot install PyTorch | Install 3.11/3.12. |
+| ~~Python 3.14 cannot run PyTorch~~ | **Wrong — retracted 2026-08-26** | torch 2.13.0, nnunetv2 2.8.1, monai 1.6.0 all ship cp314 wheels. 3.14 is fine; the `<3.13` pin was removed. |
 | 3 scanners, 2 vendors | Raw intensities not comparable | Normalization in PRD §4.1 is mandatory. |
 
 ---

@@ -3,7 +3,7 @@ name = "bme"
 version = "0.1.0"
 description = "Explainable deep learning for bone marrow edema detection in MRI"
 readme = "README.md"
-requires-python = ">=3.10,<3.13"
+requires-python = ">=3.10"
 
 # Core pipeline. Pinned loosely for now — lock once Phase 2 training runs.
 dependencies = [
@@ -29,6 +29,8 @@ dependencies = [
 
 [project.optional-dependencies]
 # Installed separately — torch wheels are platform/CUDA specific.
+# Verified 2026-08-26: torch 2.13.0, nnunetv2 2.8.1 and monai 1.6.0 all publish
+# cp314 wheels, so Python 3.14 is fine. An earlier note here claimed otherwise.
 # See ml/README.md before installing.
 train = [
     "torch>=2.2",
