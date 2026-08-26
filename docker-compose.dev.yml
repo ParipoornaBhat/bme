@@ -1,0 +1,38 @@
+# Local development database. Not for deployment.
+#   pnpm db:up      start + wait for healthy + write .env
+#   pnpm db:down    stop (data survives)
+#   pnpm db:nuke    stop and delete the volume
+#
+# Published on 5433, NOT 5432. A native Windows PostgreSQL service already owns
+# 5432 on this machine; if the container also published 5432 the native service
+# would win the bind and connections would silently reach the wrong server —
+# surfacing as `role "bme" does not exist` (SQLSTATE 28000), which reads like a
+# bad password and sends you hunting in the wrong place.
+
+services:
+  db:
+    image: postgres:17-alpine
+    container_name: bme-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: bme
+      POSTGRES_PASSWORD: bme_dev_password
+      POSTGRES_DB: bme
+      # Speeds up first boot; fine for a throwaway dev DB.
+      POSTGRES_INITDB_ARGS: "--auth-host=scram-sha-256"
+    ports:
+      # Host port is chosen by scripts/dev-db.js — it probes upward from 5433
+      # until it finds one that is free, then persists the choice as
+      # BME_DB_PORT in .env so every later run reuses the same port.
+      - "${BME_DB_PORT:-5433}:5432"
+    volumes:
+      - bme_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U bme -d bme"]
+      interval: 3s
+      timeout: 5s
+      retries: 20
+      start_period: 5s
+
+volumes:
+  bme_pgdata:
