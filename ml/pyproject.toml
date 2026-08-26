@@ -1,0 +1,57 @@
+[project]
+name = "bme"
+version = "0.1.0"
+description = "Explainable deep learning for bone marrow edema detection in MRI"
+readme = "README.md"
+requires-python = ">=3.10,<3.13"
+
+# Core pipeline. Pinned loosely for now — lock once Phase 2 training runs.
+dependencies = [
+    # imaging I/O and preprocessing
+    "SimpleITK>=2.3",           # N4 bias correction, registration, resampling
+    "nibabel>=5.2",             # NIfTI read/write
+    "pydicom>=2.4",             # DICOM headers, de-identification
+    "dicom2nifti>=2.4",         # DICOM series -> NIfTI
+    "slicerio>=1.1",            # read .seg.nrrd segment names/metadata
+    "pynrrd>=1.0",
+    # numerics
+    "numpy>=1.26",
+    "scipy>=1.11",
+    "scikit-image>=0.22",       # marching cubes, connected components
+    "pandas>=2.1",
+    # quantification / 3D export
+    "trimesh>=4.0",             # mesh smoothing, decimation, GLB export
+    # serving
+    "fastapi>=0.110",
+    "uvicorn[standard]>=0.29",
+    "python-multipart>=0.0.9",
+]
+
+[project.optional-dependencies]
+# Installed separately — torch wheels are platform/CUDA specific.
+# See ml/README.md before installing.
+train = [
+    "torch>=2.2",
+    "nnunetv2>=2.5",
+    "monai>=1.3",
+    "batchgenerators>=0.25",
+]
+dev = [
+    "ruff>=0.4",
+    "pytest>=8.0",
+    "jupyter>=1.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/bme"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
