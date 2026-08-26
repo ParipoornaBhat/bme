@@ -42,18 +42,26 @@ Two things make this hard, and they are different problems needing different sol
 
 ---
 
-## 2. Current state audit (as of 2026-08-26)
+## 2. Current state audit
 
-What is actually on disk right now:
+**Superseded by [DATASET.md](DATASET.md)** — full header-level inventory, generated
+2026-08-26 after collection completed. Summary:
 
 | Path | Contents | Verdict |
 |---|---|---|
-| `BME/abdul pdfs.zip` | 21 DICOM files, one series (`IMG-0001-000NN.dcm`), ~937 KB each | Correct data form. |
-| `BME/Annotated/` | **empty** | Pending |
-| `Non BME/3d/` | **empty** | Pending — this is the important one |
-| `Non BME/Slices/` | 69 PNG/JPEG screenshots, ~20 MB total | **Not trainable.** See below. |
+| `BME/` | 48 case archives, 47 readable | Collection complete |
+| `Non BME/3d/` | 60 case archives, all readable | Collection complete |
+| `BME/Annotated/` | **empty** | **The remaining blocker** |
+| `Non BME/Slices/` | 69 PNG screenshots | Redundant — same cases now exist as volumes. Keep for figures. |
 
-### 2.1 Three blocking issues, in priority order
+107 usable cases, knee, 47 BME : 60 non-BME, three scanners. Every case has a
+fat-suppressed (edema-sensitive) sequence; only 16% have T1 — see §4.3.
+
+Blockers 2 and 3 below are **resolved**: volumes replaced the PNGs, and both classes are
+now the same modality. Blocker 1 (PHI) stands, and has a new dimension — 84 of 107 cases
+have clean headers, but *every* case still carries a patient name in its filename.
+
+### 2.1 Blocking issues, in priority order
 
 **BLOCKER 1 — PHI in filenames and headers.**
 Filenames carry patient names (`24 mamatha.png`, `44 abdularrahman png.png`, `62 MAMTA J SHENOY PNG.jpg`, `abdul pdfs.zip`). DICOM headers almost certainly carry `PatientName`, `PatientID`, `PatientBirthDate`, `InstitutionName`, and often burned-in text on the pixel data itself.
@@ -186,16 +194,26 @@ Why nnU-Net and not something newer:
 
 **Challenger:** MedNeXt-L. Surpasses nnU-Net on several public benchmarks and is a legitimate second entry. Run it *after* nnU-Net works, as a comparison-table row — not as your starting point.
 
-**Input channels** (this is where you can genuinely improve on the literature):
+**Input channels.** Revised 2026-08-26 after the header inventory ([DATASET.md](DATASET.md)).
+
+The original design put T1 in channel 1, to separate true edema from red marrow and cysts. **The data does not support it: only 18 of 107 cases have a T1, and only 5 of 47 BME cases.** 89 cases are single-series exports. T1 cannot be a required input.
+
+What every case does have is a fat-suppressed sequence — 107/107. So:
 
 | Ch | Content | Why |
 |---|---|---|
-| 0 | STIR / T2-FS, normalized | Edema is bright. Primary signal. |
-| 1 | T1, registered, normalized | Edema is dark. Separates true edema from red marrow and cysts. Big specificity gain. |
+| 0 | Fat-suppressed PD/T2/STIR, normalized | Edema is bright. **The only channel present in every case.** |
+| 1 | **Left-right mirrored copy of ch 0** | Contralateral symmetry prior. Needs no second acquisition. |
 | 2 | Stage B bone mask | Hard anatomical prior. |
-| 3 | **Left-right mirrored copy of ch 0** | Contralateral symmetry prior — see below. |
+| 3 | Stage D anomaly residual (§4.4) | Normative deviation. Needs no second acquisition. |
 
-**The contralateral prior is worth doing.** Marrow signal is broadly symmetric between left and right in a healthy patient. Feed the mirrored volume as an extra channel and the network can learn "this side is brighter than its mirror" — asymmetry is exactly the cue radiologists use, and it is a strong signal precisely in the *early*, subtle cases where absolute intensity is nearly normal. It costs one line of preprocessing. It is also a clean, defensible novelty claim for the report.
+**T1 is now an auxiliary, not a channel.** Run it as an ablation on the 18-case subset and report it as "what a second sequence would buy" — a legitimate finding, and an argument for changing the acquisition protocol in future work. Do not build the main pipeline around it.
+
+**This raises the stakes on channels 1 and 3.** They were framed as enhancements when T1 was carrying the specificity load. With T1 gone they *are* the specificity mechanism, and both are things you generate from the single acquisition you already have.
+
+**On the contralateral prior:** marrow signal is broadly symmetric left-to-right in a healthy patient. Feed the mirrored volume as an extra channel and the network can learn "this side is brighter than its mirror" — asymmetry is exactly the cue radiologists use, and it is strongest precisely in the *early*, subtle cases where absolute intensity is nearly normal. One line of preprocessing. A clean, defensible novelty claim.
+
+Caveat to check: these are **single-knee** studies, so the mirror is the same knee flipped, not the opposite knee. That still works as a left/right-within-the-joint asymmetry prior (medial vs lateral compartment), which is clinically meaningful in knee OA — but it is a different claim from true contralateral comparison. Validate it in the §4.3 ablation before writing it up, and describe it accurately.
 
 **Loss:** Dice + Focal (or Dice + Tversky with β > α to favour recall). BME is well under 1% of voxels; plain cross-entropy will converge to predicting all-background and report 99% accuracy. Deep supervision on, per nnU-Net default. Exclude `uncertain` voxels from the loss.
 
