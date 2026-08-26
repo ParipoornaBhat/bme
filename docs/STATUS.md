@@ -33,6 +33,7 @@ Phases are defined in [PRD.md](PRD.md) §8.
 | **0** | **De-identification** | ✅ **done** — 107 cases, 13,818 images, PHI verified clean |
 | — | DICOM→NIfTI + primary-series picker | ✅ 107/107 converted, data/worklist.csv written |
 | **1** | **Annotation pipeline** | 🟡 **in progress — 1 case. The critical path.** |
+| — | nnU-Net dataset builder + training wrapper | ✅ written, **untested against real labels** |
 | 2 | Stage B — bone/marrow segmentation | ⬜ blocked on Phase 1 |
 | 3 | Stage C — BME segmentation | ⬜ |
 | 4 | Stage D anomaly + Stage E quantification | ⬜ |
@@ -152,6 +153,9 @@ CLAUDE.md               working rules, git conventions, PHI handling
 ml/scripts/inventory.py re-run the dataset inventory
 ml/scripts/deid.py      de-identification
 ml/scripts/convert.py   DICOM -> NIfTI + picks each case's primary series
+ml/scripts/seg2nifti.py .seg.nrrd -> validated training labelmap
+ml/scripts/build_dataset.py  nnU-Net layout + patient-level splits
+ml/scripts/train.py     nnU-Net plan/preprocess/train wrapper
 BME/, Non BME/, data/   gitignored, never committed
 ```
 

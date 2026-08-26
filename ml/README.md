@@ -24,17 +24,39 @@ HTTP with a shared secret.
 
 ## Setup
 
-```bash
-uv venv --python 3.11
-uv pip install -e ".[dev]"
-```
-
-Install PyTorch separately — the wheel depends on your CUDA version, so it is deliberately
-not in the default dependency set. Pick the right command from pytorch.org, then:
+Python **3.14 is fine** — verified 2026-08-26 that torch 2.13.0, nnunetv2 2.8.1 and
+monai 1.6.0 all publish `cp314` wheels, and the full nnU-Net dependency tree resolves.
+An earlier version of this file wrongly claimed a 3.13 ceiling.
 
 ```bash
-uv pip install -e ".[train]"
+python -m venv ml/.venv
+ml/.venv/Scripts/python.exe -m pip install numpy nibabel pydicom SimpleITK pynrrd scipy
 ```
+
+That covers de-identification, conversion and dataset building. For training, install the
+torch build matching your CUDA (see pytorch.org) and then:
+
+```bash
+ml/.venv/Scripts/python.exe -m pip install -e ".[train]"
+```
+
+`ml/.venv/` is gitignored.
+
+## Pipeline order
+
+```bash
+python ml/scripts/inventory.py     <base>                  # what the archives contain
+python ml/scripts/deid.py          <base>                  # -> data/raw/<CASE>/
+python ml/scripts/convert.py       <base>                  # -> data/nifti/, worklist.csv
+#   ... annotate in 3D Slicer -> data/annotations/<CASE>/<CASE>.seg.nrrd ...
+python ml/scripts/seg2nifti.py     <base>                  # -> *_labels.nii.gz, validated
+python ml/scripts/build_dataset.py <base> --stage bone     # -> nnU-Net layout + splits
+python ml/scripts/train.py         <base> --stage bone
+python ml/scripts/build_dataset.py <base> --stage bme
+python ml/scripts/train.py         <base> --stage bme
+```
+
+Every script takes `--dry-run` or `--check-only` and refuses to overwrite without `--force`.
 
 ## Rules
 
