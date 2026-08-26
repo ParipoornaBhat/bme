@@ -368,11 +368,96 @@ GET  /api/studies/:id/mask.nii.gz  -> signed URL
 
 Inference takes minutes, not milliseconds — **async job model, not request/response.** Get this right early; retrofitting it is painful.
 
-### 7.5 Viewer
+### 7.5 Viewer and segment editor — "Slicer-lite in the browser"
 
-- **Cornerstone3D** for the three-plane MPR viewer with segmentation overlay. It is the standard for DICOM in the browser, handles windowing/scroll/MPR, and has first-class segmentation support. Do not build this yourself.
-- **react-three-fiber** for the 3D panel, loading the GLB from Stage E.
-- Synchronised crosshairs across all four panels — click a lesion in the table, all views jump to it. This is the demo moment; budget time for it.
+**Requirement (2026-08-26):** the web app must not be a read-only result viewer. It has to
+let you *edit* — correct the model's output, annotate from scratch, reopen and revise an
+earlier annotation, and adjust ML results later. The reference UI is 3D Slicer's Segment
+Editor: four panels (axial / 3D / coronal / sagittal) with a left rail holding the
+segmentation selector, source volume, segment list with per-segment visibility, a tool
+grid, and undo/redo.
+
+**Deliberately not** all of Slicer. The subset below covers the correction workflow, which
+is where the value is.
+
+#### Build on Cornerstone3D — do not write a viewer
+
+`@cornerstonejs/core` + `@cornerstonejs/tools` already provide: volume viewports with MPR,
+window/level, synchronised crosshairs, labelmap segmentation representation, and the editing
+tools — `BrushTool` (circular and sphere), `RectangleScissors`, `CircleScissors`,
+`SphereScissors`, `PaintFill`, threshold-in-brush, plus segmentation undo/redo. OHIF Viewer
+v3 is built on exactly this stack and is the proof it works.
+
+| Panel | Library |
+|---|---|
+| Axial / coronal / sagittal MPR + overlay | Cornerstone3D volume viewports |
+| 3D lesion + translucent bone | react-three-fiber, GLB from Stage E |
+| Segment list, tool rail, undo/redo | Your own React — thin UI over Cornerstone's tool API |
+
+#### Tool subset for v1
+
+Brush (adjustable radius, 2D and sphere), eraser, threshold-constrained brush, scissors,
+fill-between-slices, undo/redo, per-segment visibility and opacity. **Masking: "editable
+area = inside `bone_marrow`"** — carry this over from the Slicer SOP; it is the single
+feature that stops non-radiologist annotators painting into muscle.
+
+Not in v1: Grow-from-seeds, Level tracing, Logical operators, Islands, Margin/Hollow,
+Smoothing. Add only if a real workflow needs them.
+
+#### Honest scoping
+
+- **Correcting an AI mask in the browser: very feasible.** Brush + eraser + threshold +
+  undo covers it, and this is the common case.
+- **Bulk from-scratch annotation in the browser: slower than Slicer.** Slicer's
+  Grow-from-seeds and Level tracing are genuinely faster for virgin cases.
+
+So: **Phase 1 ground truth is annotated in 3D Slicer.** The web editor is for correction,
+review, and post-ML adjustment. Do not put the web editor on the critical path for training
+data — that is how the model never gets trained.
+
+### 7.6 Storage format — round-tripping between Slicer and the web
+
+**Requirement:** saved annotations should come back in a format that matches the input, so a
+case can move between Slicer, the web app, and the model without lossy conversion.
+
+**Use DICOM SEG as the interchange format.** This is precisely what it exists for: a DICOM
+object that stores a segmentation, references the source series by UID, and lives in the
+same study as the images. It round-trips into 3D Slicer natively, and `dcmjs` reads and
+writes it in the browser. A case can be handed back as a zip that looks like the zip that
+went in — images plus a SEG object.
+
+Three formats, each with one job:
+
+| Format | Role | Who writes it |
+|---|---|---|
+| **`.seg.nrrd`** | Slicer working file during Phase 1 | Annotator in Slicer |
+| **DICOM SEG** | Interchange + what the platform stores and returns | Server (`dcmqi`), browser (`dcmjs`) |
+| **`.nii.gz`** | Training input | Script, derived |
+
+Converters: **`dcmqi`** (`itkimage2segimage` / `segimage2itkimage`) is purpose-built for
+NRRD/NIfTI ↔ DICOM SEG on the server. `dcmjs` handles the browser side.
+
+This supersedes the "DICOM SEG optional" note in [ANNOTATION_SOP.md](ANNOTATION_SOP.md) §1 —
+it was optional when the plan was Slicer-only. With a web editor in scope it becomes the
+backbone, because it is the one format both ends read natively.
+
+**Note on `.mrb`:** a Slicer scene bundle is a fine personal backup but must not be the
+saved artifact of record — it bundles the images with the labels, needs Slicer to open, and
+nothing else in the pipeline reads it. Export `.seg.nrrd` alongside it.
+
+#### Sync flow
+
+```
+Slicer  ──.seg.nrrd──▶ dcmqi ──▶ DICOM SEG ──▶ object store + Postgres row
+                                      │
+                                      ├──▶ dcmjs ──▶ browser editor ──▶ edited SEG ──▶ new version
+                                      └──▶ segimage2itkimage ──▶ .nii.gz ──▶ nnU-Net
+```
+
+Version annotations rather than overwriting: an `annotations` row per save, with
+`parent_id`, `author_id`, `source` (`human` | `model` | `model_corrected`). You need this
+anyway to measure how much a human changed the model's output — which is a genuinely
+interesting number for the report, and free once versioning exists.
 
 ---
 

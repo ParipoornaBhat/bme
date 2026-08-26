@@ -1,7 +1,21 @@
 # CLAUDE.md — working rules for this repo
 
 Final-year project: explainable deep learning for **bone marrow edema (BME) detection in MRI**.
-Team of 4 (CSE, NMAMIT). Planning docs: [docs/PRD.md](docs/PRD.md), [docs/ANNOTATION_SOP.md](docs/ANNOTATION_SOP.md).
+Team of 4 (CSE, NMAMIT).
+
+## Read this first, every session
+
+**[docs/STATUS.md](docs/STATUS.md)** — current phase, what to do next, decisions already
+made, known problems. This project spans many sessions; STATUS.md is how continuity is kept.
+
+Then as needed: [docs/PRD.md](docs/PRD.md) (the plan) ·
+[docs/DATASET.md](docs/DATASET.md) (what the data actually contains) ·
+[docs/ANNOTATION_SOP.md](docs/ANNOTATION_SOP.md) (before touching Slicer).
+
+**At the end of any session where something changed, update `docs/STATUS.md`** — the phase
+tracker, "Do this next", and Known problems. If a decision in the PRD is invalidated by new
+evidence, fix the PRD in the same pass rather than leaving the docs to drift. This is not
+optional bookkeeping; it is the only thing that makes the next session productive.
 
 ---
 
