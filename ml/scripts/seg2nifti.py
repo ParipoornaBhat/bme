@@ -99,7 +99,13 @@ def build_labelmap(data, segments) -> tuple[np.ndarray, dict, list[str]]:
         layer = data[info["layer"]] if data.ndim == 4 else data
         mask = layer == info["label"]
         if not mask.any():
-            problems.append(f"segment {name!r} is empty")
+            # An empty `bme` is the normal, expected state of a non-BME case —
+            # that absence is exactly what makes it a negative example. Only a
+            # missing REQUIRED segment is a problem. Treating every empty
+            # segment as a failure would silently drop all 60 negative cases
+            # and train the model on positives alone.
+            if canon in REQUIRED:
+                problems.append(f"required segment {name!r} is empty")
             continue
 
         # Painted later wins on overlap; bme must sit on top of bone_marrow.

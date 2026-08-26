@@ -103,13 +103,20 @@ def make_splits(case_ids: list[str], classes: dict[str, str]):
         test += ids[:n_test]
         trainval += ids[n_test:]
 
-    # Round-robin within each class keeps folds balanced at small n.
+    # Round-robin, with the counter carried ACROSS classes rather than reset per
+    # class. Resetting leaves late folds empty at small n: 4 positives + 4
+    # negatives each restarting at fold 0 fills folds 0-3 and leaves fold 4 with
+    # no validation cases at all. Carrying the counter also offsets the classes
+    # against each other, which keeps folds class-balanced.
     folds = [[] for _ in range(N_FOLDS)]
-    for cls, ids in by_class.items():
-        pool = [c for c in sorted(ids) if c in set(trainval)]
+    trainval_set = set(trainval)
+    i = 0
+    for cls in sorted(by_class):
+        pool = [c for c in sorted(by_class[cls]) if c in trainval_set]
         rng.shuffle(pool)
-        for i, cid in enumerate(pool):
+        for cid in pool:
             folds[i % N_FOLDS].append(cid)
+            i += 1
 
     splits = []
     for k in range(N_FOLDS):
@@ -190,8 +197,15 @@ def main():
     print(f"train/val : {len(trainval)}   locked test: {len(test)}")
     if test:
         print(f"  held out (never copied into imagesTr): {', '.join(test)}")
+    empty = []
     for k, s in enumerate(splits):
-        print(f"  fold {k}: train={len(s['train'])} val={len(s['val'])}")
+        n_bme = sum(1 for c in s["val"] if classes[c] == "bme")
+        print(f"  fold {k}: train={len(s['train'])} val={len(s['val'])} (val bme={n_bme})")
+        if not s["val"]:
+            empty.append(k)
+    if empty:
+        print(f"\n  !! fold(s) {empty} have no validation cases — too few cases for "
+              f"{N_FOLDS}-fold CV. Annotate more before trusting any fold metric.")
 
     if args.dry_run:
         print("\nDRY RUN — nothing written")

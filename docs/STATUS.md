@@ -33,7 +33,7 @@ Phases are defined in [PRD.md](PRD.md) §8.
 | **0** | **De-identification** | ✅ **done** — 107 cases, 13,818 images, PHI verified clean |
 | — | DICOM→NIfTI + primary-series picker | ✅ 107/107 converted, data/worklist.csv written |
 | **1** | **Annotation pipeline** | 🟡 **in progress — 1 case. The critical path.** |
-| — | nnU-Net dataset builder + training wrapper | ✅ written, **untested against real labels** |
+| — | nnU-Net dataset builder + training wrapper | ✅ **verified** against synthetic Slicer-format .seg.nrrd — geometry, splits, leak checks all pass |
 | 2 | Stage B — bone/marrow segmentation | ⬜ blocked on Phase 1 |
 | 3 | Stage C — BME segmentation | ⬜ |
 | 4 | Stage D anomaly + Stage E quantification | ⬜ |
