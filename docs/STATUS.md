@@ -27,7 +27,8 @@ Phases are defined in [PRD.md](PRD.md) §8.
 | — | Repo, docs, Thunder Stack scaffold, `ml/` package | ✅ done |
 | — | Dataset collection (107 cases) | ✅ done |
 | — | Header inventory ([DATASET.md](DATASET.md)) | ✅ done |
-| — | Local dev DB (Docker + seed) | ✅ done |
+| — | Local dev DB (Docker + seed) | ✅ done — **not yet run; Docker Desktop was down** |
+| — | Domain schema (patient→study→series→annotation/job/prediction/lesion, + pgvector) | ✅ migration generated, **not yet applied** |
 | **0** | **De-identification** | ✅ **done** — 107 cases, 13,818 images, PHI verified clean |
 | **1** | **Annotation pipeline** | 🟡 **in progress — 1 case. The critical path.** |
 | 2 | Stage B — bone/marrow segmentation | ⬜ blocked on Phase 1 |

@@ -8,6 +8,13 @@
       "when": 1783491805077,
       "tag": "0000_moaning_vampiro",
       "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "7",
+      "when": 1787713973799,
+      "tag": "0001_bme_domain_schema",
+      "breakpoints": true
     }
   ]
 }
