@@ -96,14 +96,25 @@ function waitHealthy(timeoutMs = 90_000) {
   return false;
 }
 
-/** True if nothing is listening on this host port. */
+/**
+ * True if nothing is listening on this host port.
+ *
+ * `exclusive: true` matters on Windows. Node sets SO_REUSEADDR by default, and
+ * Windows treats that as "allow binding a port someone else already has" —
+ * so a plain listen() succeeds against an occupied port and reports it free.
+ * That is how this probe originally cleared 5433 while another project's
+ * container was published on it, and docker then failed with
+ * "Bind for 0.0.0.0:5433 failed: port is already allocated".
+ *
+ * Docker's allocator is still the real authority, hence the retry in `up`.
+ */
 function isFree(port) {
   const r = spawnSync(process.execPath, [
     "-e",
     `const n=require('net');const s=n.createServer();` +
     `s.once('error',()=>process.exit(1));` +
     `s.once('listening',()=>s.close(()=>process.exit(0)));` +
-    `s.listen(${port},'0.0.0.0');`,
+    `s.listen({port:${port},host:'0.0.0.0',exclusive:true});`,
   ]);
   return r.status === 0;
 }
@@ -159,15 +170,36 @@ if (!dockerReady()) {
   );
 }
 
-const { port, reason } = choosePort();
+let { port, reason } = choosePort();
+
+// Probing the port is a hint, not a guarantee — another container can hold it
+// in a way the probe cannot see. Docker is the authority, so if it rejects the
+// bind, take the next port and try again.
+let started = false;
+for (let attempt = 0; attempt < 12 && !started; attempt++) {
+  say(`  port ${c.y}${port}${c.x} ${c.d}(${reason})${c.x}`);
+  process.env.BME_DB_PORT = String(port);
+
+  const r = compose(["up", "-d"], { quiet: true });
+  const out = `${r.stdout || ""}${r.stderr || ""}`;
+  if (r.status === 0) {
+    started = true;
+    break;
+  }
+  if (/port is already allocated|address already in use|bind for/i.test(out)) {
+    compose(["down"], { quiet: true }); // clear the half-created container
+    const next = port + 1;
+    if (next > PORT_TO) die(`No free port between ${PORT_FROM} and ${PORT_TO}.`);
+    port = next;
+    reason = "previous port was taken by another container";
+    continue;
+  }
+  process.stderr.write(out);
+  die("docker compose up failed — see the output above.");
+}
+if (!started) die("Could not find a port docker would accept.");
+
 const DATABASE_URL = urlFor(port);
-say(`  port ${c.y}${port}${c.x} ${c.d}(${reason})${c.x}`);
-
-// docker compose reads BME_DB_PORT for the host-side port mapping.
-process.env.BME_DB_PORT = String(port);
-
-const r = compose(["up", "-d"]);
-if (r.status !== 0) die("docker compose up failed — see the output above.");
 
 if (!waitHealthy()) {
   die('Postgres did not become healthy. Inspect with:\n  docker compose -f docker-compose.dev.yml logs db');

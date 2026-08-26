@@ -12,7 +12,8 @@ Last updated: **2026-08-26**
 
 Repo scaffolded, 107 cases collected (knee MRI, 47 BME / 60 non-BME), **de-identification
 run and verified** — `data/raw/` holds 13,818 scrubbed DICOM images under pseudonymous IDs.
-Local dev Postgres now starts with one command. Annotation has **just begun** (1 case).
+Local dev Postgres now starts with one command. Annotation has **just begun** (1 case). All 107 cases are converted to NIfTI with a primary
+series chosen — see `data/worklist.csv`.
 The critical path is annotation: get to 10 cases, measure inter-rater Dice, then train
 Stage B. Nothing is blocked on code.
 
@@ -27,9 +28,10 @@ Phases are defined in [PRD.md](PRD.md) §8.
 | — | Repo, docs, Thunder Stack scaffold, `ml/` package | ✅ done |
 | — | Dataset collection (107 cases) | ✅ done |
 | — | Header inventory ([DATASET.md](DATASET.md)) | ✅ done |
-| — | Local dev DB (Docker + seed) | ✅ done — **not yet run; Docker Desktop was down** |
-| — | Domain schema (patient→study→series→annotation/job/prediction/lesion, + pgvector) | ✅ migration generated, **not yet applied** |
+| — | Local dev DB (Docker + seed) | ✅ **verified running**, port 5434 |
+| — | Domain schema (+ pgvector 0.8.6) | ✅ **applied and verified** — 17 tables, HNSW indexes live |
 | **0** | **De-identification** | ✅ **done** — 107 cases, 13,818 images, PHI verified clean |
+| — | DICOM→NIfTI + primary-series picker | ✅ 107/107 converted, data/worklist.csv written |
 | **1** | **Annotation pipeline** | 🟡 **in progress — 1 case. The critical path.** |
 | 2 | Stage B — bone/marrow segmentation | ⬜ blocked on Phase 1 |
 | 3 | Stage C — BME segmentation | ⬜ |
@@ -83,7 +85,7 @@ pnpm dev
 
 `pnpm setup` = `db:up` + `migrate:deploy` + `db:seed`. Or double-click `start_db.cmd`.
 
-- Postgres runs in Docker (`bme-db`), published on **5433 by default**. A native Windows
+- Postgres runs in Docker (`bme-db`), published on **5433 by default (5434 on this machine — Sarvam holds 5433)**. A native Windows
   Postgres owns 5432 on at least one team machine. If 5433 is also busy the script probes
   upward to 5460, then remembers the choice as `BME_DB_PORT` in `.env`.
 - `pnpm db:down` stops it; **the volume survives**, so data comes back.
@@ -148,14 +150,14 @@ docs/ANNOTATION_SOP.md  how to annotate; read before touching Slicer
 CLAUDE.md               working rules, git conventions, PHI handling
 ml/scripts/inventory.py re-run the dataset inventory
 ml/scripts/deid.py      de-identification
+ml/scripts/convert.py   DICOM -> NIfTI + picks each case's primary series
 BME/, Non BME/, data/   gitignored, never committed
 ```
 
-## Commit log so far
+## Commit log
 
 ```
-11ad889  docs: inventory the collected dataset and drop t1 from the required inputs
-d98cff2  chore: scaffold thunder stack monorepo and ml pipeline structure
+git log --oneline
 ```
 
 ---
