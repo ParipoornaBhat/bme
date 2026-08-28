@@ -33,21 +33,9 @@ export default function RegisterPage() {
             </p>
           </div>
           <div className="rounded-2xl border border-border/50 bg-muted/40 p-3 font-mono text-xs text-primary font-bold">
-            npx create-thunder-app
+            bone marrow edema detection
           </div>
           <div className="flex flex-col sm:flex-row gap-3 pt-2">
-            <Link
-              href="/docs"
-              className="flex-1 py-2.5 px-4 rounded-xl bg-primary text-primary-foreground text-xs font-semibold hover:opacity-90 transition-all"
-            >
-              Explore Docs
-            </Link>
-            <Link
-              href="/docs/db-guide"
-              className="flex-1 py-2.5 px-4 rounded-xl border border-border bg-background text-foreground text-xs font-semibold hover:bg-accent transition-all"
-            >
-              DB Guide
-            </Link>
           </div>
         </div>
       </div>
@@ -93,7 +81,7 @@ export default function RegisterPage() {
           <h1 className="text-5xl font-bold tracking-tight text-foreground mb-6">
             Welcome to <br />
             <span className="text-transparent bg-clip-text bg-linear-to-r from-primary to-secondary">
-              THUNDER Stack
+              BME Detect
             </span>
           </h1>
           <p className="text-lg text-muted-foreground leading-relaxed">

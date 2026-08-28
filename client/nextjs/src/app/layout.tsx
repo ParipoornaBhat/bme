@@ -10,9 +10,9 @@ export const metadata: Metadata = {
   title: "BME Detect",
   description: "Explainable deep learning for bone marrow edema detection in MRI.",
   icons: {
-    icon: "/logos/favicon.png",
-    shortcut: "/logos/favicon.png",
-    apple: "/logos/favicon.png",
+    icon: "/logos/bme-mark.svg",
+    shortcut: "/logos/bme-mark.svg",
+    apple: "/logos/bme-mark.svg",
   },
 };
 

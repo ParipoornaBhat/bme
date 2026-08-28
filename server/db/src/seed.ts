@@ -113,114 +113,11 @@ async function seed() {
       }
     }
 
-    console.log("  Seeding trial users...");
-    const adminEmail = "admin@thunder.com";
-    
-    // Clean up existing trial admin user to ensure accounts table is populated correctly
-    const existingAdmin = await db.query.user.findFirst({
-      where: eq(schema.user.email, adminEmail),
-    });
-    if (existingAdmin) {
-      await db.delete(schema.account).where(eq(schema.account.userId, existingAdmin.id));
-      await db.delete(schema.userRole).where(eq(schema.userRole.userId, existingAdmin.id));
-      await db.delete(schema.user).where(eq(schema.user.id, existingAdmin.id));
-      console.log(`    - Cleaned up old admin user: ${adminEmail}`);
-    }
+    // The Thunder Stack template seeded admin@thunder.com / user@thunder.com with
+    // passwords printed in its own login page. Removed: this database is shared and
+    // reachable from anywhere, and a published password is a way in. The four team
+    // accounts below are the only credentials.
 
-    const adminUserId = crypto.randomUUID();
-    const [insertedAdmin] = await db.insert(schema.user).values({
-      id: adminUserId,
-      name: "Trial Admin",
-      email: adminEmail,
-      emailVerified: true,
-      createdAt: new Date(),
-      updatedAt: new Date(),
-    }).returning();
-    const adminUser = insertedAdmin;
-    console.log(`    + Created user: ${adminEmail}`);
-
-    const adminPasswordHash = await hashPassword("AdminPassword123");
-    await db.insert(schema.account).values({
-      id: crypto.randomUUID(),
-      accountId: adminEmail,
-      providerId: "credential",
-      userId: adminUserId,
-      password: adminPasswordHash,
-      createdAt: new Date(),
-      updatedAt: new Date(),
-    });
-    console.log(`    + Created account credentials for ${adminEmail}`);
-
-    // Ensure admin user is linked to all roles (both admin and user)
-    const dbAdminRole = seededRoles["admin"];
-    const dbUserRole = seededRoles["user"];
-    if (adminUser && dbAdminRole && dbUserRole) {
-      await db.insert(schema.userRole).values({
-        userId: adminUser.id,
-        roleId: dbAdminRole.id,
-        isActive: true,
-      });
-      console.log(`    + Linked user ${adminEmail} to role admin (Active)`);
-
-      await db.insert(schema.userRole).values({
-        userId: adminUser.id,
-        roleId: dbUserRole.id,
-        isActive: false,
-      });
-      console.log(`    + Linked user ${adminEmail} to role user (Inactive)`);
-    }
-
-    const userEmail = "user@thunder.com";
-    
-    // Clean up existing trial standard user
-    const existingUser = await db.query.user.findFirst({
-      where: eq(schema.user.email, userEmail),
-    });
-    if (existingUser) {
-      await db.delete(schema.account).where(eq(schema.account.userId, existingUser.id));
-      await db.delete(schema.userRole).where(eq(schema.userRole.userId, existingUser.id));
-      await db.delete(schema.user).where(eq(schema.user.id, existingUser.id));
-      console.log(`    - Cleaned up old standard user: ${userEmail}`);
-    }
-
-    const normalUserId = crypto.randomUUID();
-    const [insertedNormal] = await db.insert(schema.user).values({
-      id: normalUserId,
-      name: "Trial User",
-      email: userEmail,
-      emailVerified: true,
-      createdAt: new Date(),
-      updatedAt: new Date(),
-    }).returning();
-    const normalUser = insertedNormal;
-    console.log(`    + Created user: ${userEmail}`);
-
-    const userPasswordHash = await hashPassword("UserPassword123");
-    await db.insert(schema.account).values({
-      id: crypto.randomUUID(),
-      accountId: userEmail,
-      providerId: "credential",
-      userId: normalUserId,
-      password: userPasswordHash,
-      createdAt: new Date(),
-      updatedAt: new Date(),
-    });
-    console.log(`    + Created account credentials for ${userEmail}`);
-
-    // Ensure normal user is linked to user role
-    if (normalUser && dbUserRole) {
-      await db.insert(schema.userRole).values({
-        userId: normalUser.id,
-        roleId: dbUserRole.id,
-        isActive: true,
-      });
-      console.log(`    + Linked user ${userEmail} to role user`);
-    }
-
-    // ---- BME project team ----
-    // Local development accounts. Credential login, one shared password so the
-    // team can sign in on each other's machines without coordinating secrets.
-    // Dev only — never seed these against a deployed database.
     console.log("  Seeding BME team accounts...");
     const teamPasswordHash = await hashPassword(TEAM_PASSWORD);
 
@@ -256,10 +153,10 @@ async function seed() {
 
       // Everyone on the team is an admin — it is a 4-person project, not a
       // multi-tenant product. Revisit if the platform is ever demoed externally.
-      if (dbAdminRole) {
+      if (adminRole) {
         await db.insert(schema.userRole).values({
           userId: memberId,
-          roleId: dbAdminRole.id,
+          roleId: adminRole.id,
           isActive: true,
         });
       }

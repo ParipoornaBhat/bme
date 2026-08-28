@@ -1,0 +1,458 @@
+<title>Bone Marrow Edema Detection</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Serif:ital,wght@0,400;1,400&display=swap">
+
+<style>
+/* Radiology reading room: dark is the natural home, light is fully designed.
+   Colour is reserved for signal — the way a viewer reserves it for segments. */
+:root{
+  --bg:#eef1f4; --panel:#ffffff; --panel-2:#e4e9ee; --line:#ccd5dd;
+  --ink:#0f151b; --dim:#54626f; --faint:#7d8b98;
+  --accent:#0f5f73; --accent-soft:#d3e9ee;
+  --bone:#a8925f; --lesion:#c0392b; --unsure:#78808c;
+  --ok:#146b48; --ok-soft:#d5ebe0;
+  --wait:#8a5a09; --wait-soft:#f6e8cc;
+  --stop:#a32a1c; --stop-soft:#f8ddd8;
+  --film:#0a0e12;
+  --r:12px;
+}
+@media (prefers-color-scheme:dark){
+  :root:not([data-theme="light"]){
+    --bg:#0b0f13; --panel:#141a21; --panel-2:#1c242d; --line:#2a343f;
+    --ink:#e9eef4; --dim:#9aa8b6; --faint:#6d7b89;
+    --accent:#4fbdd4; --accent-soft:#0e2f38;
+    --bone:#d9c68d; --lesion:#f2705c; --unsure:#8b939f;
+    --ok:#54c894; --ok-soft:#0e2a1f;
+    --wait:#e0a94a; --wait-soft:#2e2412;
+    --stop:#f0705c; --stop-soft:#301513;
+    --film:#05080b;
+  }
+}
+:root[data-theme="dark"]{
+  --bg:#0b0f13; --panel:#141a21; --panel-2:#1c242d; --line:#2a343f;
+  --ink:#e9eef4; --dim:#9aa8b6; --faint:#6d7b89;
+  --accent:#4fbdd4; --accent-soft:#0e2f38;
+  --bone:#d9c68d; --lesion:#f2705c; --unsure:#8b939f;
+  --ok:#54c894; --ok-soft:#0e2a1f;
+  --wait:#e0a94a; --wait-soft:#2e2412;
+  --stop:#f0705c; --stop-soft:#301513;
+  --film:#05080b;
+}
+*{box-sizing:border-box}
+body{
+  margin:0;background:var(--bg);color:var(--ink);
+  font-family:"IBM Plex Sans",-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
+  font-size:16px;line-height:1.6;-webkit-font-smoothing:antialiased;
+}
+.mono{font-family:"IBM Plex Mono",ui-monospace,Menlo,monospace;font-variant-numeric:tabular-nums}
+code{font-family:"IBM Plex Mono",ui-monospace,monospace;font-size:.86em;
+  background:var(--panel-2);padding:.12em .4em;border-radius:4px}
+
+.shell{max-width:1120px;margin:0 auto;padding:0 22px 90px}
+.rule{height:1px;background:var(--line);margin:34px 0}
+
+/* ---- masthead ---- */
+header{padding:56px 0 30px}
+.kicker{font-family:"IBM Plex Mono",monospace;font-size:.7rem;font-weight:600;
+  letter-spacing:.16em;text-transform:uppercase;color:var(--accent);margin-bottom:14px}
+h1{font-size:clamp(2rem,5vw,3rem);line-height:1.08;font-weight:600;margin:0 0 16px;
+  letter-spacing:-.025em;text-wrap:balance;max-width:16ch}
+.lede{font-family:"IBM Plex Serif",Georgia,serif;font-size:1.12rem;line-height:1.62;
+  color:var(--dim);max-width:62ch;margin:0}
+.lede b{color:var(--ink);font-weight:400;font-style:italic}
+.meta{display:flex;flex-wrap:wrap;gap:10px 22px;margin-top:22px;
+  font-size:.8rem;color:var(--faint)}
+.meta span{display:inline-flex;align-items:center;gap:6px}
+
+/* ---- headline metrics ---- */
+.figs{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px;margin-top:32px}
+.fig{background:var(--panel);border:1px solid var(--line);border-radius:var(--r);padding:16px 18px}
+.fig .n{font-size:1.85rem;font-weight:600;letter-spacing:-.03em;line-height:1.1}
+.fig .l{font-size:.74rem;color:var(--faint);margin-top:5px;line-height:1.35}
+.fig.hot .n{color:var(--lesion)}
+.fig.good .n{color:var(--ok)}
+
+/* ---- sections ---- */
+section{padding-top:14px}
+h2{font-size:1.4rem;font-weight:600;letter-spacing:-.018em;margin:0 0 6px;
+  display:flex;align-items:baseline;gap:12px}
+h2 .idx{font-family:"IBM Plex Mono",monospace;font-size:.72rem;color:var(--accent);
+  font-weight:600;letter-spacing:.08em}
+h3{font-size:.76rem;font-weight:600;text-transform:uppercase;letter-spacing:.11em;
+  color:var(--faint);margin:26px 0 10px}
+.sub{color:var(--dim);max-width:66ch;margin:0 0 20px}
+p{max-width:66ch}
+
+/* ---- tables ---- */
+.tw{overflow-x:auto;border:1px solid var(--line);border-radius:var(--r);background:var(--panel)}
+table{width:100%;border-collapse:collapse;font-size:.88rem;min-width:440px}
+th{text-align:left;font-size:.68rem;text-transform:uppercase;letter-spacing:.09em;
+  color:var(--faint);font-weight:600;padding:12px 16px;border-bottom:1px solid var(--line)}
+td{padding:11px 16px;border-bottom:1px solid var(--line);vertical-align:top}
+tr:last-child td{border-bottom:none}
+td.n,th.n{text-align:right;font-family:"IBM Plex Mono",monospace;font-variant-numeric:tabular-nums}
+td strong{font-weight:600}
+
+/* ---- pills ---- */
+.pill{display:inline-block;font-size:.68rem;font-weight:600;padding:3px 9px;border-radius:20px;
+  letter-spacing:.03em;white-space:nowrap}
+.p-ok{background:var(--ok-soft);color:var(--ok)}
+.p-wait{background:var(--wait-soft);color:var(--wait)}
+.p-stop{background:var(--stop-soft);color:var(--stop)}
+
+/* ---- callout ---- */
+.note{background:var(--panel);border:1px solid var(--line);border-left:3px solid var(--accent);
+  border-radius:var(--r);padding:16px 20px;margin:20px 0}
+.note.warn{border-left-color:var(--lesion)}
+.note p{margin:0;font-size:.92rem;color:var(--dim);max-width:70ch}
+.note p+p{margin-top:9px}
+.note b{color:var(--ink)}
+
+/* ---- pipeline diagram ---- */
+.film{background:var(--film);border:1px solid var(--line);border-radius:var(--r);
+  padding:24px 20px;margin:22px 0;overflow-x:auto}
+.film svg{display:block;margin:0 auto;min-width:600px}
+
+/* ---- feature cards ---- */
+.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(255px,1fr));gap:12px}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:var(--r);padding:17px 19px}
+.card h4{margin:0 0 4px;font-size:.95rem;font-weight:600}
+.card .path{font-family:"IBM Plex Mono",monospace;font-size:.72rem;color:var(--accent);
+  margin-bottom:9px}
+.card p{margin:0;font-size:.85rem;color:var(--dim);max-width:none}
+
+/* ---- ordered steps ---- */
+ol.steps{list-style:none;counter-reset:s;padding:0;margin:0;display:grid;gap:9px}
+ol.steps li{counter-increment:s;background:var(--panel);border:1px solid var(--line);
+  border-radius:var(--r);padding:14px 18px 14px 52px;position:relative;font-size:.92rem}
+ol.steps li::before{content:counter(s);position:absolute;left:16px;top:13px;
+  font-family:"IBM Plex Mono",monospace;font-size:.78rem;font-weight:600;color:var(--accent);
+  background:var(--accent-soft);width:22px;height:22px;border-radius:6px;
+  display:grid;place-items:center}
+ol.steps li b{font-weight:600}
+ol.steps li span{display:block;color:var(--dim);font-size:.86rem;margin-top:3px}
+
+ul.plain{padding-left:18px;margin:0;color:var(--dim);font-size:.9rem}
+ul.plain li{margin-bottom:6px;max-width:66ch}
+ul.plain li b{color:var(--ink);font-weight:600}
+
+footer{margin-top:52px;padding-top:20px;border-top:1px solid var(--line);
+  font-size:.78rem;color:var(--faint)}
+.toggle{position:fixed;top:14px;right:14px;background:var(--panel);border:1px solid var(--line);
+  color:var(--dim);border-radius:8px;padding:7px 11px;font-size:.72rem;cursor:pointer;
+  font-family:inherit;z-index:20}
+.toggle:hover{color:var(--ink)}
+.toggle:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+@media(prefers-reduced-motion:reduce){*{transition:none!important;animation:none!important}}
+</style>
+
+<button class="toggle" onclick="tog()">Theme</button>
+
+<div class="shell">
+
+<header>
+  <div class="kicker">Final year project &middot; CSE, NMAMIT</div>
+  <h1>Bone marrow edema detection in MRI</h1>
+  <p class="lede">Two pipelines run side by side. The <b>2D classifier works and has real
+  cross-validated numbers</b> — they are weak, and this page says so plainly. The
+  <b>3D segmentation system is fully built but has never trained</b>, because it needs
+  annotations that do not exist yet.</p>
+  <div class="meta">
+    <span class="mono">107 cases</span>
+    <span class="mono">20 commits</span>
+    <span class="mono">Updated 2026-08-28</span>
+    <span>Elvin &middot; Paripoorna &middot; Reegan &middot; Aditi</span>
+  </div>
+
+  <div class="figs">
+    <div class="fig"><div class="n mono">107</div><div class="l">usable cases<br>47 BME / 60 healthy</div></div>
+    <div class="fig good"><div class="n mono">100%</div><div class="l">have the edema-sensitive sequence</div></div>
+    <div class="fig hot"><div class="n mono">16%</div><div class="l">have T1 — this changed the design</div></div>
+    <div class="fig"><div class="n mono">0.665</div><div class="l">2D case-level AUC<br>weak, see results</div></div>
+    <div class="fig hot"><div class="n mono">0</div><div class="l">annotations done<br>the only blocker</div></div>
+  </div>
+</header>
+
+<div class="rule"></div>
+
+<section>
+  <h2><span class="idx">01</span> The dataset</h2>
+  <p class="sub">Knee MRI from three scanners across two vendors. Collected, de-identified,
+  converted and indexed.</p>
+
+  <div class="tw"><table>
+    <tr><th>Property</th><th>Value</th></tr>
+    <tr><td>Cases</td><td><strong>107 usable</strong> — 47 BME, 60 non-BME (1 archive unreadable)</td></tr>
+    <tr><td>Region</td><td>Knee throughout — no mixed-joint problem</td></tr>
+    <tr><td>Scanners</td><td>UIH uMR 780, Siemens Avanto, Siemens Symphony</td></tr>
+    <tr><td>Edema sequence</td><td>Fat-suppressed PD/T2/STIR — present on <strong>107 / 107</strong></td></tr>
+    <tr><td>T1 sequence</td><td>Only <strong>18 / 107</strong>, and just 5 of 47 BME cases</td></tr>
+    <tr><td>Storage</td><td>3.0 GB source &rarr; 5.7 GB generated</td></tr>
+  </table></div>
+
+  <div class="note warn">
+    <p><b>The finding that changed the model.</b> The original plan used T1 as a second input
+    channel, to tell real edema apart from lookalikes like red marrow and cysts. Only 16% of
+    cases have one — and just 5 of 47 positives.</p>
+    <p>So the model is <b>single-channel</b>, and specificity has to come from elsewhere:
+    a left–right mirrored copy (asymmetry is the earliest sign of edema) and an anomaly
+    residual from a model trained only on healthy marrow. Neither needs a second scan.</p>
+  </div>
+
+  <h3>Patient data</h3>
+  <p style="font-size:.92rem;color:var(--dim)">Every filename is pseudonymous. 108 archives and
+  121 images renamed to <code>BME-001.zip</code> / <code>BME-2D-004.jpeg</code>; PHI stripped from
+  13,818 DICOM headers. No patient name exists anywhere on disk except three mapping files, which
+  are gitignored and never leave the local machine. Nothing patient-identifying is in the
+  repository or the cloud database.</p>
+</section>
+
+<div class="rule"></div>
+
+<section>
+  <h2><span class="idx">02</span> How the model works</h2>
+  <p class="sub">Two stages, in sequence. This is the single most important design decision
+  in the project.</p>
+
+  <div class="film">
+    <svg viewBox="0 0 720 168" role="img" aria-label="Pipeline: scan, find bone, find edema inside bone, then measure">
+      <defs>
+        <marker id="ar" markerWidth="9" markerHeight="9" refX="7" refY="3.2" orient="auto">
+          <path d="M0,0 L7,3.2 L0,6.4 z" fill="#5a6875"/>
+        </marker>
+      </defs>
+      <g font-family="IBM Plex Sans, sans-serif">
+        <rect x="6" y="52" width="126" height="62" rx="9" fill="#1a222b" stroke="#33404d"/>
+        <text x="69" y="80" text-anchor="middle" fill="#e9eef4" font-size="14" font-weight="600">MRI scan</text>
+        <text x="69" y="97" text-anchor="middle" fill="#8b98a6" font-size="11">fat-suppressed</text>
+        <line x1="138" y1="83" x2="172" y2="83" stroke="#5a6875" stroke-width="1.6" marker-end="url(#ar)"/>
+
+        <rect x="178" y="52" width="150" height="62" rx="9" fill="#1a222b" stroke="#d9c68d" stroke-width="1.6"/>
+        <text x="253" y="74" text-anchor="middle" fill="#d9c68d" font-size="10" font-weight="600" letter-spacing="1.4">STAGE B</text>
+        <text x="253" y="92" text-anchor="middle" fill="#e9eef4" font-size="14" font-weight="600">Find the bone</text>
+        <text x="253" y="107" text-anchor="middle" fill="#8b98a6" font-size="10.5">marrow cavity mask</text>
+        <line x1="334" y1="83" x2="368" y2="83" stroke="#5a6875" stroke-width="1.6" marker-end="url(#ar)"/>
+
+        <rect x="374" y="52" width="176" height="62" rx="9" fill="#1a222b" stroke="#f2705c" stroke-width="1.6"/>
+        <text x="462" y="74" text-anchor="middle" fill="#f2705c" font-size="10" font-weight="600" letter-spacing="1.4">STAGE C</text>
+        <text x="462" y="92" text-anchor="middle" fill="#e9eef4" font-size="14" font-weight="600">Find edema</text>
+        <text x="462" y="107" text-anchor="middle" fill="#8b98a6" font-size="10.5">only inside that mask</text>
+        <line x1="556" y1="83" x2="590" y2="83" stroke="#5a6875" stroke-width="1.6" marker-end="url(#ar)"/>
+
+        <rect x="596" y="52" width="118" height="62" rx="9" fill="#1a222b" stroke="#33404d"/>
+        <text x="655" y="80" text-anchor="middle" fill="#e9eef4" font-size="14" font-weight="600">Measure</text>
+        <text x="655" y="97" text-anchor="middle" fill="#8b98a6" font-size="10.5">mm&sup3; + 3D shape</text>
+
+        <text x="462" y="141" text-anchor="middle" fill="#6d7b89" font-size="11.5" font-style="italic"
+              font-family="IBM Plex Serif, Georgia, serif">Stage C never sees a voxel outside the bone</text>
+      </g>
+    </svg>
+  </div>
+
+  <p>Because Stage C only ever looks inside Stage B's mask, mistaking muscle or joint fluid for
+  edema is <strong>structurally impossible</strong> rather than something the network has to learn.
+  It also solves the human problem: the computer outlines the bone, so a non-radiologist annotator
+  only has to judge whether marrow looks brighter than it should.</p>
+</section>
+
+<div class="rule"></div>
+
+<section>
+  <h2><span class="idx">03</span> What is used</h2>
+  <p class="sub">Every choice, and why it was made.</p>
+
+  <div class="tw"><table>
+    <tr><th>Layer</th><th>Tool</th><th>Why</th></tr>
+    <tr><td>Web app</td><td><strong>Next.js 15</strong></td><td>Thunder Stack</td></tr>
+    <tr><td>API</td><td><strong>Hono</strong>, on Node</td><td>Was Cloudflare <code>workerd</code> — it cannot connect to managed Postgres</td></tr>
+    <tr><td>Database</td><td><strong>Supabase</strong> Postgres 17 + pgvector</td><td>Shared by all four teammates</td></tr>
+    <tr><td>Auth</td><td>Better Auth</td><td>Credential login, four accounts seeded</td></tr>
+    <tr><td>ML runtime</td><td>PyTorch 2.13 (CPU)</td><td>No CUDA build for Python 3.14 yet</td></tr>
+    <tr><td>2D models</td><td>ResNet 18/34/50, EfficientNet, DenseNet, ConvNeXt, MobileNet</td><td>All ship with torchvision — switching models needs no install</td></tr>
+    <tr><td>3D model</td><td><strong>nnU-Net v2</strong></td><td>A self-configuring U-Net. CNNs beat transformers at this data scale</td></tr>
+    <tr><td>Imaging</td><td>SimpleITK, nibabel, pydicom, pynrrd</td><td>DICOM &rarr; NIfTI &rarr; NRRD</td></tr>
+    <tr><td>Viewer</td><td><code>nifti-reader-js</code> + Canvas</td><td>Three-plane painting in the browser</td></tr>
+  </table></div>
+
+  <div class="note">
+    <p><b>U-Net and CNN are not alternatives.</b> Everything here is a CNN — that is the family,
+    not a specific model. ResNet and MobileNet are <b>classifiers</b> ("is there edema?").
+    U-Net is a <b>segmenter</b> ("where exactly?"). Different jobs, so different models.
+    The 3D system is nnU-Net, a self-configuring U-Net.</p>
+  </div>
+</section>
+
+<div class="rule"></div>
+
+<section>
+  <h2><span class="idx">04</span> What is built</h2>
+  <p class="sub">The whole loop runs in the browser — annotate, train, inspect, monitor.</p>
+
+  <div class="cards">
+    <div class="card">
+      <h4>Annotation workspace</h4>
+      <div class="path">/annotate</div>
+      <p>Case list, three-plane viewer, brush and eraser, three correctly-named segments,
+      &ldquo;only inside bone&rdquo; masking, undo. Saves <code>.seg.nrrd</code> automatically —
+      no file dragging, no folder picking.</p>
+    </div>
+    <div class="card">
+      <h4>Training control</h4>
+      <div class="path">/training</div>
+      <p>Pick from seven models, set folds and epochs, start and stop, live log, progress bar
+      with time remaining, run history and an AUC chart.</p>
+    </div>
+    <div class="card">
+      <h4>Results</h4>
+      <div class="path">/results</div>
+      <p>Separate 2D and 3D tabs. Case-level and slice-level metrics, confusion matrix,
+      per-fold breakdown.</p>
+    </div>
+    <div class="card">
+      <h4>Storage</h4>
+      <div class="path">/storage</div>
+      <p>Size breakdown by category and disk usage — scoped to this project only.</p>
+    </div>
+  </div>
+
+  <h3>Working as a team of four</h3>
+  <p>The imaging never moves through the app — it is patient data, shared by hand. The
+  <strong>database holds the ledger</strong>: who annotated which case, when, and how large the
+  segments were.</p>
+  <ul class="plain">
+    <li>Saving records <b>you</b> as the annotator.</li>
+    <li>A case someone else finished, with no local file, raises an amber
+      <b>&ldquo;your local copy is behind&rdquo;</b> banner naming who to ask.</li>
+    <li><b>Several people can annotate the same case.</b> Each save writes a canonical file
+      <em>and</em> a per-annotator copy — otherwise the last person to save would erase everyone
+      before them, and inter-rater agreement could never be measured.</li>
+    <li>Work is pre-assigned: ~26 cases each, the good thin-slice cases spread evenly,
+      and 5 cases deliberately shared by all four.</li>
+  </ul>
+
+  <h3>Pipeline scripts</h3>
+  <p style="font-size:.9rem;color:var(--dim)">Twelve scripts cover header inspection,
+  de-identification, stable case IDs, renaming, DICOM&rarr;NIfTI conversion, 2D slice extraction,
+  2D training, annotation validation, nnU-Net dataset building, and 3D training. Every script that
+  writes has a dry-run and refuses to overwrite without <code>--force</code>.</p>
+</section>
+
+<div class="rule"></div>
+
+<section>
+  <h2><span class="idx">05</span> Results</h2>
+  <p class="sub">2D classifier, five folds, split by patient so no case appears in both training
+  and validation.</p>
+
+  <div class="tw"><table>
+    <tr><th>Metric</th><th class="n">Case level</th><th>Reading</th></tr>
+    <tr><td>Accuracy</td><td class="n">64.5%</td><td></td></tr>
+    <tr><td>F1</td><td class="n">0.587</td><td></td></tr>
+    <tr><td><strong>ROC AUC</strong></td><td class="n"><strong>0.665</strong></td><td>0.5 would be random guessing</td></tr>
+  </table></div>
+
+  <div class="note warn">
+    <p><b>This is weak, and worth presenting honestly.</b> Two reasons, both diagnosed:</p>
+    <p><b>Noisy labels.</b> The label is per <em>case</em>, applied to every slice. A BME patient's
+    scan contains many slices with no edema visible, and all of them are labelled BME. Part of the
+    task is genuinely unlearnable.</p>
+    <p><b>Overfitting.</b> Training loss fell from 0.51 to 0.03 over six epochs while validation
+    accuracy stayed near 60% — it stopped learning the disease around epoch three and started
+    memorising. Three to four epochs should score <em>better</em>.</p>
+    <p>A weak baseline you can explain defends better than a strong number you cannot. It is also
+    precisely the argument for the 3D system: voxel-level annotation removes the label noise.</p>
+  </div>
+
+  <h3>3D segmentation</h3>
+  <p style="color:var(--dim)"><strong>No results.</strong> Zero annotations, so it has never
+  trained. The pipeline is written and verified against real 3D Slicer output — geometry, splits
+  and leakage checks all pass — it is only waiting on labelled cases.</p>
+
+  <h3>Realistic targets</h3>
+  <div class="tw"><table>
+    <tr><th>Metric</th><th class="n">Target</th></tr>
+    <tr><td>Bone segmentation Dice</td><td class="n">0.92</td></tr>
+    <tr><td><strong>BME lesion Dice</strong></td><td class="n"><strong>0.60 – 0.72</strong></td></tr>
+    <tr><td>Lesion sensitivity</td><td class="n">0.80 at &le;1.5 FP/case</td></tr>
+    <tr><td>Case-level AUC</td><td class="n">0.90</td></tr>
+  </table></div>
+  <p style="font-size:.9rem;color:var(--dim);margin-top:14px">Published fully-automated BME work
+  reports sensitivity of 0.58–0.83 on <em>larger</em> datasets. Dice 0.62 with sensitivity 0.80 is
+  a publishable result. Chasing 0.90 on lesions at this data scale would indicate a leak, not a
+  good model.</p>
+</section>
+
+<div class="rule"></div>
+
+<section>
+  <h2><span class="idx">06</span> What happens next</h2>
+  <p class="sub">In order. Each step feeds the one after it.</p>
+
+  <ol class="steps">
+    <li><b>Re-run ResNet-18 properly</b> — five folds, three to four epochs.
+      <span>The app currently shows a throwaway MobileNet smoke test, not a real result.</span></li>
+    <li><b>Annotate 10 cases</b> in the browser.
+      <span>The critical path. Everything else waits on this.</span></li>
+    <li><b>Measure inter-rater agreement</b> on the 5 shared cases.
+      <span>That number is the model's realistic ceiling and makes every later result interpretable.</span></li>
+    <li><b>Train Stage B</b> — bone segmentation.
+      <span>Should clear Dice 0.90 easily. If it does not, the data pipeline is broken, not the model.</span></li>
+    <li><b>Train Stage C</b> — edema, then add the mirror and anomaly channels as an ablation.</li>
+    <li><b>Quantification</b> — lesion volume in mm&sup3; and a 3D surface.</li>
+    <li><b>Explainability</b> — uncertainty maps and a per-lesion evidence table.</li>
+  </ol>
+
+  <div class="note">
+    <p><b>Ask the guide now — these have lead time.</b></p>
+    <p>Can a radiologist review ~20 annotations? It decides whether you claim expert-validated or
+    student-labelled ground truth. &middot; Can the data leave the hospital network? It decides
+    whether &ldquo;cloud-enabled&rdquo; survives in the synopsis. &middot; Are the
+    <code>.docx</code> files found in five archives radiology reports? If so they are patient data
+    <em>and</em> a free source of weak labels.</p>
+  </div>
+</section>
+
+<div class="rule"></div>
+
+<section>
+  <h2><span class="idx">07</span> Gaps and known issues</h2>
+
+  <div class="tw"><table>
+    <tr><th>Item</th><th>Status</th><th>Impact</th></tr>
+    <tr><td><strong>Nobody has painted with the annotation tool yet</strong></td>
+        <td><span class="pill p-stop">Untested</span></td>
+        <td>The save path is verified end to end; the drawing experience is unknown</td></tr>
+    <tr><td>2D mask drawing</td><td><span class="pill p-wait">Not built</span></td>
+        <td>The 2D model needs no drawing — its label is the folder it came from</td></tr>
+    <tr><td>Reset / delete training runs from the UI</td><td><span class="pill p-wait">Not built</span></td><td>Minor</td></tr>
+    <tr><td>3D training controls</td><td><span class="pill p-wait">Not built</span></td><td>Nothing to train yet</td></tr>
+    <tr><td>Grad-CAM heatmaps in the UI</td><td><span class="pill p-wait">Not built</span></td>
+        <td>The &ldquo;explainable&rdquo; half of the synopsis</td></tr>
+    <tr><td>PyTorch is CPU-only</td><td><span class="pill p-wait">Blocked</span></td>
+        <td>Five folds took ~45 min. The RTX 4050 is unused — no CUDA wheel for Python 3.14</td></tr>
+    <tr><td>One archive contains no DICOM</td><td><span class="pill p-wait">Open</span></td><td>&minus;1 case</td></tr>
+    <tr><td>17 non-BME cases have a PNG but no volume</td><td><span class="pill p-wait">Open</span></td><td>Re-export or drop</td></tr>
+    <tr><td>~10:1 voxel anisotropy</td><td><span class="pill p-ok">Handled</span></td>
+        <td>3D surfaces need smoothing or they look terraced</td></tr>
+    <tr><td>Two demo accounts with published passwords</td><td><span class="pill p-wait">Open</span></td>
+        <td>Harmless locally; remove before any deployment</td></tr>
+  </table></div>
+</section>
+
+<footer>
+  Generated from <span class="mono">docs/SUMMARY.md</span>. Full detail lives in
+  <span class="mono">docs/STATUS.md</span>, <span class="mono">docs/PRD.md</span>,
+  <span class="mono">docs/DATASET.md</span> and <span class="mono">docs/ANNOTATION_SOP.md</span>.
+  No patient-identifying information appears on this page.
+</footer>
+
+</div>
+
+<script>
+function tog(){
+  const r=document.documentElement;
+  const dark=getComputedStyle(r).getPropertyValue('--bg').trim().startsWith('#0b');
+  r.setAttribute('data-theme',dark?'light':'dark');
+}
+</script>

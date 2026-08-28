@@ -1,0 +1,39 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="BME Detect">
+  <!--
+    An axial bone cross-section, which is what the project actually looks at.
+
+      outer ring   cortical bone — black on every MRI sequence, and the boundary
+                   that the whole cascade depends on
+      inner disc   marrow cavity
+      hot blob     the edema, off-centre and soft-edged the way real lesions are
+      tick marks   the three-plane viewer
+
+    Reads at 16px: a ring with a bright spot inside.
+  -->
+  <defs>
+    <radialGradient id="lesion" cx="50%" cy="50%" r="50%">
+      <stop offset="0%" stop-color="#ff8a6b"/>
+      <stop offset="55%" stop-color="#f2553a"/>
+      <stop offset="100%" stop-color="#d13a20" stop-opacity="0.55"/>
+    </radialGradient>
+  </defs>
+
+  <!-- marrow cavity -->
+  <circle cx="32" cy="32" r="23" fill="#2b333d"/>
+
+  <!-- cortical rim -->
+  <circle cx="32" cy="32" r="23" fill="none" stroke="#0d1116" stroke-width="6"/>
+  <circle cx="32" cy="32" r="26.5" fill="none" stroke="#5d6b7a" stroke-width="1.5" opacity="0.5"/>
+
+  <!-- the lesion -->
+  <ellipse cx="38" cy="27" rx="10.5" ry="8.5" fill="url(#lesion)" transform="rotate(-18 38 27)"/>
+  <ellipse cx="38" cy="27" rx="5.5" ry="4.2" fill="#ffd2c2" opacity="0.75" transform="rotate(-18 38 27)"/>
+
+  <!-- three-plane ticks -->
+  <g stroke="#5d6b7a" stroke-width="2" stroke-linecap="round" opacity="0.85">
+    <line x1="32" y1="1.5" x2="32" y2="6.5"/>
+    <line x1="32" y1="57.5" x2="32" y2="62.5"/>
+    <line x1="1.5" y1="32" x2="6.5" y2="32"/>
+    <line x1="57.5" y1="32" x2="62.5" y2="32"/>
+  </g>
+</svg>

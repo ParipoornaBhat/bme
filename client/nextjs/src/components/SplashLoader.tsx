@@ -107,8 +107,8 @@ export function SplashLoader() {
           inset: 0;
           pointer-events: none;
           z-index: 10;
-          -webkit-mask-image: url('/logos/thunder.png');
-          mask-image: url('/logos/thunder.png');
+          -webkit-mask-image: url('/logos/bme-mark.svg');
+          mask-image: url('/logos/bme-mark.svg');
           -webkit-mask-size: contain;
           mask-size: contain;
           -webkit-mask-repeat: no-repeat;
@@ -184,8 +184,8 @@ export function SplashLoader() {
       `}</style>
       <div className="logo-wrapper">
         <Image
-          src="/logos/thunder.png"
-          alt="THUNDER Stack Logo"
+          src="/logos/bme-mark.svg"
+          alt="BME Detect logo"
           width={200}
           height={200}
           className="logo-img"

@@ -63,8 +63,8 @@ export function SiteHeader() {
           >
             <div className="relative h-9 w-9 sm:h-11 sm:w-11 shrink-0">
               <Image
-                src="/logos/thunder.png"
-                alt="THUNDER Stack Logo"
+                src="/logos/bme-mark.svg"
+                alt="BME Detect logo"
                 fill
                 priority
                 sizes="44px"
@@ -72,33 +72,12 @@ export function SiteHeader() {
               />
             </div>
             <span className="text-lg sm:text-xl font-extrabold tracking-tight text-transparent bg-clip-text bg-linear-to-r from-primary to-secondary">
-              THUNDER Stack
+              BME Detect
             </span>
           </Link>
 
           {/* Navigation Links */}
           <nav className="hidden md:flex items-center gap-1 text-sm font-medium">
-            <Link
-              href="/docs"
-              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-muted-foreground hover:text-foreground hover:bg-accent/50 transition-all"
-            >
-              <BookOpen className="h-4 w-4 text-primary" />
-              Docs
-            </Link>
-            <Link
-              href="/docs/db-guide"
-              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-muted-foreground hover:text-foreground hover:bg-accent/50 transition-all"
-            >
-              <Database className="h-4 w-4 text-secondary" />
-              DB Guide
-            </Link>
-            <Link
-              href="/docs/deployment-guide"
-              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-muted-foreground hover:text-foreground hover:bg-accent/50 transition-all"
-            >
-              <Cloud className="h-4 w-4 text-sky-500" />
-              Deploy Guide
-            </Link>
           </nav>
         </div>
 
@@ -106,27 +85,6 @@ export function SiteHeader() {
         <div className="flex items-center gap-2 sm:gap-3 shrink-0">
           {/* Mobile links */}
           <div className="flex md:hidden items-center gap-1 mr-1">
-            <Link
-              href="/docs"
-              className="p-2 rounded-lg text-muted-foreground hover:bg-accent hover:text-foreground text-xs font-semibold"
-              title="Documentation"
-            >
-              Docs
-            </Link>
-            <Link
-              href="/docs/db-guide"
-              className="p-2 rounded-lg text-muted-foreground hover:bg-accent hover:text-foreground text-xs font-semibold"
-              title="DB Guide"
-            >
-              DB
-            </Link>
-            <Link
-              href="/docs/deployment-guide"
-              className="p-2 rounded-lg text-muted-foreground hover:bg-accent hover:text-foreground text-xs font-semibold"
-              title="Deploy"
-            >
-              Deploy
-            </Link>
           </div>
 
           {mounted && (
@@ -148,7 +106,7 @@ export function SiteHeader() {
           {isDocsOnly ? (
             <div className="flex items-center gap-2">
               <a
-                href="https://github.com/ParipoornaBhat/thunder-stack"
+                href="https://github.com/ParipoornaBhat/bme-detect"
                 target="_blank"
                 rel="noopener noreferrer"
                 className="inline-flex h-9 items-center justify-center gap-2 rounded-full bg-muted/80 border border-border/50 px-4 text-xs font-semibold text-foreground hover:bg-accent transition-all animate-fade-in"
@@ -157,7 +115,7 @@ export function SiteHeader() {
                 <span className="hidden sm:inline">GitHub</span>
               </a>
               <a
-                href="https://www.npmjs.com/package/create-thunder-stack"
+                href="https://www.npmjs.com/package/create-bme-detect"
                 target="_blank"
                 rel="noopener noreferrer"
                 className="inline-flex h-9 items-center justify-center gap-2 rounded-full bg-muted/80 border border-border/50 px-4 text-xs font-semibold text-foreground hover:bg-accent transition-all animate-fade-in"

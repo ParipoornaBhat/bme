@@ -102,13 +102,11 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
         <header className="border-b border-border/40 bg-background/80 backdrop-blur-xl px-6 py-4 flex items-center justify-between">
           <Link href="/" className="flex items-center gap-2">
             <div className="relative h-9 w-9 shrink-0">
-              <Image src="/logos/thunder.png" alt="Logo" fill className="object-contain" />
+              <Image src="/logos/bme-mark.svg" alt="Logo" fill className="object-contain" />
             </div>
-            <span className="text-lg font-extrabold text-foreground">THUNDER Stack</span>
+            <span className="text-lg font-extrabold text-foreground">BME Detect</span>
           </Link>
           <div className="flex items-center gap-3">
-            <Link href="/docs" className="text-xs font-semibold text-muted-foreground hover:text-foreground">Docs</Link>
-            <Link href="/docs/db-guide" className="text-xs font-semibold text-muted-foreground hover:text-foreground">DB Guide</Link>
             <ThemeToggle />
           </div>
         </header>
@@ -125,21 +123,9 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
               </p>
             </div>
             <div className="rounded-2xl border border-border/50 bg-muted/40 p-3 font-mono text-xs text-primary font-bold">
-              npx create-thunder-app
+              bone marrow edema detection
             </div>
             <div className="flex flex-col sm:flex-row gap-3 pt-2">
-              <Link
-                href="/docs"
-                className="flex-1 py-2.5 px-4 rounded-xl bg-primary text-primary-foreground text-xs font-semibold hover:opacity-90 transition-all"
-              >
-                Explore Docs
-              </Link>
-              <Link
-                href="/docs/db-guide"
-                className="flex-1 py-2.5 px-4 rounded-xl border border-border bg-background text-foreground text-xs font-semibold hover:bg-accent transition-all"
-              >
-                DB Guide
-              </Link>
             </div>
           </div>
         </div>
@@ -241,8 +227,8 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
               <Link href="/dashboard" className="flex items-center gap-2 group">
                 <div className="relative h-9 w-9 shrink-0">
                   <Image
-                    src="/logos/thunder.png"
-                    alt="THUNDER Stack Logo"
+                    src="/logos/bme-mark.svg"
+                    alt="BME Detect logo"
                     fill
                     priority
                     sizes="36px"
@@ -250,7 +236,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
                   />
                 </div>
                 <span className="text-lg font-extrabold tracking-tight text-transparent bg-clip-text bg-linear-to-r from-primary to-secondary">
-                  THUNDER Stack
+                  BME Detect
                 </span>
               </Link>
             </div>
@@ -291,15 +277,15 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
                     <Link href="/dashboard" onClick={() => setSidebarOpen(false)} className="flex items-center gap-2">
                       <div className="relative h-9 w-9">
                         <Image
-                          src="/logos/thunder.png"
-                          alt="THUNDER Stack Logo"
+                          src="/logos/bme-mark.svg"
+                          alt="BME Detect logo"
                           fill
                           sizes="36px"
                           className="object-contain"
                         />
                       </div>
                       <span className="text-lg font-extrabold tracking-tight text-transparent bg-clip-text bg-linear-to-r from-primary to-secondary">
-                        THUNDER Stack
+                        BME Detect
                       </span>
                     </Link>
                     <button

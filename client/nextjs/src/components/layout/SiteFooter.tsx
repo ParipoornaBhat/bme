@@ -21,15 +21,15 @@ export function SiteFooter() {
               >
                 <div className="relative h-10 w-10 shrink-0">
                   <Image
-                    src="/logos/thunder.png"
-                    alt="THUNDER Stack Logo"
+                    src="/logos/bme-mark.svg"
+                    alt="BME Detect logo"
                     fill
                     sizes="40px"
                     className="object-contain"
                   />
                 </div>
                 <span className="text-lg sm:text-xl font-extrabold tracking-tight text-foreground">
-                  THUNDER <span className="text-primary transition-colors">Stack</span>
+                  BME Detect <span className="text-primary transition-colors">Stack</span>
                 </span>
               </Link>
             </div>
@@ -44,28 +44,10 @@ export function SiteFooter() {
             </h3>
             <ul className="space-y-2.5">
               <li>
-                <Link
-                  href="/docs"
-                  className="text-muted-foreground hover:text-foreground transition-colors text-sm"
-                >
-                  Overview & Architecture
-                </Link>
               </li>
               <li>
-                <Link
-                  href="/docs/db-guide"
-                  className="text-muted-foreground hover:text-foreground transition-colors text-sm"
-                >
-                  Database & Drizzle CLI Guide
-                </Link>
               </li>
               <li>
-                <Link
-                  href="/docs/deployment-guide"
-                  className="text-muted-foreground hover:text-foreground transition-colors text-sm"
-                >
-                  Vercel & Cloudflare Deploy Guide
-                </Link>
               </li>
             </ul>
           </div>
@@ -77,18 +59,18 @@ export function SiteFooter() {
             <ul className="space-y-2.5">
               <li>
                 <a
-                  href="https://www.npmjs.com/package/create-thunder-stack"
+                  href="https://www.npmjs.com/package/create-bme-detect"
                   target="_blank"
                   rel="noopener noreferrer"
                   className="text-xs font-mono bg-muted px-2.5 py-1 rounded-md text-foreground hover:text-primary border border-border/50 inline-flex items-center gap-1.5 transition-colors"
                 >
                   <Package className="h-3.5 w-3.5 text-red-500" />
-                  npx create-thunder-stack
+                  bone marrow edema detection
                 </a>
               </li>
               <li>
                 <a
-                  href="https://github.com/ParipoornaBhat/thunder-stack"
+                  href="https://github.com/ParipoornaBhat/bme-detect"
                   target="_blank"
                   rel="noopener noreferrer"
                   className="text-muted-foreground hover:text-foreground transition-colors text-sm flex items-center gap-1.5"
@@ -99,7 +81,7 @@ export function SiteFooter() {
               </li>
               <li>
                 <a
-                  href="https://www.npmjs.com/package/create-thunder-stack"
+                  href="https://www.npmjs.com/package/create-bme-detect"
                   target="_blank"
                   rel="noopener noreferrer"
                   className="text-muted-foreground hover:text-foreground transition-colors text-sm flex items-center gap-1.5"
@@ -114,7 +96,7 @@ export function SiteFooter() {
 
         <div className="pt-6 border-t border-border/40 flex flex-col md:flex-row justify-between items-center gap-4 text-center md:text-left">
           <p className="text-xs text-muted-foreground">
-            &copy; {new Date().getFullYear()} THUNDER Stack. All rights reserved.
+            &copy; {new Date().getFullYear()} BME Detect. All rights reserved.
           </p>
           <div className="flex flex-col items-center md:items-end gap-1.5">
             <p className="text-xs font-medium text-foreground/90">
@@ -140,7 +122,7 @@ export function SiteFooter() {
               </a>
               <span>&bull;</span>
               <a
-                href="https://github.com/ParipoornaBhat/thunder-stack"
+                href="https://github.com/ParipoornaBhat/bme-detect"
                 target="_blank"
                 rel="noopener noreferrer"
                 className="flex items-center gap-1 hover:text-primary transition-colors font-medium"

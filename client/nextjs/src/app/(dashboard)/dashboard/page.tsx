@@ -79,7 +79,7 @@ export default function DashboardPage() {
               Welcome, {session?.user?.name || "User"} <Sparkles className="h-6 w-6 text-yellow-500" />
             </h1>
             <p className="text-muted-foreground mt-1 text-sm sm:text-base">
-              You are logged in to the THUNDER Stack console. Here is your security configuration.
+              You are logged in to the BME Detect console. Here is your security configuration.
             </p>
           </div>
           <div className="inline-flex items-center gap-2 rounded-xl bg-blue-500/10 px-4 py-2 border border-blue-500/25">

@@ -45,7 +45,7 @@ export default function HomePage() {
             <div className="mx-auto max-w-3xl">
               <div className="inline-flex flex-col items-center mb-8 select-none">
                 <span className="text-[3.5vw] sm:text-[10px] md:text-[18px] lg:text-2xl font-semibold tracking-[0.22em] text-muted-foreground uppercase">
-                  THUNDER Stack Console
+                  BME Detect
                 </span>
               </div>
               <h1 className="text-5xl font-bold tracking-tight text-foreground sm:text-6xl lg:text-7xl mb-8">
