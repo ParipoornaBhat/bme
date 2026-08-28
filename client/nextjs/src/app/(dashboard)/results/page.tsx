@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { Activity, Boxes, Layers, RefreshCw } from "lucide-react";
+import { Activity, Boxes, Eye, Layers, Loader2, RefreshCw } from "lucide-react";
 
 /**
  * Model results, split into two independent pipelines.
@@ -42,6 +42,13 @@ type Payload = {
   };
 };
 
+type CamEntry = { case_id: string; true: number; pred: number; prob: number; thumb: string };
+type CamPayload = {
+  available: boolean; running: boolean; log: string;
+  data: null | { arch: string; device: string; n: number; held_out_fold: number;
+                 caveat: string; entries: CamEntry[] };
+};
+
 const pct = (v?: number) =>
   v === undefined || v === null || Number.isNaN(v) ? "—" : `${(v * 100).toFixed(1)}%`;
 
@@ -73,6 +80,8 @@ export default function ResultsPage() {
   const [tab, setTab] = useState<"2d" | "3d">("2d");
   const [data, setData] = useState<Payload | null>(null);
   const [loading, setLoading] = useState(true);
+  const [cam, setCam] = useState<CamPayload | null>(null);
+  const [camBusy, setCamBusy] = useState(false);
 
   const load = async () => {
     setLoading(true);
@@ -86,7 +95,32 @@ export default function ResultsPage() {
     }
   };
 
-  useEffect(() => { load(); }, []);
+  const loadCam = async () => {
+    try {
+      const r = await fetch("/api/gradcam", { cache: "no-store" });
+      if (r.ok) setCam(await r.json());
+    } catch { /* optional */ }
+  };
+
+  const makeCam = async () => {
+    setCamBusy(true);
+    try {
+      await fetch("/api/gradcam", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ epochs: 3, n: 24 }),
+      });
+    } finally { setCamBusy(false); setTimeout(loadCam, 1500); }
+  };
+
+  useEffect(() => { load(); loadCam(); }, []);
+
+  // Poll only while heatmaps are being generated.
+  useEffect(() => {
+    if (!cam?.running) return;
+    const t = setInterval(loadCam, 4000);
+    return () => clearInterval(t);
+  }, [cam?.running]);
 
   const m = data?.twoD.metrics;
 
@@ -230,6 +264,59 @@ export default function ResultsPage() {
               </div>
             </>
           ) : null}
+
+          <div className="rounded-lg border border-border bg-card p-4">
+            <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
+              <span className="inline-flex items-center gap-2 text-xs font-semibold uppercase tracking-wider text-muted-foreground">
+                <Eye className="h-3.5 w-3.5" /> Grad-CAM — what the model looked at
+              </span>
+              <button onClick={makeCam} disabled={camBusy || cam?.running}
+                className="inline-flex items-center gap-1.5 rounded-md border border-border px-3 py-1.5 text-xs disabled:opacity-40">
+                {camBusy || cam?.running ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : null}
+                {cam?.running ? "Generating…" : cam?.available ? "Regenerate" : "Generate"}
+              </button>
+            </div>
+
+            {cam?.running && (
+              <pre className="mb-3 max-h-28 overflow-auto rounded bg-muted p-2 font-mono text-[10px]">
+                {cam.log || "starting…"}
+              </pre>
+            )}
+
+            {cam?.available && cam.data ? (
+              <>
+                <p className="mb-3 text-xs text-muted-foreground">
+                  {cam.data.arch} on {cam.data.device}, explaining held-out fold{" "}
+                  {cam.data.held_out_fold} — <strong>these slices were never trained on</strong>.
+                  Red marks the regions that most raised the model&apos;s score.
+                </p>
+                <div className="grid grid-cols-2 gap-2 sm:grid-cols-4 lg:grid-cols-6">
+                  {cam.data.entries.map((e, i) => (
+                    <figure key={i} className="m-0">
+                      {/* eslint-disable-next-line @next/next/no-img-element */}
+                      <img src={e.thumb} alt={`Grad-CAM for ${e.case_id}`}
+                        className="w-full rounded border border-border" />
+                      <figcaption className="mt-1 text-[10px] leading-tight text-muted-foreground">
+                        <span className="tabular-nums">{e.case_id}</span>
+                        <span className={`ml-1 font-semibold ${e.pred === e.true ? "text-emerald-600 dark:text-emerald-400" : "text-rose-600 dark:text-rose-400"}`}>
+                          {e.pred === e.true ? "correct" : "wrong"}
+                        </span>
+                        <span className="block tabular-nums opacity-70">
+                          p={e.prob.toFixed(2)} · {e.true ? "BME" : "clear"}
+                        </span>
+                      </figcaption>
+                    </figure>
+                  ))}
+                </div>
+                <p className="mt-3 text-xs text-muted-foreground">{cam.data.caveat}</p>
+              </>
+            ) : !cam?.running ? (
+              <p className="py-6 text-center text-sm text-muted-foreground">
+                No heatmaps yet. Generating trains a model on four folds and explains the fifth —
+                a few minutes on CPU.
+              </p>
+            ) : null}
+          </div>
         </div>
       )}
 

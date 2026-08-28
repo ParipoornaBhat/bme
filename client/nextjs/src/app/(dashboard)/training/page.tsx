@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Loader2, Play, Square, Trophy } from "lucide-react";
+import { Loader2, Play, Square, Trash2, Trophy } from "lucide-react";
 
 type Metric = { accuracy: number; precision: number; recall: number; f1: number; auc: number; n: number };
 type Prog = {
@@ -120,6 +120,18 @@ export default function TrainingPage() {
     setBusy(true);
     try { await fetch("/api/training", { method: "DELETE" }); }
     finally { setBusy(false); setRunning(false); load(); }
+  };
+
+  const removeRun = async (id: string) => {
+    if (!confirm(`Delete run ${id}? This removes its metrics only — the dataset, annotations and slice images are untouched.`)) return;
+    await fetch(`/api/training?run=${encodeURIComponent(id)}`, { method: "DELETE" });
+    load();
+  };
+
+  const clearAll = async () => {
+    if (!confirm(`Delete all ${runs.length} run(s)? This clears the history and the chart. Nothing else is affected.`)) return;
+    await fetch("/api/training?run=all", { method: "DELETE" });
+    load();
   };
 
   const best = runs.length
@@ -254,8 +266,16 @@ export default function TrainingPage() {
       </div>
 
       <div className="rounded-lg border border-border bg-card p-4">
-        <div className="mb-3 text-xs font-semibold uppercase tracking-wider text-muted-foreground">
-          History — {runs.length} run{runs.length === 1 ? "" : "s"}
+        <div className="mb-3 flex items-center justify-between gap-3">
+          <span className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">
+            History — {runs.length} run{runs.length === 1 ? "" : "s"}
+          </span>
+          {runs.length > 0 && (
+            <button onClick={clearAll} disabled={running}
+              className="inline-flex items-center gap-1.5 rounded-md border border-border px-2.5 py-1 text-xs text-muted-foreground hover:border-destructive hover:text-destructive disabled:opacity-40">
+              <Trash2 className="h-3.5 w-3.5" /> Clear all
+            </button>
+          )}
         </div>
         {runs.length === 0 ? (
           <p className="py-6 text-center text-sm text-muted-foreground">
@@ -273,6 +293,7 @@ export default function TrainingPage() {
                   <th className="p-2 text-right">Accuracy</th>
                   <th className="p-2 text-right">F1</th>
                   <th className="p-2 text-right">AUC</th>
+                  <th className="p-2"><span className="sr-only">Delete</span></th>
                 </tr>
               </thead>
               <tbody>
@@ -287,6 +308,13 @@ export default function TrainingPage() {
                     <td className="p-2 text-right tabular-nums">{pct(r.case.accuracy)}</td>
                     <td className="p-2 text-right tabular-nums">{pct(r.case.f1)}</td>
                     <td className="p-2 text-right font-semibold tabular-nums">{pct(r.case.auc)}</td>
+                    <td className="p-2 text-right">
+                      <button onClick={() => removeRun(r.id)} disabled={running}
+                        title={`Delete ${r.id}`}
+                        className="rounded p-1 text-muted-foreground/60 hover:bg-accent hover:text-destructive disabled:opacity-30">
+                        <Trash2 className="h-3.5 w-3.5" />
+                      </button>
+                    </td>
                   </tr>
                 ))}
               </tbody>

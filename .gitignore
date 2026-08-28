@@ -19,6 +19,12 @@
 /processed/
 /phi/
 *_PHI*
+
+# Reference papers — copyrighted PDFs, not ours to redistribute
+/RP/
+/papers/
+*.pdf
+!docs/**/*.pdf
 deid_map.csv
 deid_map.json
 

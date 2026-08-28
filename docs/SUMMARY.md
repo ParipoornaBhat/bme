@@ -158,10 +158,12 @@ This is **weak** — 0.5 is random guessing. Two honest reasons:
 
 ## 8. Not built yet
 
-- 2D mask drawing (the 2D model needs no drawing — its label is the folder)
-- Reset/delete training runs from the UI
+- **2D slice-level labels.** The 2D *classifier* needs no drawing — the folder is its label.
+  But that is exactly why it is weak: a BME scan has ~25 slices and maybe 6 show edema, yet all
+  25 are labelled BME. Ticking which slices actually show edema (no drawing, ~2 min/case) would
+  attack that directly. 2D *segmentation* — outlining the region — is a separate, larger job and
+  is probably not worth it when 3D gives volume and shape.
 - 3D training controls (nothing to train yet)
-- Grad-CAM / heatmaps in the UI
 - Review page is a standalone HTML file, not a page in the app
 
 ## 9. Known issues
@@ -169,9 +171,9 @@ This is **weak** — 0.5 is random guessing. Two honest reasons:
 | Issue | Impact |
 |---|---|
 | **The annotation tool has never been used by a human** | Save path is verified; the drawing experience is unknown |
-| PyTorch is CPU-only | 5 folds × 6 epochs took ~45 min. RTX 4050 unused — no CUDA wheel for Python 3.14 |
+| PyTorch is CPU-only | ~45 min per 5-fold run. A CUDA build **does** exist (`torch 2.13.0+cu126`) — I was wrong earlier that none was available. Installing it is a ~2.5 GB download, deferred by choice. Roughly 10x faster. |
 | `BME/IMRAZ.zip` has no DICOM | −1 case |
-| 17 non-BME cases have a PNG but no volume | Re-export or drop |
+| 9 non-BME patients have a screenshot but no scan | `Non BME/2d` holds 69 pictures, `Non BME/3d` holds 60 scans. A picture alone cannot be measured or reconstructed, so those 9 are excluded. Recovering their zips would take healthy cases 60 → 69. |
 | ~10:1 voxel anisotropy | 3D surfaces need smoothing or they look terraced |
 | 2 demo accounts with published passwords | `admin@thunder.com` — harmless locally, remove before any deploy |
 
