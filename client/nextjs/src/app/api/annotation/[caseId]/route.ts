@@ -59,6 +59,7 @@ export async function POST(
   const { caseId } = await params;
   if (!ID.test(caseId)) return NextResponse.json({ error: "bad case id" }, { status: 400 });
 
+  const annotator = new URL(req.url).searchParams.get("by") ?? "";
   const body = Buffer.from(await req.arrayBuffer());
   if (body.length === 0) {
     return NextResponse.json({ error: "empty labelmap" }, { status: 400 });
@@ -70,7 +71,8 @@ export async function POST(
   try {
     const { stdout } = await exec(
       pythonPath(),
-      [path.join(root(), "ml", "scripts", "write_seg.py"), root(), caseId, tmp],
+      [path.join(root(), "ml", "scripts", "write_seg.py"), root(), caseId, tmp,
+       ...(annotator ? [annotator] : [])],
       { cwd: root(), timeout: 120_000 },
     );
     return NextResponse.json({ ok: true, detail: stdout.trim() });

@@ -194,7 +194,35 @@ export async function POST(req: NextRequest) {
   return NextResponse.json({ ok: true, pid: child.pid, arch, folds, epochs });
 }
 
-export async function DELETE() {
+/**
+ * DELETE with ?run=<id> removes one archived run; ?run=all clears the history.
+ * Without a run parameter it stops the training process instead.
+ *
+ * Deleting a run removes only its metrics folder under data/results2d/runs/.
+ * The dataset, annotations and slice images are never touched.
+ */
+export async function DELETE(req: NextRequest) {
+  const target = new URL(req.url).searchParams.get("run");
+
+  if (target) {
+    const runsDir = path.join(root(), "data", "results2d", "runs");
+    if (!fs.existsSync(runsDir)) return NextResponse.json({ ok: true, deleted: 0 });
+
+    if (target === "all") {
+      const names = fs.readdirSync(runsDir);
+      for (const n of names) fs.rmSync(path.join(runsDir, n), { recursive: true, force: true });
+      return NextResponse.json({ ok: true, deleted: names.length });
+    }
+    // Guard the path: only a name that is actually a direct child of runs/.
+    if (target.includes("/") || target.includes("\\") || target.includes("..")) {
+      return NextResponse.json({ error: "bad run id" }, { status: 400 });
+    }
+    const dir = path.join(runsDir, target);
+    if (!fs.existsSync(dir)) return NextResponse.json({ error: "no such run" }, { status: 404 });
+    fs.rmSync(dir, { recursive: true, force: true });
+    return NextResponse.json({ ok: true, deleted: 1 });
+  }
+
   const pid = running();
   if (pid === null) return NextResponse.json({ ok: true, note: "nothing running" });
   try {

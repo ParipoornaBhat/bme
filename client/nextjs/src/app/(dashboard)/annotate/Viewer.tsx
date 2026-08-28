@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Eraser, Loader2, Paintbrush, RotateCcw, Save } from "lucide-react";
+import { useSession } from "~/lib/auth-client";
 
 /**
  * Three-plane MPR viewer with painting, in the browser.
@@ -29,7 +30,8 @@ type Vol = {
   hi: number;
 };
 
-export default function Viewer({ caseId }: { caseId: string }) {
+export default function Viewer({ caseId, onSaved }: { caseId: string; onSaved?: () => void }) {
+  const { data: session } = useSession();
   const [vol, setVol] = useState<Vol | null>(null);
   const [labels, setLabels] = useState<Uint8Array | null>(null);
   const [status, setStatus] = useState("Loading scan…");
@@ -221,15 +223,41 @@ export default function Viewer({ caseId }: { caseId: string }) {
     if (!labels) return;
     setSaving(true);
     try {
-      const res = await fetch(`/api/annotation/${caseId}`, {
+      const me = session?.user?.name || session?.user?.email || "unknown";
+      const res = await fetch(`/api/annotation/${caseId}?by=${encodeURIComponent(me)}`, {
         method: "POST",
         headers: { "Content-Type": "application/octet-stream" },
         body: new Uint8Array(labels),
       });
       const j = await res.json();
       if (!res.ok) throw new Error(j.error ?? "save failed");
-      setStatus("Saved to data/annotations/" + caseId);
+
+      // Record it in the shared ledger so teammates can see this case is done
+      // and know who holds the file. Deliberately not awaited into the failure
+      // path: the .seg.nrrd is already on disk, and a database hiccup must not
+      // make a successful save look like a failed one.
+      const who = me;
+      let logged = false;
+      try {
+        const logRes = await fetch("/api/annotation-log", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            caseId,
+            annotator: who,
+            counts: { bone_marrow: counts[0], bme: counts[1], uncertain: counts[2] },
+          }),
+        });
+        logged = (await logRes.json())?.ok === true;
+      } catch { /* ledger unavailable */ }
+
+      setStatus(
+        logged
+          ? `Saved — recorded as annotated by ${who}`
+          : "Saved to disk (not recorded: database unreachable)",
+      );
       setDirty(false);
+      onSaved?.();
     } catch (e) {
       setStatus(e instanceof Error ? e.message : "save failed");
     } finally {

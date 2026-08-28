@@ -4,18 +4,20 @@
 If you are picking this project up cold (new chat, new teammate, new machine), read this
 file first, then [PRD.md](PRD.md).
 
-Last updated: **2026-08-26**
+Last updated: **2026-08-28**
 
 ---
 
 ## One-paragraph state
 
-Repo scaffolded, 107 cases collected (knee MRI, 47 BME / 60 non-BME), **de-identification
-run and verified** — `data/raw/` holds 13,818 scrubbed DICOM images under pseudonymous IDs.
-Local dev Postgres now starts with one command. Annotation has **just begun** (1 case). All 107 cases are converted to NIfTI with a primary
-series chosen — see `data/worklist.csv`.
-The critical path is annotation: get to 10 cases, measure inter-rater Dice, then train
-Stage B. Nothing is blocked on code.
+Two pipelines now run side by side. **2D** is a working classifier baseline with real
+cross-validated numbers (case-level AUC 0.665 — weak, and honestly so). **3D** is the
+segmentation system from the PRD and is still waiting on annotations.
+
+The web app now does the whole loop in the browser: annotate, train, inspect results,
+check storage. Every filename in the dataset is pseudonymous — no patient name survives
+anywhere on disk. The critical path is unchanged: annotate ~10 cases, measure inter-rater
+Dice, then train Stage B.
 
 ---
 
@@ -32,7 +34,10 @@ Phases are defined in [PRD.md](PRD.md) §8.
 | — | Domain schema (+ pgvector 0.8.6) | ✅ **applied and verified** — 17 tables, HNSW indexes live |
 | **0** | **De-identification** | ✅ **done** — 107 cases, 13,818 images, PHI verified clean |
 | — | DICOM→NIfTI + primary-series picker | ✅ 107/107 converted, data/worklist.csv written |
-| **1** | **Annotation pipeline** | 🟡 **in progress — 1 case. The critical path.** |
+| — | 2D baseline (extract, train, review) | ✅ AUC 0.665 case level — weak but honest |
+| — | Web app: annotate / training / results / storage | ✅ built and API-verified |
+| — | Full pseudonymisation of every filename | ✅ 108 archives + 121 images renamed |
+| **1** | **Annotation pipeline** | 🟡 **0 cases done. The critical path.** |
 | — | nnU-Net dataset builder + training wrapper | ✅ **verified** against synthetic Slicer-format .seg.nrrd — geometry, splits, leak checks all pass |
 | 2 | Stage B — bone/marrow segmentation | ⬜ blocked on Phase 1 |
 | 3 | Stage C — BME segmentation | ⬜ |
@@ -47,24 +52,18 @@ Phases are defined in [PRD.md](PRD.md) §8.
 
 In order. Each step's output is the next step's input.
 
-1. **Use `ml/scripts/slicer_setup.py` to start each case** — it names the three segments
-   correctly and turns on the bone masking. A real annotation was already lost to Slicer's
-   default `Segment_1` name; `ml/scripts/rename_segments.py` salvages those.
+1. **Annotate in the browser: `/annotate` → 3D volume tab.** Pick a case, paint, save.
+   No file dragging, no folder picking, and the segments are named correctly for you.
+   3D Slicer still works if you prefer it — use `ml/scripts/slicer_setup.py` to start.
 
-2. **Switch annotation output from `.mrb` to `.seg.nrrd`.** `Annotated/1/2026-08-26-Scene.mrb`
-   is a Slicer scene bundle — fine as a personal backup, but nothing downstream reads it and
-   it bundles the images with the labels. Save the Segmentation node as `.seg.nrrd` as well.
-   See [ANNOTATION_SOP.md](ANNOTATION_SOP.md) §1.
+2. **If using Slicer instead, save `.seg.nrrd`, not `.mrb`.** A scene bundle is fine as a
+   personal backup, but nothing downstream reads it. See [ANNOTATION_SOP.md](ANNOTATION_SOP.md) §1.
 
-2. **Annotate against `data/raw/<CASE_ID>/`, not the named zips.** Otherwise every
-   annotation is keyed to a patient name and has to be remapped later. `data/deid_map.csv`
-   has the correspondence.
-
-3. **Install MONAI Label in Slicer** — the single biggest annotation speed-up. It trains on
+3. **Optional: install MONAI Label in Slicer** — the single biggest annotation speed-up. It trains on
    the cases you have finished and pre-segments the next one, so each case you label makes
    the following one faster. See [ANNOTATION_SOP.md](ANNOTATION_SOP.md) §3.
 
-4. **Set up TotalSegmentator-MRI in Slicer** ([ANNOTATION_SOP.md](ANNOTATION_SOP.md) §3) to
+4. **Optional: TotalSegmentator-MRI in Slicer** ([ANNOTATION_SOP.md](ANNOTATION_SOP.md) §3) to
    bootstrap bone masks — correct rather than draw, and it shows you what is bone.
 
 5. **Annotate to 10 cases, then stop.** Do not do 50 before checking convention drift.
@@ -79,6 +78,22 @@ In order. Each step's output is the next step's input.
 
 ---
 
+## How the four of you share work
+
+The dataset moves by hand over a private channel — it is patient imaging and is never
+pushed anywhere automatically. What the **shared database** holds is the ledger: who
+annotated which case, when, and the segment sizes.
+
+That split is what makes it work. Everyone pointed at the same database sees the same
+completion status, so a case marked done with no local file tells you who to ask for it.
+The `/annotate` page shows that as an amber download icon with the annotator's name.
+
+Several people annotating the same case is expected, not a conflict — the overlap set
+exists precisely so inter-rater Dice can be measured. Saves write two files:
+`<CASE>.seg.nrrd` (canonical, what training reads) and `<CASE>__<annotator>.seg.nrrd`
+(that person's own copy, kept forever). Without the second, the last person to save would
+erase everyone before them and the agreement number would be impossible to compute.
+
 ## Local development
 
 One command from a clean clone. No `.env` editing — the script writes it.
@@ -91,7 +106,8 @@ pnpm dev
 
 `pnpm setup` = `db:up` + `migrate:deploy` + `db:seed`. Or double-click `start_db.cmd`.
 
-- Postgres runs in Docker (`bme-db`), published on **5433 by default (5434 on this machine — Sarvam holds 5433)**. A native Windows
+- Postgres runs in Docker (`bme-db`). Port is picked automatically — 5433 by default,
+  5434 on this machine because another project holds 5433. A native Windows
   Postgres owns 5432 on at least one team machine. If 5433 is also busy the script probes
   upward to 5460, then remembers the choice as `BME_DB_PORT` in `.env`.
 - `pnpm db:down` stops it; **the volume survives**, so data comes back.

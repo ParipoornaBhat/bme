@@ -35,6 +35,7 @@ def main():
     if len(sys.argv) < 4:
         sys.exit(__doc__)
     base, case_id, raw_path = Path(sys.argv[1]), sys.argv[2], Path(sys.argv[3])
+    annotator = sys.argv[4] if len(sys.argv) > 4 else ""
 
     vol_path = base / "data" / "nifti" / case_id / f"{case_id}_primary.nii.gz"
     if not vol_path.exists():
@@ -82,11 +83,31 @@ def main():
 
     out_dir = base / "data" / "annotations" / case_id
     out_dir.mkdir(parents=True, exist_ok=True)
+
+    # Two files, deliberately.
+    #
+    #   <CASE>.seg.nrrd            canonical — the one the training pipeline reads
+    #   <CASE>__<annotator>.seg.nrrd   this person's own copy, kept forever
+    #
+    # Several people annotate the same case on purpose: the overlap set exists so
+    # inter-rater Dice can be measured, and that number is the model's realistic
+    # ceiling. If everyone wrote only to the canonical name, the second person to
+    # save would erase the first, and the comparison would be impossible. Keeping
+    # a per-annotator copy costs ~10 KB and preserves it.
+    written = []
+    if annotator:
+        safe = "".join(c if (c.isalnum() or c in "-_") else "_" for c in annotator)[:40]
+        per = out_dir / f"{case_id}__{safe}.seg.nrrd"
+        nrrd.write(str(per), lab, header)
+        written.append(per)
+
     out = out_dir / f"{case_id}.seg.nrrd"
     nrrd.write(str(out), lab, header)
+    written.append(out)
 
     counts = "  ".join(f"{n}={present[v]}" for n, v, _ in SEGMENTS if present[v])
-    print(f"wrote {out}")
+    for w in written:
+        print(f"wrote {w}")
     print(f"  {counts}")
 
 

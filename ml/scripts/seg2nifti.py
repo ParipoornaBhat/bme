@@ -154,7 +154,14 @@ def main():
             "Save Slicer segmentations to data/annotations/<CASE_ID>/<CASE_ID>.seg.nrrd"
         )
 
-    files = sorted(ann.glob("*/*.seg.nrrd"))
+    # Only the canonical <CASE>/<CASE>.seg.nrrd. The __<annotator> copies beside
+    # it are alternative readings of the same case, kept for inter-rater
+    # agreement — feeding them in here would train on the same case several
+    # times over and quietly break the patient-level split.
+    files = sorted(
+        p for p in ann.glob("*/*.seg.nrrd")
+        if p.name == f"{p.parent.name}.seg.nrrd"
+    )
     if not files:
         sys.exit(f"no .seg.nrrd under {ann}")
 

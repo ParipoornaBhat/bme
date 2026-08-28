@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import { Boxes, CheckCircle2, Circle, Layers, Search, Users } from "lucide-react";
+import { AlertTriangle, Boxes, CheckCircle2, Circle, Download, Layers, Search, Users } from "lucide-react";
 import Viewer from "./Viewer";
 
 type Case = {
@@ -27,6 +27,8 @@ export default function AnnotatePage() {
   const [q, setQ] = useState("");
   const [selected, setSelected] = useState<string | null>(null);
   const [showNames, setShowNames] = useState(false);
+  const [ledger, setLedger] = useState<Record<string, { annotator: string | null; at: string; localFile: boolean }>>({});
+  const [needFrom, setNeedFrom] = useState<string[]>([]);
 
   const load = async () => {
     const res = await fetch("/api/cases", { cache: "no-store" });
@@ -35,6 +37,20 @@ export default function AnnotatePage() {
     setCases(j.cases);
     setAnnotators(j.annotators);
     setShowNames(j.showSourceNames);
+
+    // The shared ledger says who annotated what. A case recorded here but
+    // missing locally is one a teammate holds — that is the cue to ask them
+    // for the file, since the imaging moves by hand, not through this app.
+    try {
+      const lg = await fetch("/api/annotation-log", { cache: "no-store" });
+      if (lg.ok) {
+        const d = await lg.json();
+        const map: Record<string, { annotator: string | null; at: string; localFile: boolean }> = {};
+        for (const e of d.entries ?? []) map[e.caseId] = e;
+        setLedger(map);
+        setNeedFrom(d.needFromTeammate ?? []);
+      }
+    } catch { /* ledger optional */ }
   };
 
   useEffect(() => { load(); }, []);
@@ -58,6 +74,11 @@ export default function AnnotatePage() {
           <h1 className="text-2xl font-semibold tracking-tight">Annotate</h1>
           <p className="mt-1 text-sm text-muted-foreground">
             {done} of {cases.length} cases annotated
+            {needFrom.length > 0 && (
+              <span className="ml-2 text-amber-600 dark:text-amber-400">
+                &middot; {needFrom.length} annotated by a teammate, file not on this machine
+              </span>
+            )}
             {!showNames && (
               <span className="ml-2 opacity-70">
                 &middot; real filenames hidden (set SHOW_SOURCE_NAMES=true in .env to reveal)
@@ -66,6 +87,39 @@ export default function AnnotatePage() {
           </p>
         </div>
       </div>
+
+      {needFrom.length > 0 && (
+        <div className="rounded-lg border border-amber-500/40 bg-amber-500/10 p-4">
+          <div className="flex items-start gap-3">
+            <AlertTriangle className="mt-0.5 h-5 w-5 shrink-0 text-amber-600 dark:text-amber-400" />
+            <div className="flex-1 text-sm">
+              <p className="font-semibold text-foreground">
+                Your local copy is behind — {needFrom.length} annotation
+                {needFrom.length === 1 ? "" : "s"} you do not have
+              </p>
+              <p className="mt-1 text-muted-foreground">
+                A teammate has saved these, but the files are not on this machine. The
+                imaging never moves automatically, so ask whoever is named to send you
+                the <code className="rounded bg-muted px-1">.seg.nrrd</code>, and drop it
+                in <code className="rounded bg-muted px-1">data/annotations/&lt;CASE&gt;/</code>.
+              </p>
+              <div className="mt-2 flex flex-wrap gap-1.5">
+                {needFrom.map((id) => (
+                  <span key={id}
+                    className="rounded border border-amber-500/40 bg-background px-2 py-0.5 font-mono text-xs">
+                    {id}
+                    {ledger[id]?.annotator && (
+                      <span className="ml-1.5 text-muted-foreground">
+                        &larr; {ledger[id].annotator}
+                      </span>
+                    )}
+                  </span>
+                ))}
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
 
       <div className="flex gap-1 border-b border-border">
         {([
@@ -139,10 +193,19 @@ export default function AnnotatePage() {
                 >
                   {c.annotated ? (
                     <CheckCircle2 className="h-4 w-4 shrink-0 text-emerald-500" />
+                  ) : ledger[c.id] ? (
+                    <Download className="h-4 w-4 shrink-0 text-amber-500" />
                   ) : (
                     <Circle className="h-4 w-4 shrink-0 text-muted-foreground/40" />
                   )}
-                  <span className="flex-1 font-medium tabular-nums">{c.id}</span>
+                  <span className="flex-1">
+                    <span className="font-medium tabular-nums">{c.id}</span>
+                    {ledger[c.id]?.annotator && (
+                      <span className="block text-[10px] leading-tight text-muted-foreground">
+                        {c.annotated ? "by " : "ask "}{ledger[c.id].annotator}
+                      </span>
+                    )}
+                  </span>
                   {c.isotropic && (
                     <span className="rounded bg-muted px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
                       Iso
@@ -168,12 +231,15 @@ export default function AnnotatePage() {
               <span className="ml-3 mr-2 inline-block h-2 w-2 rounded-full bg-slate-400" />No BME
               <br />
               <strong>Iso</strong> = thin slices, best for 3D. Annotate these first.
+              <br />
+              <Download className="mr-1 inline h-3 w-3 text-amber-500" />
+              means a teammate annotated it — ask them to send the file.
             </p>
           </div>
 
           <div>
             {selected ? (
-              <Viewer key={selected} caseId={selected} />
+              <Viewer key={selected} caseId={selected} onSaved={load} />
             ) : (
               <div className="flex h-96 items-center justify-center rounded-lg border border-dashed border-border text-sm text-muted-foreground">
                 Pick a case from the list to start annotating.
