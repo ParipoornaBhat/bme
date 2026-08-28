@@ -176,4 +176,4 @@ def main(roots):
 
 if __name__ == "__main__":
     base = Path(sys.argv[1])
-    main([("BME", base / "BME"), ("NonBME", base / "Non BME" / "3d")])
+    main([("BME", base / "BME" / "3d"), ("NonBME", base / "Non BME" / "3d")])

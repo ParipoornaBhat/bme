@@ -31,7 +31,7 @@ from pathlib import Path
 
 REGISTRY = Path("ml") / "case_registry.csv"
 FIELDS = ["case_id", "class", "sha256", "size_bytes"]
-SOURCES = [("BME", Path("BME")), ("NBME", Path("Non BME") / "3d")]
+SOURCES = [("BME", Path("BME") / "3d"), ("NBME", Path("Non BME") / "3d")]
 
 
 def sha256_of(path: Path, chunk=4 << 20) -> tuple[str, int]:

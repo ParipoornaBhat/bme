@@ -32,7 +32,7 @@ import hashlib
 import sys
 from pathlib import Path
 
-SOURCES = [("BME", Path("BME")), ("NBME", Path("Non BME") / "3d")]
+SOURCES = [("BME", Path("BME") / "3d"), ("NBME", Path("Non BME") / "3d")]
 
 
 def sha256_of(path: Path, chunk=4 << 20) -> str:

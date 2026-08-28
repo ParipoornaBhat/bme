@@ -52,10 +52,12 @@ export async function GET() {
   const root = path.resolve(process.cwd(), "..", "..");
 
   const items = [
-    entry(root, "BME", "BME archives (raw)", "Source data"),
+    entry(root, "BME/3d", "BME archives (raw)", "Source data"),
     entry(root, "Non BME/3d", "Non-BME archives (raw)", "Source data"),
-    entry(root, "Non BME/Slices", "Non-BME PNG screenshots", "Source data"),
-    entry(root, "BME/_ALL_IMAGES", "BME PNG screenshots", "Source data"),
+    entry(root, "Non BME/2d", "Non-BME slice images", "Source data"),
+    entry(root, "BME/2d", "BME slice images", "Source data"),
+    entry(root, "BME/3d_annotated", "BME annotations (filed)", "Processed — 3D"),
+    entry(root, "Non BME/3d_annotated", "Non-BME annotations (filed)", "Processed — 3D"),
 
     entry(root, "data/raw", "De-identified DICOM", "Processed — 3D"),
     entry(root, "data/nifti", "NIfTI volumes", "Processed — 3D"),

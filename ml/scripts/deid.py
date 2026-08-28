@@ -187,7 +187,7 @@ def main():
     outdir = base / "data" / "raw"
     mapfile = base / "data" / "deid_map.csv"
 
-    sources = [("BME", base / "BME"), ("NBME", base / "Non BME" / "3d")]
+    sources = [("BME", base / "BME" / "3d"), ("NBME", base / "Non BME" / "3d")]
 
     existing = {}
     if mapfile.exists():
