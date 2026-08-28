@@ -12,7 +12,24 @@ function getDb() {
       throw new Error("DATABASE_URL is not defined in env");
     }
 
-    const hasSSL = connectionString.includes("sslmode=require") || connectionString.includes("ssl=true");
+    // Managed Postgres (Supabase, Neon, RDS) requires TLS, but their connection
+    // strings do not always carry sslmode=require — Supabase's copy-paste URL
+    // omits it entirely. Relying on the parameter alone means the pool is built
+    // without SSL, every query fails, and the error surfaces with an empty
+    // message, which reads like "the database is fine but returned nothing".
+    // So: trust the parameter when present, otherwise infer from the host.
+    let isRemote = false;
+    try {
+      const host = new URL(connectionString).hostname;
+      isRemote = !["localhost", "127.0.0.1", "::1", "0.0.0.0"].includes(host);
+    } catch {
+      isRemote = false;
+    }
+
+    const hasSSL =
+      connectionString.includes("sslmode=require") ||
+      connectionString.includes("ssl=true") ||
+      isRemote;
 
     if (hasSSL) {
       connectionString = connectionString
