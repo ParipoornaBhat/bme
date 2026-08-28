@@ -4,10 +4,24 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { Loader2, Play, Square, Trophy } from "lucide-react";
 
 type Metric = { accuracy: number; precision: number; recall: number; f1: number; auc: number; n: number };
+type Prog = {
+  fraction: number; doneEpochs: number; totalEpochs: number;
+  currentFold: number; currentEpoch: number; folds: number; epochs: number;
+  etaSeconds: number | null; elapsedSeconds: number | null;
+};
 type Run = {
   id: string; arch: string; folds: number; epochs: number;
   finishedAt: string | null; nSlices: number; nCases: number;
   case: Metric; slice: Metric;
+};
+
+/** Seconds as a compact human duration. */
+const fmt = (s: number | null) => {
+  if (s == null) return "—";
+  if (s < 60) return `${s}s`;
+  const m = Math.floor(s / 60), sec = s % 60;
+  if (m < 60) return `${m}m ${sec}s`;
+  return `${Math.floor(m / 60)}h ${m % 60}m`;
 };
 
 const pct = (v?: number) => (v == null || Number.isNaN(v) ? "—" : `${(v * 100).toFixed(1)}%`);
@@ -64,6 +78,7 @@ export default function TrainingPage() {
   const [folds, setFolds] = useState(5);
   const [epochs, setEpochs] = useState(4);
   const [busy, setBusy] = useState(false);
+  const [progress, setProgress] = useState<Prog | null>(null);
   const logRef = useRef<HTMLPreElement>(null);
 
   const load = useCallback(async () => {
@@ -71,6 +86,7 @@ export default function TrainingPage() {
     if (!res.ok) return;
     const j = await res.json();
     setArchs(j.archs); setRuns(j.runs); setRunning(j.running); setLog(j.log);
+    setProgress(j.progress ?? null);
   }, []);
 
   useEffect(() => { load(); }, [load]);
@@ -78,7 +94,7 @@ export default function TrainingPage() {
   // Poll only while a run is in flight.
   useEffect(() => {
     if (!running) return;
-    const t = setInterval(load, 4000);
+    const t = setInterval(load, 3000);
     return () => clearInterval(t);
   }, [running, load]);
 
@@ -177,6 +193,36 @@ export default function TrainingPage() {
             {running && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
             {running ? "Training in progress" : "Last run log"}
           </div>
+
+          {running && progress && (
+            <div className="mb-3">
+              <div className="mb-1.5 flex flex-wrap items-baseline justify-between gap-2 text-sm">
+                <span className="font-medium tabular-nums">
+                  {(progress.fraction * 100).toFixed(0)}%
+                  <span className="ml-2 font-normal text-muted-foreground">
+                    fold {progress.currentFold + 1} of {progress.folds}
+                    {" · "}epoch {progress.currentEpoch} of {progress.epochs}
+                  </span>
+                </span>
+                <span className="text-muted-foreground tabular-nums">
+                  {fmt(progress.elapsedSeconds)} elapsed
+                  {progress.etaSeconds != null && (
+                    <> {"·"} <span className="font-medium text-foreground">
+                      ~{fmt(progress.etaSeconds)} left
+                    </span></>
+                  )}
+                </span>
+              </div>
+              <div className="h-2 overflow-hidden rounded-full bg-muted">
+                <div className="h-full rounded-full bg-primary transition-all duration-500"
+                  style={{ width: `${progress.fraction * 100}%` }} />
+              </div>
+              <p className="mt-1.5 text-xs text-muted-foreground">
+                {progress.doneEpochs} of {progress.totalEpochs} epochs done. Estimate assumes
+                remaining epochs cost the same as those already finished.
+              </p>
+            </div>
+          )}
           <pre ref={logRef}
             className="max-h-56 overflow-auto rounded bg-muted p-3 font-mono text-[11px] leading-relaxed">
             {log || "waiting for output…"}

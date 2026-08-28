@@ -82,6 +82,45 @@ function running() {
   }
 }
 
+const JOB = () => path.join(root(), "data", "results2d", "train.job.json");
+
+/**
+ * Progress from the log text.
+ *
+ * train_2d.py prints "fold N:" then "epoch X/Y" per fold, so total work is
+ * folds x epochs and completed work is countable. ETA comes from elapsed time
+ * per finished epoch — crude, but epochs here are near-identical in cost, so it
+ * lands within a minute or so and is far better than no estimate at all.
+ */
+function progressFrom(logText: string, startedAt: number | null, folds: number, epochs: number) {
+  const foldMatches = [...logText.matchAll(/fold (\d+):/g)];
+  const epochMatches = [...logText.matchAll(/epoch (\d+)\/(\d+)/g)];
+  if (!folds || !epochs) return null;
+
+  const currentFold = foldMatches.length ? Number(foldMatches[foldMatches.length - 1][1]) : 0;
+  const currentEpoch = epochMatches.length ? Number(epochMatches[epochMatches.length - 1][1]) : 0;
+  const doneEpochs = currentFold * epochs + currentEpoch;
+  const totalEpochs = folds * epochs;
+  const fraction = Math.min(1, doneEpochs / totalEpochs);
+
+  let etaSeconds: number | null = null;
+  if (startedAt && doneEpochs > 0 && fraction < 1) {
+    const elapsed = (Date.now() - startedAt) / 1000;
+    etaSeconds = Math.round((elapsed / doneEpochs) * (totalEpochs - doneEpochs));
+  }
+  return {
+    fraction,
+    doneEpochs,
+    totalEpochs,
+    currentFold,
+    currentEpoch,
+    folds,
+    epochs,
+    etaSeconds,
+    elapsedSeconds: startedAt ? Math.round((Date.now() - startedAt) / 1000) : null,
+  };
+}
+
 export async function GET() {
   const log = LOG();
   let tail = "";
@@ -97,11 +136,23 @@ export async function GET() {
       .slice(-40)
       .join("\n");
   }
+  let job: { arch?: string; folds?: number; epochs?: number; startedAt?: number } = {};
+  try {
+    if (fs.existsSync(JOB())) job = JSON.parse(fs.readFileSync(JOB(), "utf8"));
+  } catch { /* stale or partial job file */ }
+
+  const isRunning = running() !== null;
+  const rawLog = fs.existsSync(log) ? fs.readFileSync(log, "utf8") : "";
+
   return NextResponse.json({
     archs: ARCHS,
     runs: listRuns(),
-    running: running() !== null,
+    running: isRunning,
     log: tail,
+    job: isRunning ? job : null,
+    progress: isRunning
+      ? progressFrom(rawLog, job.startedAt ?? null, job.folds ?? 0, job.epochs ?? 0)
+      : null,
   });
 }
 
@@ -135,6 +186,10 @@ export async function POST(req: NextRequest) {
   );
   child.unref();
   if (child.pid) fs.writeFileSync(PID(), String(child.pid));
+  fs.writeFileSync(
+    JOB(),
+    JSON.stringify({ arch, folds, epochs, startedAt: Date.now(), pid: child.pid }),
+  );
 
   return NextResponse.json({ ok: true, pid: child.pid, arch, folds, epochs });
 }

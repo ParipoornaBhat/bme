@@ -11,6 +11,7 @@ import Link from "next/link";
 import Image from "next/image";
 import { 
   Activity,
+  HardDrive,
   Cpu,
   PenTool,
   Users, 
@@ -210,6 +211,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
     { name: "Annotate", href: "/annotate", icon: PenTool },
     { name: "Training", href: "/training", icon: Cpu },
     { name: "Model Results", href: "/results", icon: Activity },
+    { name: "Storage", href: "/storage", icon: HardDrive },
     { name: "Users", href: "/users", icon: Users, permission: "users:view" },
     { name: "Roles & Permissions", href: "/roles", icon: Shield, permission: "roles:manage" },
     { name: "My Profile", href: "/profile", icon: UserCircle },
