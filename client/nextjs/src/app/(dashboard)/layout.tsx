@@ -11,6 +11,7 @@ import Link from "next/link";
 import Image from "next/image";
 import { 
   Activity,
+  Cpu,
   PenTool,
   Users, 
   Shield, 
@@ -207,6 +208,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
   const navigation = [
     { name: "Dashboard", href: "/dashboard", icon: LayoutDashboard },
     { name: "Annotate", href: "/annotate", icon: PenTool },
+    { name: "Training", href: "/training", icon: Cpu },
     { name: "Model Results", href: "/results", icon: Activity },
     { name: "Users", href: "/users", icon: Users, permission: "users:view" },
     { name: "Roles & Permissions", href: "/roles", icon: Shield, permission: "roles:manage" },
