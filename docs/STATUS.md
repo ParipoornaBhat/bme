@@ -2,7 +2,7 @@
 
 **Living document. Update it at the end of every working session.**
 If you are picking this project up cold (new chat, new teammate, new machine), read this
-file first, then [PRD.md](PRD.md).
+file first, then [SUMMARY.md](SUMMARY.md) for the full picture, then [PRD.md](PRD.md).
 
 Last updated: **2026-08-28**
 
