@@ -203,9 +203,15 @@ importers:
       '@bme/db':
         specifier: workspace:*
         version: link:../db
+      '@hono/node-server':
+        specifier: ^2.1.1
+        version: 2.1.1(hono@4.12.28)
       better-auth:
         specifier: 1.6.23
         version: 1.6.23(@cloudflare/workers-types@5.20260825.1)(next@15.5.20(@babel/core@7.29.7(supports-color@10.2.2))(babel-plugin-react-compiler@1.0.0)(react-dom@19.2.7(react@19.2.7))(react@19.2.7))(pg@8.22.0)(react-dom@19.2.7(react@19.2.7))(react@19.2.7)
+      dotenv:
+        specifier: 16.6.1
+        version: 16.6.1
       hono:
         specifier: 4.12.28
         version: 4.12.28
@@ -222,6 +228,9 @@ importers:
       '@types/nodemailer':
         specifier: ^6.4.14
         version: 6.4.24
+      tsx:
+        specifier: ^4.23.12
+        version: 4.23.12
       typescript:
         specifier: 5.9.3
         version: 5.9.3
@@ -2004,6 +2013,12 @@ packages:
   '@expo/xcpretty@4.4.4':
     resolution: {integrity: sha512-4aQzz9vgxcNXFfo/iyNgDDYfsU5XGKKxWxZopw0cVotHiW+U8IJbIxMaxsINs6bHhtkG3StKNPcOrn3eBuxKPw==}
     hasBin: true
+
+  '@hono/node-server@2.1.1':
+    resolution: {integrity: sha512-ELuehkj5VCBdgEw9zs+ivkKwyzzUCSQuE96YmiPvn1ECBoZCczbFXJLeEGMTYjphP6gydh4pHMqEYPVMYUVgQg==}
+    engines: {node: '>=20'}
+    peerDependencies:
+      hono: ^4
 
   '@img/colour@1.1.0':
     resolution: {integrity: sha512-Td76q7j57o/tLVdgS746cYARfSyxk8iEfRxewL9h4OMzYhbW4TAcppl0mT4eyqXddh6L/jwoM75mo7ixa/pCeQ==}
@@ -8432,6 +8447,10 @@ snapshots:
       '@babel/code-frame': 7.29.7
       chalk: 4.1.2
       js-yaml: 4.3.1
+
+  '@hono/node-server@2.1.1(hono@4.12.28)':
+    dependencies:
+      hono: 4.12.28
 
   '@img/colour@1.1.0': {}
 

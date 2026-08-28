@@ -39,13 +39,28 @@ function getDb() {
         .replace(/\?$/, "");
     }
 
+    // Cloudflare Workers cannot hold a socket open between requests, so the
+    // template pinned maxUses:1 / idleTimeoutMillis:1 — every query gets a
+    // brand new connection that is discarded immediately.
+    //
+    // That is survivable against a local Postgres. Against managed Postgres it
+    // is not: each query then pays a fresh TCP + TLS handshake, and a
+    // multi-query operation like a Better Auth sign-in has its connection torn
+    // down underneath it, surfacing as "Connection terminated unexpectedly".
+    //
+    // So use the throwaway settings only where the runtime actually requires
+    // them, and normal pooling everywhere else.
+    const onWorkers =
+      typeof navigator !== "undefined" &&
+      (navigator as { userAgent?: string }).userAgent === "Cloudflare-Workers";
+
     const pool = new pg.Pool({
       connectionString,
       ssl: hasSSL || process.env.NODE_ENV === "production" ? { rejectUnauthorized: false } : undefined,
       max: 10,
-      maxUses: 1,
-      idleTimeoutMillis: 1,
-      allowExitOnIdle: true,
+      ...(onWorkers
+        ? { maxUses: 1, idleTimeoutMillis: 1, allowExitOnIdle: true }
+        : { idleTimeoutMillis: 30_000, connectionTimeoutMillis: 15_000 }),
     });
 
     pool.on("error", (err) => {
