@@ -12,13 +12,13 @@
 | Question | Decision |
 |---|---|
 | Best model for the segmentation task | **nnU-Net v2, `3d_fullres` with the ResEnc-L planner.** MedNeXt-L as the challenger. Not a transformer, not Mamba. |
-| One model or several? | **Two-stage cascade.** Stage B finds bone/marrow. Stage C finds edema *inside* Stage B's mask. This is the single most important design choice in the doc. |
+| One model or several? | **One multi-task network** predicting bone and lesion together (revised — see §4.3b). Bone informs the lesion task rather than gating it. Still the most important design choice in the doc. |
 | How do we handle "early BME is subtle"? | A third, **normative/anomaly branch** trained only on your Non-BME cases. Residual from "expected normal marrow" = candidate lesion. Uses your negatives, which you have more of. |
 | How do we annotate? | 3D Slicer, on the **source volume**, saved as **`.seg.nrrd`** (master) then derived `.nii.gz` labelmap (training). Never PNG screenshots. |
 | How do we get 3 views + 3D from one annotation? | You already do. Slicer stores a 3D voxel labelmap; painting in axial automatically populates sagittal/coronal/3D. The discipline is to *verify* in the other two planes. |
 | Explainability | The mask itself + per-lesion SI ratios + uncertainty maps. Grad-CAM only on the case-level head. |
-| Web platform | Thunder Stack (Next.js + Hono + Drizzle/Postgres) as the app, **plus a separate Python FastAPI+PyTorch inference service.** ML cannot run on Cloudflare Workers. |
-| Realistic target | Bone Dice ≥ 0.92. **BME lesion Dice 0.60–0.72.** Case-level AUC ≥ 0.90. Anything claiming BME Dice > 0.85 is on a much larger dataset than yours. |
+| Web platform | Next.js + Hono + Drizzle/Postgres, **plus a separate Python inference service.** ML cannot run on Cloudflare Workers. |
+| Realistic target | Bone Dice ≥ 0.92. **BME lesion Dice 0.72–0.78.** Case-level AUC ≥ 0.90. Anything claiming BME Dice > 0.85 is on a much larger dataset than yours. |
 
 ---
 
@@ -38,7 +38,7 @@ Given a 3D MRI volume of a joint (knee / hip / sacroiliac), produce:
 Two things make this hard, and they are different problems needing different solutions:
 
 - **Early BME is subtle.** Low contrast, ill-defined margins, small volume. Solved by the anomaly branch (§4.4) and by signal normalization (§4.1).
-- **BME is easy to confuse with things outside bone.** Muscle edema, joint effusion, and cysts are all bright on STIR. Solved by the anatomy-first cascade (§4.2), which makes the confusion *structurally impossible* rather than something the model has to learn.
+- **BME is easy to confuse with things outside bone.** Muscle edema, joint effusion, and cysts are all bright on STIR. Solved by learning bone and lesion jointly (§4.2, §4.3b) and constraining the lesion to bone at inference.
 
 ---
 
@@ -219,6 +219,41 @@ Caveat to check: these are **single-knee** studies, so the mirror is the same kn
 
 **Sampling:** oversample foreground patches (nnU-Net does this by default — verify it is on).
 
+### 4.3b Revision — multi-task rather than a strict cascade
+
+A hard two-stage cascade has a failure mode worth designing out: if Stage B trims the bone
+boundary slightly, Stage C can never recover the lesion voxels that fell outside, because it
+literally never sees them. The mask is a gate, and a gate can only lose information.
+
+**Predict both labels from one network instead.** A shared encoder with two output channels —
+`bone_marrow` and `bme` — learns both tasks together, so bone context regularises the lesion
+task without gating it. The "inside bone" constraint then applies at *inference*, as a
+post-process, where a mistake is recoverable rather than fatal.
+
+Our annotation schema already stores both labels, so this needs no re-annotation. It also means
+the bone and lesion numbers come from one training run rather than two.
+
+### 4.3c Test-time augmentation
+
+At inference, predict on the image and on flipped and shifted copies, then average. No retraining,
+no extra data, roughly 4x inference cost — which is irrelevant at 107 cases. It measurably
+reduces false positives, and false positives per case is one of our headline metrics.
+
+### 4.3d 2D and 3D are a comparison, not a foregone conclusion
+
+We assumed 3D wins. That assumption deserves testing rather than trusting, for two reasons
+specific to our data:
+
+- **Our voxels are ~10:1 anisotropic** (0.35 mm in-plane, 3-4 mm slices). A 3D convolution
+  spanning a 3-4 mm gap has far less genuine context to exploit than the isotropic case the
+  architecture was designed for.
+- **3D models are sensitive to patient positioning**, and our cases come from three scanners with
+  no standardised positioning. 2D slice models are largely immune to that.
+
+So run **2D U-Net and 3D nnU-Net as a measured comparison** and let the result decide. The
+comparison table is a stronger report section than either number alone, and if 2D wins it also
+trains far faster on CPU.
+
 ### 4.4 Stage D — Normative / anomaly branch (your answer to "early stage")
 
 This is the part of the plan that specifically targets the hardest requirement in your synopsis, and it exploits an asset you actually have: **you have more confirmed normal cases than abnormal ones.**
@@ -295,7 +330,7 @@ Have two annotators independently label ~15 cases. Compute **inter-rater Dice**.
 | Metric | Baseline | Target | Stretch |
 |---|---|---|---|
 | Bone/marrow Dice | 0.88 | **0.92** | 0.96 |
-| BME lesion Dice | 0.45 | **0.62** | 0.72 |
+| BME lesion Dice | 0.55 | **0.72** | 0.78 |
 | Lesion sensitivity | 0.65 | **0.80** @ ≤1.5 FP/case | 0.88 |
 | Case-level AUC | 0.82 | **0.90** | 0.95 |
 | Volume ICC | 0.70 | **0.85** | 0.92 |

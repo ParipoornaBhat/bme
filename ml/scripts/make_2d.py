@@ -40,6 +40,29 @@ except ImportError:
     sys.exit("missing deps.  pip install numpy nibabel pillow")
 
 
+def high_intensity_mask(sl: np.ndarray, pct: float = 88.0) -> np.ndarray:
+    """Keep only the bright voxels; blank the rest.
+
+    On a fat-suppressed sequence, edema IS brightness. Handing the network the
+    bright regions instead of the whole slice means it does not have to first
+    learn to ignore ~90% of an image that cannot contain a lesion.
+
+    Threshold is a percentile of the non-background voxels, not a fixed value —
+    intensities are not comparable across our three scanners, so any absolute
+    number would mask correctly on one vendor and wrongly on another.
+
+    Caveat: growth plates are bright too and survive this mask. Our cases are
+    adults so it barely bites, but it would matter on a paediatric dataset.
+    """
+    body = sl[sl > np.percentile(sl, 10)]
+    if body.size == 0:
+        return sl
+    thr = np.percentile(body, pct)
+    out = sl.copy()
+    out[out < thr] = 0.0
+    return out
+
+
 def to_uint8(sl: np.ndarray) -> np.ndarray:
     """Percentile window then scale. Robust to the odd very bright voxel."""
     lo, hi = np.percentile(sl, [1.0, 99.0])
@@ -59,11 +82,15 @@ def main():
     ap.add_argument("--max-per-case", type=int, default=24,
                     help="cap slices per case so big volumes do not dominate")
     ap.add_argument("--size", type=int, default=256)
+    ap.add_argument("--him", action="store_true",
+                    help="high-intensity masking — writes data/slices2d_him/ instead")
+    ap.add_argument("--him-pct", type=float, default=88.0,
+                    help="percentile kept by the mask (default 88)")
     ap.add_argument("--force", action="store_true")
     args = ap.parse_args()
 
     base = Path(args.base)
-    out = base / "data" / "slices2d"
+    out = base / "data" / ("slices2d_him" if args.him else "slices2d")
     if out.exists() and not args.force:
         sys.exit(f"{out} exists. Use --force to rebuild.")
 
@@ -102,6 +129,8 @@ def main():
             sl = arr[z]
             if float(sl.max() - sl.min()) < 1e-6:
                 continue  # blank slice
+            if args.him:
+                sl = high_intensity_mask(sl, args.him_pct)
             png = to_uint8(sl)
             im = Image.fromarray(png).convert("L").resize(
                 (args.size, args.size), Image.BILINEAR

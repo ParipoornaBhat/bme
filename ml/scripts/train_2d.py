@@ -189,11 +189,15 @@ def main():
     ap.add_argument("--batch", type=int, default=32)
     ap.add_argument("--arch", default="resnet18", choices=sorted(ARCHS),
                     help="backbone; all ship with torchvision, nothing to install")
+    ap.add_argument("--dataset", default="slices2d",
+                    help="folder under data/ — 'slices2d' (raw) or 'slices2d_him' "
+                         "(high-intensity masked). Same cases either way, so the "
+                         "two runs are directly comparable.")
     args = ap.parse_args()
 
     set_seed()
     base = Path(args.base)
-    root = base / "data" / "slices2d"
+    root = base / "data" / args.dataset
     idx = root / "index.csv"
     if not idx.exists():
         sys.exit("no data/slices2d/index.csv — run ml/scripts/make_2d.py first")
@@ -202,7 +206,8 @@ def main():
     by_case, folds = patient_folds(rows, args.folds)
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
-    print(f"slices {len(rows)}   cases {len(by_case)}   device {device}   arch {args.arch}")
+    print(f"slices {len(rows)}   cases {len(by_case)}   device {device}   "
+          f"arch {args.arch}   dataset {args.dataset}")
     print(f"{args.folds}-fold, patient-level (no case appears in train and val)\n")
 
     all_p, all_y, all_rows, all_fold = [], [], [], []
@@ -247,7 +252,8 @@ def main():
 
     metrics = {
         "seed": SEED, "folds": args.folds, "epochs": args.epochs,
-        "model": f"{args.arch} (ImageNet pretrained)", "arch": args.arch, "device": device,
+        "model": f"{args.arch} (ImageNet pretrained)", "arch": args.arch,
+        "dataset": args.dataset, "device": device,
         "n_slices": len(rows), "n_cases": len(by_case),
         "slice_level": slice_m,
         "case_level": case_m,
@@ -262,9 +268,10 @@ def main():
     # Archive this run. data/results2d/ always holds the latest, and runs/ keeps
     # every previous one so the UI can chart progress and compare architectures.
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-    run_dir = out / "runs" / f"{stamp}_{args.arch}"
+    tag = args.arch + ("_him" if args.dataset.endswith("_him") else "")
+    run_dir = out / "runs" / f"{stamp}_{tag}"
     run_dir.mkdir(parents=True, exist_ok=True)
-    metrics["run_id"] = f"{stamp}_{args.arch}"
+    metrics["run_id"] = f"{stamp}_{tag}"
     metrics["finished_at"] = datetime.now().isoformat(timespec="seconds")
     (run_dir / "metrics.json").write_text(json.dumps(metrics, indent=2), encoding="utf-8")
     (out / "metrics.json").write_text(json.dumps(metrics, indent=2), encoding="utf-8")
