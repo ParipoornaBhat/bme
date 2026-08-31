@@ -11,7 +11,7 @@
     "db:down": "node scripts/dev-db.js down",
     "db:status": "node scripts/dev-db.js status",
     "prepare": "node scripts/setup-env.js",
-    "dev": "pnpm db:seed && turbo run dev",
+    "dev": "turbo run dev",
     "build": "turbo run build",
     "build:web:cf": "pnpm --filter nextjs build:cf",
     "deploy:server": "pnpm --filter server deploy",
@@ -32,7 +32,8 @@
     "clean": "node scripts/clean.js",
     "clean:install": "node scripts/clean.js && pnpm install",
     "ci": "pnpm run clean:install",
-    "native": "cross-env EXPO_NO_METRO_LAZY=1 pnpm --filter mobile start --clear"
+    "native": "cross-env EXPO_NO_METRO_LAZY=1 pnpm --filter mobile start --clear",
+    "dev:seed": "pnpm db:seed && turbo run dev"
   },
   "devDependencies": {
     "cross-env": "^10.1.0",

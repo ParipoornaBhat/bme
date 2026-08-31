@@ -106,6 +106,15 @@ pnpm dev
 
 `pnpm setup` = `db:up` + `migrate:deploy` + `db:seed`. Or double-click `start_db.cmd`.
 
+**Using the shared Supabase database instead of local Docker?** Put the connection string in
+`.env` and skip `db:up` entirely. Use the **session pooler** host
+(`aws-0-ap-northeast-2.pooler.supabase.com`), not the `db.*.supabase.co` one — the direct host
+has no IPv4 address, so it is unreachable from any network without working IPv6. That is not a
+misconfiguration on your side; it is how Supabase provisions direct endpoints.
+
+`pnpm dev` no longer runs the seed first. Seeding is a one-time job and a database hiccup should
+not stop you working on the app — use `pnpm dev:seed` when you actually want both.
+
 - Postgres runs in Docker (`bme-db`). Port is picked automatically — 5433 by default,
   5434 on this machine because another project holds 5433. A native Windows
   Postgres owns 5432 on at least one team machine. If 5433 is also busy the script probes
