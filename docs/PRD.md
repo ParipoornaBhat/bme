@@ -339,11 +339,11 @@ Published fully-automated BME work in the sacroiliac joints reports lesion sensi
 
 ---
 
-## 7. Product architecture (Thunder Stack + Python)
+## 7. Product architecture (web app + Python service)
 
 ### 7.1 The one hard constraint
 
-**PyTorch cannot run on Cloudflare Workers.** The Hono API in Thunder Stack is the gateway, not the model host. The architecture must be:
+**PyTorch cannot run on Cloudflare Workers.** The Hono API is the gateway, not the model host. The architecture must be:
 
 ```
 Next.js (web)  ──▶  Hono API  ──▶  Postgres (Drizzle)   metadata, jobs, results
@@ -355,7 +355,7 @@ Next.js (web)  ──▶  Hono API  ──▶  Postgres (Drizzle)   metadata, jo
      └──▶ Cornerstone3D viewer + three.js 3D panel
 ```
 
-Hono owns auth, upload orchestration, job records, and result serving. The Python service owns the model and nothing else. They talk over HTTP with a shared secret. This keeps the Thunder Stack monorepo intact and idiomatic while putting the ML where ML can actually run.
+Hono owns auth, upload orchestration, job records, and result serving. The Python service owns the model and nothing else. They talk over HTTP with a shared secret. This keeps the monorepo idiomatic while putting the ML where ML can actually run.
 
 ### 7.2 Repo layout
 
@@ -523,7 +523,7 @@ Ensemble uncertainty, evidence tables, Grad-CAM head. Lock the test set and run 
 *Exit: final results table.*
 
 **Phase 6 — Web platform**
-Thunder Stack scaffold, Hono to FastAPI wiring, Cornerstone3D viewer, 3D panel, report export.
+Monorepo scaffold, Hono to FastAPI wiring, Cornerstone3D viewer, 3D panel, report export.
 *Exit: upload a zip in a browser, get a 3D result.*
 
 **Phase 7 — Writing and defence**

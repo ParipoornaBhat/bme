@@ -36,7 +36,7 @@ model is single-channel, and the specificity has to come from elsewhere (see §5
 
 | Layer | Tool | Why |
 |---|---|---|
-| Web app | Next.js 15 | Thunder Stack |
+| Web app | Next.js 15 | App Router, server routes read the pipeline output directly |
 | API | Hono, on **Node** | Was Cloudflare `workerd`; it cannot connect to managed Postgres |
 | Database | **Supabase** Postgres 17 + pgvector 0.8.2 | Shared by all four teammates |
 | Auth | Better Auth, credential login | Four `@nmamit.in` accounts seeded |

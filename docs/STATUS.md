@@ -17,7 +17,7 @@ segmentation system from the PRD and is still waiting on annotations.
 The web app now does the whole loop in the browser: annotate, train, inspect results,
 check storage. Every filename in the dataset is pseudonymous — no patient name survives
 anywhere on disk. The critical path is unchanged: annotate ~10 cases, measure inter-rater
-Dice, then train Stage B.
+Dice, then train the bone/lesion model.
 
 ---
 
@@ -27,7 +27,7 @@ Phases are defined in [PRD.md](PRD.md) §8.
 
 | Phase | What | State |
 |---|---|---|
-| — | Repo, docs, Thunder Stack scaffold, `ml/` package | ✅ done |
+| — | Repo, docs, monorepo scaffold, `ml/` package | ✅ done |
 | — | Dataset collection (107 cases) | ✅ done |
 | — | Header inventory ([DATASET.md](DATASET.md)) | ✅ done |
 | — | Local dev DB (Docker + seed) | ✅ **verified running**, port 5434 |
@@ -123,8 +123,8 @@ pnpm dev
 | Decision | Why |
 |---|---|
 | **Knee**, single joint | 92/107 cases read `BodyPartExamined = KNEE`. Settled by the data. |
-| **nnU-Net v2** (`3d_fullres`, ResEnc-L) | Self-configures from the dataset; CNNs beat transformers at this scale. MedNeXt-L is the challenger, not the starting point. |
-| **Two-stage cascade** — bone first, edema inside it | Makes muscle/effusion false positives structurally impossible. The single most important design choice. |
+| **nnU-Net v2**, with 2D U-Net as a measured challenger | Self-configures; CNNs beat transformers at this scale. But our voxels are ~10:1 anisotropic and 3D models are sensitive to patient positioning — so 2D vs 3D is decided by measurement, not assumption. See PRD §4.3d. |
+| **Multi-task network** — bone and edema predicted together | Revised. A hard cascade gates: if the bone mask trims the boundary, the lesion voxels outside are unrecoverable. Sharing an encoder lets bone inform the lesion task instead. Constraint applied at inference. See PRD §4.3b. |
 | **Single-channel** on fat-suppressed sequence | Only 18/107 have T1, and 5/47 BME. T1 is an ablation, not an input. See [DATASET.md](DATASET.md). |
 | **`.seg.nrrd`** master → `.nii.gz` derived | Preserves segment names in-file; label values cannot silently shift. |
 | Labels `1=bone_marrow 2=bme 3=uncertain` | Keyed by **name**, never order. `uncertain` is excluded from the loss. |
