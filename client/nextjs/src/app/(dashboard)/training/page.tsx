@@ -77,6 +77,8 @@ export default function TrainingPage() {
   const [arch, setArch] = useState("resnet18");
   const [folds, setFolds] = useState(5);
   const [epochs, setEpochs] = useState(4);
+  const [him, setHim] = useState(false);
+  const [tta, setTta] = useState(false);
   const [busy, setBusy] = useState(false);
   const [progress, setProgress] = useState<Prog | null>(null);
   const logRef = useRef<HTMLPreElement>(null);
@@ -108,7 +110,7 @@ export default function TrainingPage() {
       const res = await fetch("/api/training", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ arch, folds, epochs }),
+        body: JSON.stringify({ arch, folds, epochs, him, tta }),
       });
       const j = await res.json();
       if (!res.ok) alert(j.error ?? "could not start");
@@ -177,6 +179,19 @@ export default function TrainingPage() {
               className="w-20 rounded-md border border-border bg-background px-3 py-2 text-sm" />
           </label>
 
+          <div className="flex flex-col gap-1.5 text-sm">
+            <label className="inline-flex items-center gap-2">
+              <input type="checkbox" checked={him} disabled={running}
+                onChange={(e) => setHim(e.target.checked)} />
+              <span>High-intensity mask</span>
+            </label>
+            <label className="inline-flex items-center gap-2">
+              <input type="checkbox" checked={tta} disabled={running}
+                onChange={(e) => setTta(e.target.checked)} />
+              <span>Test-time augmentation</span>
+            </label>
+          </div>
+
           <div className="ml-auto">
             {running ? (
               <button onClick={stop} disabled={busy}
@@ -194,8 +209,14 @@ export default function TrainingPage() {
         </div>
 
         <p className="mt-3 text-xs text-muted-foreground">
-          Runs on CPU here — PyTorch has no CUDA build for Python 3.14 yet. Five folds at
-          six epochs took about 45 minutes. Lower both while experimenting.
+          <strong>High-intensity mask</strong> keeps only the bright voxels — on a
+          fat-suppressed scan edema <em>is</em> brightness, so this hands the model the signal
+          instead of making it find it. <strong>Test-time augmentation</strong> averages the
+          prediction over flips and shifts at inference; no retraining, and it trims false
+          positives. Both are worth an A/B against a plain run.
+          <br />
+          Runs on CPU — five folds at six epochs takes about 45 minutes. Lower both while
+          experimenting.
         </p>
       </div>
 

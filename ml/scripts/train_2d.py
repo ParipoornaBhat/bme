@@ -133,7 +133,7 @@ def patient_folds(rows, k, seed=SEED):
     return by_case, folds
 
 
-def run_fold(tr_rows, va_rows, root, epochs, device, arch="resnet18", bs=32, lr=3e-4):
+def run_fold(tr_rows, va_rows, root, epochs, device, arch="resnet18", bs=32, lr=3e-4, tta=False):
     model = build_model(arch).to(device)
 
     n_pos = sum(1 for r in tr_rows if r["class"] == "bme")
@@ -164,7 +164,21 @@ def run_fold(tr_rows, va_rows, root, epochs, device, arch="resnet18", bs=32, lr=
     probs, trues, idxs = [], [], []
     with torch.no_grad():
         for x, y, i in vl:
-            p = torch.softmax(model(x.to(device)), 1)[:, 1]
+            x = x.to(device)
+            # Test-time augmentation: average the prediction over the image and
+            # a few cheap transforms of it. A borderline slice that only trips
+            # the threshold in one orientation gets averaged back down, which is
+            # where the false-positive reduction comes from. Costs one forward
+            # pass per view and needs no retraining.
+            views = [x, torch.flip(x, dims=[3])] if tta else [x]
+            if tta:
+                views += [torch.flip(x, dims=[2]),
+                          torch.roll(x, shifts=6, dims=3),
+                          torch.roll(x, shifts=-6, dims=3)]
+            acc = torch.zeros(x.size(0), device=device)
+            for v in views:
+                acc += torch.softmax(model(v), 1)[:, 1]
+            p = acc / len(views)
             probs += p.cpu().tolist(); trues += y.tolist(); idxs += i.tolist()
     return model, np.array(probs), np.array(trues), idxs
 
@@ -189,6 +203,9 @@ def main():
     ap.add_argument("--batch", type=int, default=32)
     ap.add_argument("--arch", default="resnet18", choices=sorted(ARCHS),
                     help="backbone; all ship with torchvision, nothing to install")
+    ap.add_argument("--tta", action="store_true",
+                    help="test-time augmentation — averages over flips/shifts at "
+                         "inference. No retraining; reduces false positives.")
     ap.add_argument("--dataset", default="slices2d",
                     help="folder under data/ — 'slices2d' (raw) or 'slices2d_him' "
                          "(high-intensity masked). Same cases either way, so the "
@@ -223,7 +240,7 @@ def main():
               f"({len(va_cases)} cases)")
 
         _, p, y, order = run_fold(tr_rows, va_rows, root, args.epochs, device,
-                                 args.arch, args.batch)
+                                 args.arch, args.batch, tta=args.tta)
         s = stats(y, p)
         per_fold.append(s)
         print(f"      -> acc={s['accuracy']:.3f} f1={s['f1']:.3f} auc={s['auc']:.3f}\n")
@@ -253,7 +270,7 @@ def main():
     metrics = {
         "seed": SEED, "folds": args.folds, "epochs": args.epochs,
         "model": f"{args.arch} (ImageNet pretrained)", "arch": args.arch,
-        "dataset": args.dataset, "device": device,
+        "dataset": args.dataset, "tta": args.tta, "device": device,
         "n_slices": len(rows), "n_cases": len(by_case),
         "slice_level": slice_m,
         "case_level": case_m,
@@ -268,7 +285,7 @@ def main():
     # Archive this run. data/results2d/ always holds the latest, and runs/ keeps
     # every previous one so the UI can chart progress and compare architectures.
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-    tag = args.arch + ("_him" if args.dataset.endswith("_him") else "")
+    tag = args.arch + ("_him" if args.dataset.endswith("_him") else "") + ("_tta" if args.tta else "")
     run_dir = out / "runs" / f"{stamp}_{tag}"
     run_dir.mkdir(parents=True, exist_ok=True)
     metrics["run_id"] = f"{stamp}_{tag}"
