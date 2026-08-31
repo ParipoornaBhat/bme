@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Eraser, Loader2, Paintbrush, Redo2, RotateCcw, Save } from "lucide-react";
 import { useSession } from "~/lib/auth-client";
+import Render3D from "./Render3D";
 
 /**
  * Three-plane viewer with painting, modelled on 3D Slicer's Four-Up layout.
@@ -498,40 +499,33 @@ export default function Viewer({ caseId, onSaved }: { caseId: string; onSaved?: 
           );
         })}
 
-        <div className="rounded-lg border border-border bg-card p-4 text-sm">
-          <div className="mb-2 text-xs font-semibold uppercase tracking-wider text-muted-foreground">
-            {caseId}
-          </div>
-          <dl className="space-y-1 text-xs">
-            <div className="flex justify-between gap-3">
-              <dt className="text-muted-foreground">Volume</dt>
-              <dd className="tabular-nums">{vol.dims.join(" x ")}</dd>
-            </div>
-            <div className="flex justify-between gap-3">
-              <dt className="text-muted-foreground">Cursor</dt>
-              <dd className="tabular-nums">{cursor.i}, {cursor.j}, {cursor.k}</dd>
-            </div>
-          </dl>
+        <div className="space-y-2">
+          <Render3D
+            labels={labels}
+            dims={vol.dims}
+            spacing={vol.spacing}
+            segValue={seg}
+            color={SEGMENTS.find((s) => s.value === seg)!.color}
+          />
 
-          <div className="mt-4 space-y-1 text-xs text-muted-foreground">
-            <div className="font-semibold text-foreground">Shortcuts</div>
-            <div className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-0.5">
+          <div className="rounded-lg border border-border bg-card p-3 text-xs">
+            <div className="mb-2 flex items-baseline justify-between">
+              <span className="font-semibold">{caseId}</span>
+              <span className="tabular-nums text-muted-foreground">
+                {vol.dims.join(" x ")} &middot; {vol.spacing.map((s) => s.toFixed(2)).join(" x ")} mm
+              </span>
+            </div>
+            <div className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-0.5 text-muted-foreground">
               <kbd className="font-mono">Ctrl+Z</kbd><span>Undo</span>
               <kbd className="font-mono">Ctrl+Y</kbd><span>Redo</span>
               <kbd className="font-mono">1 2 3</kbd><span>Pick segment</span>
               <kbd className="font-mono">E</kbd><span>Erase on/off</span>
               <kbd className="font-mono">[ ]</kbd><span>Brush size</span>
               <kbd className="font-mono">Scroll</kbd><span>Move through slices</span>
-              <kbd className="font-mono">Shift+click</kbd><span>Move crosshair only</span>
+              <kbd className="font-mono">Shift+click</kbd><span>Crosshair only</span>
             </div>
+            <p className="mt-2 text-muted-foreground">{status}</p>
           </div>
-
-          <p className="mt-4 text-xs text-muted-foreground">
-            Clicking in any view moves the crosshair, so the other two jump to the same point.
-            Paint bone marrow first, then Edema. Check coronal and sagittal before saving — a
-            clean axial blob is often a staircase from the side.
-          </p>
-          <p className="mt-2 text-xs text-muted-foreground">{status}</p>
         </div>
       </div>
     </div>
