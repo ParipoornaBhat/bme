@@ -6,7 +6,7 @@ import { motion, AnimatePresence } from "framer-motion";
 import { UserCircle, Shield, Key, Mail, ShieldCheck, Loader2 } from "lucide-react";
 import { toast } from "sonner";
 
-import { useDashboard } from "../layout";
+import { useDashboard } from "../dashboard-context";
 
 export default function ProfilePage() {
   const { data: session, isPending } = useSession();

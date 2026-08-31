@@ -1,6 +1,7 @@
 "use client";
 
-import { useEffect, useState, useRef, createContext, useContext } from "react";
+import { useEffect, useState, useRef } from "react";
+import { DashboardContext, type ProfileData } from "./dashboard-context";
 import { useRouter, usePathname } from "next/navigation";
 import { signOut, useSession } from "~/lib/auth-client";
 import { ThemeToggle } from "~/components/theme-toggle";
@@ -27,28 +28,6 @@ import {
 } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
 
-export interface ProfileData {
-  user: any;
-  activeRole: { id: string; name: string; displayName: string } | null;
-  permissions: string[];
-  roles: Array<{ id: string; name: string; displayName: string; isActive: boolean }>;
-}
-
-interface DashboardContextType {
-  profile: ProfileData | null;
-  loadingProfile: boolean;
-  refreshProfile: () => Promise<void>;
-}
-
-export const DashboardContext = createContext<DashboardContextType | undefined>(undefined);
-
-export function useDashboard() {
-  const context = useContext(DashboardContext);
-  if (context === undefined) {
-    throw new Error("useDashboard must be used within a DashboardLayout/Provider");
-  }
-  return context;
-}
 
 export default function DashboardLayout({ children }: { children: React.ReactNode }) {
   const { data: session, isPending } = useSession();

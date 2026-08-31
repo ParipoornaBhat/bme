@@ -6,7 +6,7 @@ import { motion } from "framer-motion";
 import { Shield, Sparkles, User, Info, Key, Fingerprint } from "lucide-react";
 import Link from "next/link";
 
-import { useDashboard } from "../layout";
+import { useDashboard } from "../dashboard-context";
 
 interface DashboardStats {
   usersCount: number | null;
