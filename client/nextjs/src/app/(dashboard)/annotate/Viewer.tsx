@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Eraser, Lasso, Loader2, Paintbrush, Redo2, RotateCcw, Save } from "lucide-react";
+import { Eraser, Lasso, Loader2, Minus, Paintbrush, Plus, Redo2, RotateCcw, Save } from "lucide-react";
 import { useSession } from "~/lib/auth-client";
 import Render3D from "./Render3D";
 
@@ -78,33 +78,48 @@ type PlaneAxes = { slice: 0 | 1 | 2; h: 0 | 1 | 2; v: 0 | 1 | 2; flipH: boolean;
  * (x = L-R, y = P-A, z = I-S); the dominant component tells us which one.
  */
 function deriveAxes(affine: number[][]): Record<Plane, PlaneAxes> {
-  // world axis -> { array axis, sign }
-  const forWorld: Array<{ ax: 0 | 1 | 2; sign: number }> = [
-    { ax: 0, sign: 1 }, { ax: 1, sign: 1 }, { ax: 2, sign: 1 },
-  ];
-  const used = new Set<number>();
-  for (let w = 0; w < 3; w++) {
-    let best = -1, bestVal = -1;
-    for (let a = 0; a < 3; a++) {
-      if (used.has(a)) continue;
-      const v = Math.abs(affine[w]?.[a] ?? 0);
-      if (v > bestVal) { bestVal = v; best = a; }
-    }
-    if (best < 0) best = [0, 1, 2].find((a) => !used.has(a))!;
-    used.add(best);
-    forWorld[w] = { ax: best as 0 | 1 | 2, sign: Math.sign(affine[w]?.[best] ?? 1) || 1 };
-  }
+  // Greedy assignment over the whole matrix: repeatedly take the largest
+  // remaining |value|, bind that (world axis, array axis) pair, and strike both
+  // out.
+  //
+  // Scanning row by row instead was the earlier bug. For an axial knee volume
+  // the affine row for left-right is [-0.335, -0.083, 0.495], so that row's
+  // largest entry sits in array axis 2 — and left-right would claim it before
+  // inferior-superior could, even though axis 2's own column is [0.495, 0.447,
+  // 4.147] and overwhelmingly inferior-superior. Comparing globally cannot make
+  // that mistake, because 4.147 is picked before 0.495 is ever considered.
+  const pairs: Array<{ w: number; a: number; v: number }> = [];
+  for (let w = 0; w < 3; w++)
+    for (let a = 0; a < 3; a++)
+      pairs.push({ w, a, v: Math.abs(affine[w]?.[a] ?? 0) });
+  pairs.sort((x, y) => y.v - x.v);
 
-  const LR = forWorld[0], PA = forWorld[1], IS = forWorld[2];
+  const forWorld: Array<{ ax: 0 | 1 | 2; sign: number } | null> = [null, null, null];
+  const takenW = new Set<number>(), takenA = new Set<number>();
+  for (const { w, a } of pairs) {
+    if (takenW.has(w) || takenA.has(a)) continue;
+    takenW.add(w); takenA.add(a);
+    forWorld[w] = { ax: a as 0 | 1 | 2, sign: Math.sign(affine[w]?.[a] ?? 1) || 1 };
+    if (takenW.size === 3) break;
+  }
+  for (let w = 0; w < 3; w++)
+    if (!forWorld[w]) {
+      const free = [0, 1, 2].find((a) => !takenA.has(a)) ?? w;
+      takenA.add(free);
+      forWorld[w] = { ax: free as 0 | 1 | 2, sign: 1 };
+    }
+
+  const LR = forWorld[0]!, PA = forWorld[1]!, IS = forWorld[2]!;
   return {
     // Axial: step through inferior-superior. Anterior at the top of the image.
     axial: { slice: IS.ax, h: LR.ax, v: PA.ax, flipH: LR.sign < 0, flipV: PA.sign > 0 },
     // Coronal: step through posterior-anterior. Superior at the top.
     coronal: { slice: PA.ax, h: LR.ax, v: IS.ax, flipH: LR.sign < 0, flipV: IS.sign < 0 },
-    // Sagittal: step through left-right. Superior at the top, anterior at left.
+    // Sagittal: step through left-right. Superior at the top.
     sagittal: { slice: LR.ax, h: PA.ax, v: IS.ax, flipH: PA.sign < 0, flipV: IS.sign < 0 },
   };
 }
+
 type Cursor = { i: number; j: number; k: number };
 
 /** Cursor component along a numeric array axis (0=i, 1=j, 2=k). */
@@ -124,6 +139,9 @@ export default function Viewer({ caseId, onSaved }: { caseId: string; onSaved?: 
   const [tool, setTool] = useState<"brush" | "pencil">("brush");
   const outline = useRef<[number, number][]>([]);
   const [outlineTick, setOutlineTick] = useState(0);
+  // Zoom is per view: you often want a lesion magnified in one plane while
+  // keeping the others wide for context.
+  const [zoom, setZoom] = useState<Record<Plane, number>>({ axial: 1, coronal: 1, sagittal: 1 });
   const [maskInside, setMaskInside] = useState(true);
   const [cursor, setCursor] = useState<Cursor>({ i: 0, j: 0, k: 0 });
   const [dirty, setDirty] = useState(false);
@@ -615,12 +633,31 @@ export default function Viewer({ caseId, onSaved }: { caseId: string; onSaved?: 
             <div key={p}
               className="flex flex-col rounded-lg border-2 bg-black p-1.5"
               style={{ borderColor: PLANE_COLOR[p], aspectRatio: "1 / 1" }}>
-              <div className="mb-1.5 flex items-center justify-between px-1 text-[11px] uppercase tracking-wider"
+              <div className="mb-1 flex shrink-0 items-center justify-between gap-1 px-1 text-[10px] uppercase tracking-wider"
                 style={{ color: PLANE_COLOR[p] }}>
                 <span>{p}</span>
-                <span className="tabular-nums text-neutral-400">{s + 1} / {depth}</span>
+                <span className="flex items-center gap-0.5">
+                  <button type="button" title="Zoom out"
+                    onClick={() => setZoom((z) => ({ ...z, [p]: Math.max(1, +(z[p] - 0.25).toFixed(2)) }))}
+                    className="rounded border border-neutral-700 px-1 text-neutral-300 hover:bg-neutral-800">
+                    <Minus className="h-2.5 w-2.5" />
+                  </button>
+                  <button type="button" title="Reset zoom"
+                    onClick={() => setZoom((z) => ({ ...z, [p]: 1 }))}
+                    className="w-8 rounded border border-neutral-700 text-[9px] tabular-nums text-neutral-300 hover:bg-neutral-800">
+                    {zoom[p].toFixed(1)}x
+                  </button>
+                  <button type="button" title="Zoom in"
+                    onClick={() => setZoom((z) => ({ ...z, [p]: Math.min(6, +(z[p] + 0.25).toFixed(2)) }))}
+                    className="rounded border border-neutral-700 px-1 text-neutral-300 hover:bg-neutral-800">
+                    <Plus className="h-2.5 w-2.5" />
+                  </button>
+                  <span className="ml-1 tabular-nums text-neutral-400">{s + 1}/{depth}</span>
+                </span>
               </div>
               <div className="flex min-h-0 flex-1 items-center justify-center overflow-hidden">
+              <div className="flex h-full w-full items-center justify-center"
+                style={{ transform: `scale(${zoom[p]})`, transformOrigin: "center" }}>
               <canvas
                 ref={(el) => { canvases.current[p] = el; }}
                 className="cursor-crosshair rounded"
@@ -679,6 +716,7 @@ export default function Viewer({ caseId, onSaved }: { caseId: string; onSaved?: 
                 }}
               />
               </div>
+              </div>
               <input type="range" min={0} max={depth - 1} value={s}
                 onChange={(e) => {
                   const v = Number(e.target.value);
@@ -694,8 +732,7 @@ export default function Viewer({ caseId, onSaved }: { caseId: string; onSaved?: 
             labels={labels}
             dims={vol.dims}
             spacing={vol.spacing}
-            segValue={seg}
-            color={SEGMENTS.find((s) => s.value === seg)!.color}
+            segments={SEGMENTS}
           />
 
           <div className="rounded-lg border border-border bg-card p-3 text-xs">
