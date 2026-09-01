@@ -89,25 +89,22 @@ function LoginContent() {
     }
   };
 
-  const handleAutofill = async (role: "admin" | "user") => {
-    const autofillEmail = role === "admin" ? "nnm23cs124@nmamit.in" : "nnm23cs071@nmamit.in";
-    const autofillPassword = role === "admin" ? "BmeDev@2026" : "BmeDev@2026";
-
-    setEmail(autofillEmail);
-    setPassword(autofillPassword);
+  const handleAutofill = async (member: (typeof TEAM)[number]) => {
+    setEmail(member.email);
+    setPassword(TEAM_PASSWORD);
 
     setLoading(true);
     try {
       const { error } = await signIn.email({
-        email: autofillEmail,
-        password: autofillPassword,
+        email: member.email,
+        password: TEAM_PASSWORD,
         callbackURL: "/dashboard",
       });
 
       if (error) {
         toast.error(error.message || "Invalid credentials");
       } else {
-        toast.success(`Welcome back! Logging in as ${role === 'admin' ? 'Administrator' : 'Standard User'}...`);
+        toast.success(`Welcome back, ${member.first}`);
         router.push("/dashboard");
       }
     } catch (err) {
@@ -280,30 +277,26 @@ function LoginContent() {
               {isGoogleLoading ? "Signing in..." : "Google Workspace"}
             </button>
 
-            {/* Professional Autofill Section */}
+            {/* One button per team member — this is a four-person project, so the
+                template's generic admin/user pair was not useful. */}
             <div className="mt-6 rounded-2xl border border-border/40 bg-muted/20 p-4 dark:bg-white/5 dark:border-white/5">
-              <p className="font-bold text-xs uppercase tracking-wider text-muted-foreground mb-3 text-center">Quick Access Trial Accounts</p>
-              <div className="grid grid-cols-2 gap-3">
-                <button
-                  type="button"
-                  disabled={loading}
-                  onClick={() => handleAutofill("admin")}
-                  className="flex flex-col items-center justify-center gap-1.5 p-3 rounded-xl border border-border/50 bg-background/40 hover:bg-primary/10 hover:border-primary/30 transition-all text-foreground active:scale-[0.97] cursor-pointer"
-                >
-                  <ShieldCheck className="h-5 w-5 text-primary" />
-                  <span className="font-bold text-[13px]">Trial Admin</span>
-                  <span className="text-[10px] text-muted-foreground font-semibold">Full Access</span>
-                </button>
-                <button
-                  type="button"
-                  disabled={loading}
-                  onClick={() => handleAutofill("user")}
-                  className="flex flex-col items-center justify-center gap-1.5 p-3 rounded-xl border border-border/50 bg-background/40 hover:bg-secondary/20 hover:border-secondary-foreground/30 transition-all text-foreground active:scale-[0.97] cursor-pointer"
-                >
-                  <User className="h-5 w-5 text-muted-foreground" />
-                  <span className="font-bold text-[13px]">Trial User</span>
-                  <span className="text-[10px] text-muted-foreground font-semibold">No Permissions</span>
-                </button>
+              <p className="font-bold text-xs uppercase tracking-wider text-muted-foreground mb-3 text-center">
+                Sign in as
+              </p>
+              <div className="grid grid-cols-2 gap-2.5">
+                {TEAM.map((m) => (
+                  <button
+                    key={m.email}
+                    type="button"
+                    disabled={loading}
+                    onClick={() => handleAutofill(m)}
+                    className="flex flex-col items-center justify-center gap-1 p-3 rounded-xl border border-border/50 bg-background/40 hover:bg-primary/10 hover:border-primary/30 transition-all text-foreground active:scale-[0.97] cursor-pointer disabled:opacity-50"
+                  >
+                    <User className="h-5 w-5 text-primary" />
+                    <span className="font-bold text-[13px] leading-tight">{m.first}</span>
+                    <span className="text-[10px] text-muted-foreground font-semibold tabular-nums">{m.usn}</span>
+                  </button>
+                ))}
               </div>
             </div>
           </div>
@@ -324,6 +317,20 @@ function LoginContent() {
     </div>
   );
 }
+
+/**
+ * The four project accounts, seeded by server/db/src/seed.ts. One shared
+ * password: this is a local research tool for a four-person team, not a
+ * multi-tenant product, and separate passwords would only mean four ways to be
+ * locked out of your own annotations.
+ */
+const TEAM_PASSWORD = "BmeDev@2026";
+const TEAM = [
+  { first: "Elvin", usn: "NNM23CS071", email: "nnm23cs071@nmamit.in" },
+  { first: "Paripoorna", usn: "NNM23CS124", email: "nnm23cs124@nmamit.in" },
+  { first: "Reegan", usn: "NNM23CS149", email: "nnm23cs149@nmamit.in" },
+  { first: "Aditi", usn: "NNM23CS293", email: "nnm23cs293@nmamit.in" },
+] as const;
 
 export default function LoginPage() {
   return (
