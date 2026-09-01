@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Eraser, Loader2, Paintbrush, Redo2, RotateCcw, Save } from "lucide-react";
+import { Eraser, Lasso, Loader2, Paintbrush, Redo2, RotateCcw, Save } from "lucide-react";
 import { useSession } from "~/lib/auth-client";
 import Render3D from "./Render3D";
 
@@ -51,9 +51,66 @@ type Vol = {
   dims: [number, number, number];
   /** mm per voxel along i, j, k. Needed because our voxels are ~10:1 anisotropic. */
   spacing: [number, number, number];
+  /** Which array axis each anatomical plane slices along, and how to lay it out. */
+  axes: Record<Plane, PlaneAxes>;
   lo: number; hi: number;
 };
+
+/**
+ * How one anatomical plane maps onto the array.
+ *
+ * `slice` is the array axis stepped through; `h` and `v` are the two in-plane
+ * axes. Flips put superior/anterior at the top of the image.
+ */
+type PlaneAxes = { slice: 0 | 1 | 2; h: 0 | 1 | 2; v: 0 | 1 | 2; flipH: boolean; flipV: boolean };
+
+/**
+ * Work out which array axis corresponds to which anatomical direction.
+ *
+ * Array axis order is NOT fixed: it follows how the scan was acquired. An
+ * axially-acquired volume has k running inferior-superior, but a sagittal
+ * acquisition has k running left-right and a coronal one has k running
+ * posterior-anterior. Assuming "k is always axial" mislabels every
+ * non-axial acquisition — which is why some cases looked correct and others
+ * had their three views rotated.
+ *
+ * The affine's columns give each array axis a direction in world space
+ * (x = L-R, y = P-A, z = I-S); the dominant component tells us which one.
+ */
+function deriveAxes(affine: number[][]): Record<Plane, PlaneAxes> {
+  // world axis -> { array axis, sign }
+  const forWorld: Array<{ ax: 0 | 1 | 2; sign: number }> = [
+    { ax: 0, sign: 1 }, { ax: 1, sign: 1 }, { ax: 2, sign: 1 },
+  ];
+  const used = new Set<number>();
+  for (let w = 0; w < 3; w++) {
+    let best = -1, bestVal = -1;
+    for (let a = 0; a < 3; a++) {
+      if (used.has(a)) continue;
+      const v = Math.abs(affine[w]?.[a] ?? 0);
+      if (v > bestVal) { bestVal = v; best = a; }
+    }
+    if (best < 0) best = [0, 1, 2].find((a) => !used.has(a))!;
+    used.add(best);
+    forWorld[w] = { ax: best as 0 | 1 | 2, sign: Math.sign(affine[w]?.[best] ?? 1) || 1 };
+  }
+
+  const LR = forWorld[0], PA = forWorld[1], IS = forWorld[2];
+  return {
+    // Axial: step through inferior-superior. Anterior at the top of the image.
+    axial: { slice: IS.ax, h: LR.ax, v: PA.ax, flipH: LR.sign < 0, flipV: PA.sign > 0 },
+    // Coronal: step through posterior-anterior. Superior at the top.
+    coronal: { slice: PA.ax, h: LR.ax, v: IS.ax, flipH: LR.sign < 0, flipV: IS.sign < 0 },
+    // Sagittal: step through left-right. Superior at the top, anterior at left.
+    sagittal: { slice: LR.ax, h: PA.ax, v: IS.ax, flipH: PA.sign < 0, flipV: IS.sign < 0 },
+  };
+}
 type Cursor = { i: number; j: number; k: number };
+
+/** Cursor component along a numeric array axis (0=i, 1=j, 2=k). */
+const axisVal = (c: Cursor, ax: 0 | 1 | 2) => (ax === 0 ? c.i : ax === 1 ? c.j : c.k);
+const setAxis = (c: Cursor, ax: 0 | 1 | 2, v: number): Cursor =>
+  ax === 0 ? { ...c, i: v } : ax === 1 ? { ...c, j: v } : { ...c, k: v };
 
 export default function Viewer({ caseId, onSaved }: { caseId: string; onSaved?: () => void }) {
   const { data: session } = useSession();
@@ -64,6 +121,9 @@ export default function Viewer({ caseId, onSaved }: { caseId: string; onSaved?: 
   const [seg, setSeg] = useState<number>(1);
   const [brush, setBrush] = useState(6);
   const [erasing, setErasing] = useState(false);
+  const [tool, setTool] = useState<"brush" | "pencil">("brush");
+  const outline = useRef<[number, number][]>([]);
+  const [outlineTick, setOutlineTick] = useState(0);
   const [maskInside, setMaskInside] = useState(true);
   const [cursor, setCursor] = useState<Cursor>({ i: 0, j: 0, k: 0 });
   const [dirty, setDirty] = useState(false);
@@ -74,6 +134,7 @@ export default function Viewer({ caseId, onSaved }: { caseId: string; onSaved?: 
     axial: null, coronal: null, sagittal: null,
   });
   const painting = useRef(false);
+  const pencilPlane = useRef<Plane | null>(null);
   const undoStack = useRef<Uint8Array[]>([]);
   const redoStack = useRef<Uint8Array[]>([]);
 
@@ -127,8 +188,15 @@ export default function Viewer({ caseId, onSaved }: { caseId: string; onSaved?: 
         const lo = sample[Math.floor(sample.length * 0.01)];
         const hi = sample[Math.floor(sample.length * 0.99)] || lo + 1;
 
+        // nifti-reader-js exposes the sform/qform-derived affine; fall back to
+        // an identity mapping if a file somehow lacks one.
+        const aff: number[][] =
+          (hdr as unknown as { affine?: number[][] }).affine ??
+          [[1, 0, 0, 0], [0, 1, 0, 0], [0, 0, 1, 0], [0, 0, 0, 1]];
+        const axes = deriveAxes(aff);
+
         if (cancelled) return;
-        setVol({ data, dims, spacing, lo, hi });
+        setVol({ data, dims, spacing, axes, lo, hi });
         setLabels(new Uint8Array(n));
         setCursor({
           i: Math.floor(dims[0] / 2), j: Math.floor(dims[1] / 2), k: Math.floor(dims[2] / 2),
@@ -147,44 +215,54 @@ export default function Viewer({ caseId, onSaved }: { caseId: string; onSaved?: 
 
   // ---- geometry --------------------------------------------------------
   /**
-   * In-plane voxel size, the axis this plane slices along, and the PHYSICAL
-   * aspect ratio in millimetres. The canvas is drawn at voxel resolution but
-   * displayed at the physical ratio, so anatomy keeps its true proportions on
-   * anisotropic data instead of being stretched or flattened.
+   * In-plane voxel extent, slice depth, and the PHYSICAL size in millimetres.
+   * All of it comes from the affine-derived axis map, so a sagittally-acquired
+   * volume shows a true sagittal view rather than whatever array axis happened
+   * to be third.
    */
-  const planeGeom = useCallback((p: Plane, d: [number, number, number], sp?: [number, number, number]) => {
-    const s = sp ?? [1, 1, 1];
-    if (p === "axial")
-      return { w: d[0], h: d[1], depth: d[2], axis: "k" as const,
-               mmW: d[0] * s[0], mmH: d[1] * s[1] };
-    if (p === "coronal")
-      return { w: d[0], h: d[2], depth: d[1], axis: "j" as const,
-               mmW: d[0] * s[0], mmH: d[2] * s[2] };
-    return { w: d[1], h: d[2], depth: d[0], axis: "i" as const,
-             mmW: d[1] * s[1], mmH: d[2] * s[2] };
+  const planeGeom = useCallback((p: Plane, v: Vol) => {
+    const ax = v.axes[p];
+    return {
+      w: v.dims[ax.h],
+      h: v.dims[ax.v],
+      depth: v.dims[ax.slice],
+      axis: ax,
+      mmW: v.dims[ax.h] * v.spacing[ax.h],
+      mmH: v.dims[ax.v] * v.spacing[ax.v],
+    };
   }, []);
 
-  const sampleAt = useCallback(
-    (p: Plane, d: [number, number, number], a: number, b: number, s: number) =>
-      p === "axial" ? idx(d, a, b, s) : p === "coronal" ? idx(d, a, s, b) : idx(d, s, a, b),
-    [idx],
-  );
+  /** In-plane (a,b) at slice s -> flat array index, honouring axis order and flips. */
+  const sampleAt = useCallback((p: Plane, v: Vol, a: number, b: number, s: number) => {
+    const ax = v.axes[p];
+    const c: [number, number, number] = [0, 0, 0];
+    c[ax.slice] = s;
+    c[ax.h] = ax.flipH ? v.dims[ax.h] - 1 - a : a;
+    c[ax.v] = ax.flipV ? v.dims[ax.v] - 1 - b : b;
+    return idx(v.dims, c[0], c[1], c[2]);
+  }, [idx]);
 
-  /** In-plane (a,b) of the crosshair, for drawing the guide lines. */
-  const cursorInPlane = useCallback((p: Plane, c: Cursor) =>
-    p === "axial" ? { a: c.i, b: c.j } : p === "coronal" ? { a: c.i, b: c.k } : { a: c.j, b: c.k },
-  []);
+  /** Where the crosshair sits within this plane, for the guide lines. */
+  const cursorInPlane = useCallback((p: Plane, v: Vol, cur: Cursor) => {
+    const ax = v.axes[p];
+    const c = [cur.i, cur.j, cur.k];
+    const a = ax.flipH ? v.dims[ax.h] - 1 - c[ax.h] : c[ax.h];
+    const b = ax.flipV ? v.dims[ax.v] - 1 - c[ax.v] : c[ax.v];
+    return { a, b };
+  }, []);
 
-  const sliceOf = useCallback((p: Plane, c: Cursor) =>
-    p === "axial" ? c.k : p === "coronal" ? c.j : c.i, []);
+  const sliceOf = useCallback((p: Plane, v: Vol, cur: Cursor) => {
+    const c = [cur.i, cur.j, cur.k];
+    return c[v.axes[p].slice];
+  }, []);
 
   // ---- render ----------------------------------------------------------
   const draw = useCallback((p: Plane) => {
     const cv = canvases.current[p];
     if (!cv || !vol || !labels) return;
     const { data, dims, lo, hi } = vol;
-    const { w, h } = planeGeom(p, dims);
-    const s = sliceOf(p, cursor);
+    const { w, h } = planeGeom(p, vol);
+    const s = sliceOf(p, vol, cursor);
     if (cv.width !== w || cv.height !== h) { cv.width = w; cv.height = h; }
 
     const ctx = cv.getContext("2d");
@@ -194,7 +272,7 @@ export default function Viewer({ caseId, onSaved }: { caseId: string; onSaved?: 
 
     for (let b = 0; b < h; b++) {
       for (let a = 0; a < w; a++) {
-        const flat = sampleAt(p, dims, a, b, s);
+        const flat = sampleAt(p, vol, a, b, s);
         const v = data[flat];
         let g = Math.round(((Math.min(Math.max(v, lo), hi) - lo) / range) * 255);
         let r = g, bl = g;
@@ -215,7 +293,7 @@ export default function Viewer({ caseId, onSaved }: { caseId: string; onSaved?: 
     ctx.putImageData(img, 0, 0);
 
     // Crosshair, drawn after the pixels so it sits on top.
-    const { a: ca, b: cb } = cursorInPlane(p, cursor);
+    const { a: ca, b: cb } = cursorInPlane(p, vol, cursor);
     const y = h - 1 - cb;
     ctx.save();
     ctx.strokeStyle = PLANE_COLOR[p];
@@ -229,7 +307,22 @@ export default function Viewer({ caseId, onSaved }: { caseId: string; onSaved?: 
     ctx.moveTo(Math.min(w, ca + gap), y); ctx.lineTo(w, y);
     ctx.stroke();
     ctx.restore();
-  }, [vol, labels, cursor, planeGeom, sampleAt, cursorInPlane, sliceOf]);
+
+    // Live pencil trace on the plane being drawn in.
+    if (pencilPlane.current === p && outline.current.length > 1) {
+      ctx.save();
+      ctx.strokeStyle = SEGMENTS.find((x) => x.value === seg)!.color;
+      ctx.lineWidth = Math.max(1.5, Math.round(w / 300));
+      ctx.setLineDash([Math.max(3, w / 90), Math.max(3, w / 90)]);
+      ctx.beginPath();
+      const [x0, y0] = outline.current[0];
+      ctx.moveTo(x0, h - 1 - y0);
+      for (const [x, y] of outline.current.slice(1)) ctx.lineTo(x, h - 1 - y);
+      ctx.closePath();
+      ctx.stroke();
+      ctx.restore();
+    }
+  }, [vol, labels, cursor, seg, outlineTick, planeGeom, sampleAt, cursorInPlane, sliceOf]);
 
   const drawAll = useCallback(() => { PLANES.forEach(draw); }, [draw]);
   useEffect(() => { drawAll(); }, [drawAll]);
@@ -272,7 +365,7 @@ export default function Viewer({ caseId, onSaved }: { caseId: string; onSaved?: 
   const toVoxel = useCallback((p: Plane, ev: React.MouseEvent<HTMLCanvasElement>) => {
     if (!vol) return null;
     const rect = ev.currentTarget.getBoundingClientRect();
-    const { w, h } = planeGeom(p, vol.dims);
+    const { w, h } = planeGeom(p, vol);
     const a = Math.floor(((ev.clientX - rect.left) / rect.width) * w);
     const b = h - 1 - Math.floor(((ev.clientY - rect.top) / rect.height) * h);
     if (a < 0 || b < 0 || a >= w || b >= h) return null;
@@ -281,19 +374,20 @@ export default function Viewer({ caseId, onSaved }: { caseId: string; onSaved?: 
 
   /** Move the crosshair so the other two views follow this click. */
   const moveCursor = useCallback((p: Plane, a: number, b: number) => {
-    setCursor((c) =>
-      p === "axial" ? { ...c, i: a, j: b }
-        : p === "coronal" ? { ...c, i: a, k: b }
-          : { ...c, j: a, k: b });
-  }, []);
+    if (!vol) return;
+    const ax = vol.axes[p];
+    const ha = ax.flipH ? vol.dims[ax.h] - 1 - a : a;
+    const vb = ax.flipV ? vol.dims[ax.v] - 1 - b : b;
+    setCursor((c) => setAxis(setAxis(c, ax.h, ha), ax.v, vb));
+  }, [vol]);
 
   const paintAt = useCallback((p: Plane, ev: React.MouseEvent<HTMLCanvasElement>) => {
     if (!vol || !labels) return;
     const hit = toVoxel(p, ev);
     if (!hit) return;
     const { dims } = vol;
-    const { w, h } = planeGeom(p, dims);
-    const s = sliceOf(p, cursor);
+    const { w, h } = planeGeom(p, vol);
+    const s = sliceOf(p, vol, cursor);
     const r = brush;
 
     for (let db = -r; db <= r; db++) {
@@ -301,7 +395,7 @@ export default function Viewer({ caseId, onSaved }: { caseId: string; onSaved?: 
         if (da * da + db * db > r * r) continue;
         const a = hit.a + da, b = hit.b + db;
         if (a < 0 || b < 0 || a >= w || b >= h) continue;
-        const i = sampleAt(p, dims, a, b, s);
+        const i = sampleAt(p, vol, a, b, s);
         if (erasing) {
           labels[i] = 0;
         } else {
@@ -320,6 +414,50 @@ export default function Viewer({ caseId, onSaved }: { caseId: string; onSaved?: 
   }, [vol, labels, cursor, brush, erasing, seg, maskInside,
       planeGeom, sampleAt, sliceOf, toVoxel, drawAll]);
 
+  /**
+   * Pencil: close the traced outline and fill everything inside it.
+   *
+   * Even-odd scanline fill rather than flood fill. Flood fill leaks the moment
+   * the traced boundary has a single-pixel gap — easy to do with a mouse, and
+   * the leak is silent and large. A polygon is closed by definition, so the
+   * worst case is a slightly wrong shape rather than a whole slice filled.
+   */
+  const commitOutline = useCallback(() => {
+    const pts = outline.current;
+    const p = pencilPlane.current;
+    outline.current = [];
+    pencilPlane.current = null;
+    setOutlineTick((n) => n + 1);
+    if (!vol || !labels || !p || pts.length < 3) { drawAll(); return; }
+    const { w, h } = planeGeom(p, vol);
+    const s = sliceOf(p, vol, cursor);
+
+    let minB = Infinity, maxB = -Infinity;
+    for (const [, b] of pts) { if (b < minB) minB = b; if (b > maxB) maxB = b; }
+    minB = Math.max(0, Math.floor(minB)); maxB = Math.min(h - 1, Math.ceil(maxB));
+
+    for (let b = minB; b <= maxB; b++) {
+      const xs: number[] = [];
+      for (let i = 0, j = pts.length - 1; i < pts.length; j = i++) {
+        const [ax, ay] = pts[i], [bx, by] = pts[j];
+        if ((ay > b) !== (by > b)) xs.push(ax + ((b - ay) / (by - ay)) * (bx - ax));
+      }
+      xs.sort((m, n) => m - n);
+      for (let k = 0; k + 1 < xs.length; k += 2) {
+        const from = Math.max(0, Math.ceil(xs[k]));
+        const to = Math.min(w - 1, Math.floor(xs[k + 1]));
+        for (let a = from; a <= to; a++) {
+          const flat = sampleAt(p, vol, a, b, s);
+          if (erasing) { labels[flat] = 0; continue; }
+          if (maskInside && seg !== 1 && labels[flat] !== 1 && labels[flat] !== seg) continue;
+          labels[flat] = seg;
+        }
+      }
+    }
+    setDirty(true);
+    drawAll();
+  }, [vol, labels, cursor, erasing, maskInside, seg, planeGeom, sliceOf, sampleAt, drawAll]);
+
   // ---- keyboard --------------------------------------------------------
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -333,12 +471,17 @@ export default function Viewer({ caseId, onSaved }: { caseId: string; onSaved?: 
       else if (e.key === "2") setSeg(2);
       else if (e.key === "3") setSeg(3);
       else if (e.key.toLowerCase() === "e") setErasing((v) => !v);
+      else if (e.key.toLowerCase() === "p") setTool((v) => (v === "brush" ? "pencil" : "brush"));
+      else if (e.key === "Enter") { e.preventDefault(); commitOutline(); }
+      else if (e.key === "Escape") {
+        outline.current = []; pencilPlane.current = null; setOutlineTick((n) => n + 1); drawAll();
+      }
       else if (e.key === "[") setBrush((b) => Math.max(1, b - 1));
       else if (e.key === "]") setBrush((b) => Math.min(20, b + 1));
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [undo, redo]);
+  }, [undo, redo, commitOutline, drawAll]);
 
   // ---- save ------------------------------------------------------------
   const save = async () => {
@@ -411,12 +554,25 @@ export default function Viewer({ caseId, onSaved }: { caseId: string; onSaved?: 
 
         <div className="mx-1 h-6 w-px bg-border" />
 
+        <div className="inline-flex overflow-hidden rounded-md border border-border">
+          <button onClick={() => setTool("brush")} title="Brush  (P toggles)"
+            className={`inline-flex items-center gap-1.5 px-2.5 py-1.5 text-sm ${
+              tool === "brush" ? "bg-accent" : ""}`}>
+            <Paintbrush className="h-4 w-4" /> Brush
+          </button>
+          <button onClick={() => setTool("pencil")} title="Pencil — trace an outline, the inside fills  (P)"
+            className={`inline-flex items-center gap-1.5 border-l border-border px-2.5 py-1.5 text-sm ${
+              tool === "pencil" ? "bg-accent" : ""}`}>
+            <Lasso className="h-4 w-4" /> Pencil
+          </button>
+        </div>
+
         <button onClick={() => setErasing((e) => !e)} title="Toggle erase  (E)"
           className={`inline-flex items-center gap-1.5 rounded-md border px-3 py-1.5 text-sm ${
             erasing ? "border-primary bg-accent" : "border-border"
           }`}>
-          {erasing ? <Eraser className="h-4 w-4" /> : <Paintbrush className="h-4 w-4" />}
-          {erasing ? "Erase" : "Paint"}
+          <Eraser className="h-4 w-4" />
+          {erasing ? "Erasing" : "Erase"}
         </button>
 
         <label className="flex items-center gap-2 text-sm text-muted-foreground" title="[ and ]">
@@ -450,51 +606,85 @@ export default function Viewer({ caseId, onSaved }: { caseId: string; onSaved?: 
       </div>
 
       {/* Four-Up: three orthogonal views plus an info panel, as in Slicer */}
-      <div className="grid gap-2 lg:grid-cols-2">
+      <div className="grid gap-1.5 lg:grid-cols-2">
         {PLANES.map((p) => {
-          const g = planeGeom(p, vol.dims, vol.spacing);
+          const g = planeGeom(p, vol);
           const depth = g.depth;
-          const s = sliceOf(p, cursor);
+          const s = sliceOf(p, vol, cursor);
           return (
-            <div key={p} className="rounded-lg border-2 bg-black p-2"
-              style={{ borderColor: PLANE_COLOR[p] }}>
+            <div key={p}
+              className="flex flex-col rounded-lg border-2 bg-black p-1.5"
+              style={{ borderColor: PLANE_COLOR[p], aspectRatio: "1 / 1" }}>
               <div className="mb-1.5 flex items-center justify-between px-1 text-[11px] uppercase tracking-wider"
                 style={{ color: PLANE_COLOR[p] }}>
                 <span>{p}</span>
                 <span className="tabular-nums text-neutral-400">{s + 1} / {depth}</span>
               </div>
+              <div className="flex min-h-0 flex-1 items-center justify-center overflow-hidden">
               <canvas
                 ref={(el) => { canvases.current[p] = el; }}
-                className="w-full cursor-crosshair rounded"
-                style={{ imageRendering: "auto", aspectRatio: `${g.mmW} / ${g.mmH}`, width: "100%" }}
+                className="cursor-crosshair rounded"
+                style={{
+                  imageRendering: "auto",
+                  // Fill the square tile while keeping true physical proportions.
+                  aspectRatio: `${g.mmW} / ${g.mmH}`,
+                  maxWidth: "100%", maxHeight: "100%",
+                  margin: "0 auto", display: "block",
+                }}
                 onMouseDown={(e) => {
                   const hit = toVoxel(p, e);
                   if (!hit) return;
-                  if (e.button === 0 && !e.shiftKey) {
-                    pushUndo(); painting.current = true; paintAt(p, e);
+                  if (e.shiftKey) { moveCursor(p, hit.a, hit.b); return; }
+                  if (e.button !== 0) return;
+                  pushUndo();
+                  if (tool === "pencil") {
+                    pencilPlane.current = p;
+                    outline.current = [[hit.a, hit.b]];
+                    painting.current = true;
+                    setOutlineTick((n) => n + 1);
+                  } else {
+                    painting.current = true;
+                    paintAt(p, e);
+                    moveCursor(p, hit.a, hit.b);
                   }
-                  // Shift-click moves the crosshair without painting.
-                  moveCursor(p, hit.a, hit.b);
                 }}
-                onMouseMove={(e) => { if (painting.current) paintAt(p, e); }}
-                onMouseUp={() => { painting.current = false; drawAll(); }}
+                onMouseMove={(e) => {
+                  if (!painting.current) return;
+                  if (tool === "pencil") {
+                    const hit = toVoxel(p, e);
+                    if (!hit) return;
+                    const last = outline.current[outline.current.length - 1];
+                    // Skip duplicate points so the polygon stays cheap to fill.
+                    if (!last || last[0] !== hit.a || last[1] !== hit.b) {
+                      outline.current.push([hit.a, hit.b]);
+                      setOutlineTick((n) => n + 1);
+                    }
+                  } else {
+                    paintAt(p, e);
+                  }
+                }}
+                onMouseUp={() => {
+                  // Pencil follows Slicer's Draw effect: releasing the mouse
+                  // leaves the outline on screen so it can be inspected (and
+                  // extended) before Enter commits it. Only the brush paints
+                  // on release.
+                  painting.current = false;
+                  drawAll();
+                }}
                 onMouseLeave={() => { painting.current = false; }}
                 onWheel={(e) => {
                   const d = e.deltaY > 0 ? 1 : -1;
-                  setCursor((c) => {
-                    const ax = g.axis;
-                    const cur = ax === "i" ? c.i : ax === "j" ? c.j : c.k;
-                    const next = Math.min(depth - 1, Math.max(0, cur + d));
-                    return { ...c, [ax]: next };
-                  });
+                  setCursor((c) => setAxis(c, g.axis.slice, 
+                    Math.min(depth - 1, Math.max(0, axisVal(c, g.axis.slice) + d))));
                 }}
               />
+              </div>
               <input type="range" min={0} max={depth - 1} value={s}
                 onChange={(e) => {
-                  const ax = g.axis;
-                  setCursor((c) => ({ ...c, [ax]: Number(e.target.value) }));
+                  const v = Number(e.target.value);
+                  setCursor((c) => setAxis(c, g.axis.slice, v));
                 }}
-                className="mt-2 w-full" />
+                className="mt-1 w-full shrink-0" />
             </div>
           );
         })}
@@ -519,11 +709,20 @@ export default function Viewer({ caseId, onSaved }: { caseId: string; onSaved?: 
               <kbd className="font-mono">Ctrl+Z</kbd><span>Undo</span>
               <kbd className="font-mono">Ctrl+Y</kbd><span>Redo</span>
               <kbd className="font-mono">1 2 3</kbd><span>Pick segment</span>
+              <kbd className="font-mono">P</kbd><span>Brush / pencil</span>
+              <kbd className="font-mono">Enter</kbd><span>Fill pencil outline</span>
+              <kbd className="font-mono">Esc</kbd><span>Discard outline</span>
               <kbd className="font-mono">E</kbd><span>Erase on/off</span>
               <kbd className="font-mono">[ ]</kbd><span>Brush size</span>
               <kbd className="font-mono">Scroll</kbd><span>Move through slices</span>
               <kbd className="font-mono">Shift+click</kbd><span>Crosshair only</span>
             </div>
+            {outlineTick >= 0 && outline.current.length > 2 && (
+              <p className="mt-2 rounded bg-accent px-2 py-1 font-medium text-foreground">
+                Outline ready — press <kbd className="font-mono">Enter</kbd> to fill it,
+                or <kbd className="font-mono">Esc</kbd> to discard.
+              </p>
+            )}
             <p className="mt-2 text-muted-foreground">{status}</p>
           </div>
         </div>

@@ -153,7 +153,7 @@ export default function AnnotatePage() {
       )}
 
       {tab === "3d" && (
-        <div className="grid gap-4 lg:grid-cols-[280px_minmax(0,1fr)]">
+        <div className="grid gap-3 lg:grid-cols-[230px_minmax(0,1fr)]">
           <div className="space-y-3">
             <div className="flex gap-2">
               <div className="relative flex-1">

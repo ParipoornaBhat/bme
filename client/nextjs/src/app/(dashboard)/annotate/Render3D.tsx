@@ -204,7 +204,7 @@ export default function Render3D({
   const volMm3 = voxelCount * spacing[0] * spacing[1] * spacing[2];
 
   return (
-    <div className="rounded-lg border-2 border-neutral-700 bg-black p-2">
+    <div className="flex flex-col rounded-lg border-2 border-neutral-700 bg-black p-1.5" style={{ aspectRatio: "1 / 1" }}>
       <div className="mb-1.5 flex items-center justify-between gap-2 px-1 text-[11px] uppercase tracking-wider text-neutral-400">
         <span className="inline-flex items-center gap-1.5"><Box className="h-3 w-3" /> 3D</span>
         <div className="flex items-center gap-1">
@@ -222,10 +222,10 @@ export default function Render3D({
         </div>
       </div>
 
-      <div className="relative">
+      <div className="relative flex min-h-0 flex-1 items-center justify-center">
         <canvas ref={canvasRef} width={460} height={460}
-          className="w-full cursor-grab rounded active:cursor-grabbing"
-          style={{ aspectRatio: "1 / 1" }}
+          className="cursor-grab rounded active:cursor-grabbing"
+          style={{ aspectRatio: "1 / 1", maxWidth: "100%", maxHeight: "100%" }}
           onMouseDown={(e) => { drag.current = { x: e.clientX, y: e.clientY }; }}
           onMouseMove={(e) => {
             if (!drag.current) return;
@@ -249,7 +249,7 @@ export default function Render3D({
         )}
       </div>
 
-      <div className="mt-2 flex items-baseline justify-between gap-2 px-1 text-[10px] text-neutral-500">
+      <div className="mt-1 flex shrink-0 items-baseline justify-between gap-2 px-1 text-[10px] text-neutral-500">
         <span>
           {faces
             ? <>~{volMm3.toFixed(0)} mm&sup3; &middot; {faces.length.toLocaleString()} faces</>
