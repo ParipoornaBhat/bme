@@ -4,15 +4,16 @@
 If you are picking this project up cold (new chat, new teammate, new machine), read this
 file first, then [SUMMARY.md](SUMMARY.md) for the full picture, then [PRD.md](PRD.md).
 
-Last updated: **2026-08-28**
+Last updated: **2026-09-01**
 
 ---
 
 ## One-paragraph state
 
-Two pipelines now run side by side. **2D** is a working classifier baseline with real
-cross-validated numbers (case-level AUC 0.665 — weak, and honestly so). **3D** is the
-segmentation system from the PRD and is still waiting on annotations.
+Two pipelines run side by side. **2D** is a working classifier baseline with real
+cross-validated numbers — case-level AUC **0.670 ± 0.053**, weak and honestly so, plus two
+controlled negative results (intensity masking did not transfer; extra epochs only overfit).
+**3D** is the segmentation system from the PRD and is still waiting on annotations.
 
 The web app now does the whole loop in the browser: annotate, train, inspect results,
 check storage. Every filename in the dataset is pseudonymous — no patient name survives
@@ -34,7 +35,8 @@ Phases are defined in [PRD.md](PRD.md) §8.
 | — | Domain schema (+ pgvector 0.8.6) | ✅ **applied and verified** — 17 tables, HNSW indexes live |
 | **0** | **De-identification** | ✅ **done** — 107 cases, 13,818 images, PHI verified clean |
 | — | DICOM→NIfTI + primary-series picker | ✅ 107/107 converted, data/worklist.csv written |
-| — | 2D baseline (extract, train, review) | ✅ AUC 0.665 case level — weak but honest |
+| — | 2D baseline (extract, train, review, Grad-CAM) | ✅ AUC 0.670 ± 0.053 — weak but honest |
+| — | Annotation viewer: Four-Up, crosshair sync, pencil fill, 3D surface | ✅ save round-trip verified |
 | — | Web app: annotate / training / results / storage | ✅ built and API-verified |
 | — | Full pseudonymisation of every filename | ✅ 108 archives + 121 images renamed |
 | **1** | **Annotation pipeline** | 🟡 **0 cases done. The critical path.** |

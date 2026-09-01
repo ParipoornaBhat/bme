@@ -1,6 +1,6 @@
 # BME Project — what exists, what is used, what is next
 
-Last updated: 2026-08-28 · 20 commits
+Last updated: 2026-09-01 · 31 commits
 
 ---
 
@@ -57,7 +57,7 @@ Everything is a CNN. ResNet/MobileNet are **classifiers** ("is there edema?"); U
 
 | Page | What it does |
 |---|---|
-| `/annotate` | Case list, three-plane MPR viewer, brush + eraser, three named segments, **"only inside bone"** masking, undo, saves `.seg.nrrd` automatically |
+| `/annotate` | Slicer-style Four-Up: three planes plus a live 3D surface. Crosshair sync, brush **and pencil** (trace an outline, Enter fills it), eraser, three named segments, **"only inside bone"** masking, Ctrl+Z/Y, saves `.seg.nrrd` automatically |
 | `/training` | Pick a model, set folds/epochs, Start/Stop, live log, progress bar + ETA, run history, AUC chart |
 | `/results` | 2D and 3D tabs, case- and slice-level metrics, confusion matrix, per-fold table |
 | `/storage` | Size breakdown by category, disk usage |
@@ -114,20 +114,35 @@ model trained only on healthy marrow.
 
 ## 6. Results so far
 
-**2D classifier, 5-fold, split by patient:**
+**2D classifier — ResNet-18, 5-fold, patient-level splits, 3 epochs:**
 
 | Metric | Case level |
 |---|---|
-| Accuracy | 64.5% |
-| F1 | 0.587 |
-| **ROC AUC** | **0.665** |
+| Accuracy | 63.6% |
+| F1 | 0.589 |
+| **ROC AUC** | **0.658** (across folds **0.670 ± 0.053**) |
 
 This is **weak** — 0.5 is random guessing. Two honest reasons:
 
 1. **Noisy labels.** The label is per *case*, applied to every slice. A BME patient's scan has many
    slices with no edema on them, all labelled BME. Part of the task is unlearnable.
-2. **Overfitting.** Training loss fell 0.51 → 0.03 over 6 epochs while validation stayed near 60%.
-   It stopped learning by epoch 3 and started memorising.
+2. **The task itself is hard.** Early edema is subtle and low-contrast; a single 2D slice viewed
+   without anatomical context is thin evidence.
+
+### Two controlled experiments, both negative — and both worth reporting
+
+**High-intensity masking did not transfer.** Published as lifting AUC 0.55 → 0.96 on a
+*paediatric* cohort. Under matched conditions (same architecture, folds, seed, epochs) it made
+our results **worse**: 0.604 vs 0.658, losing on every individual fold. The technique was
+compensating for growth-plate confounds, which adult knees do not have, while discarding
+surrounding anatomy the model was using.
+
+**More epochs did not help.** 6 epochs gave 0.665; 3 epochs gave 0.658 with a *better*
+across-fold mean and lower variance. Training loss fell 0.51 → 0.03 while validation stayed
+flat — the model stopped learning around epoch 3 and spent the rest memorising. Use 3.
+
+Testing published methods properly and reporting that they did not transfer is a stronger
+methodology section than a single unexplained number.
 
 **3D: no results.** Zero annotations, so it has never trained.
 
