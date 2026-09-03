@@ -103,6 +103,7 @@ export async function POST(req: NextRequest) {
   const body = await req.json().catch(() => ({}));
   const epochs = Math.min(Math.max(Number(body.epochs ?? 40), 1), 200);
   const folds = Math.min(Math.max(Number(body.folds ?? 5), 2), 10);
+  const batch = Math.min(Math.max(Number(body.batch ?? 8), 1), 64);
 
   const r = root();
   fs.mkdirSync(path.join(r, "data", "results2dseg"), { recursive: true });
@@ -111,13 +112,13 @@ export async function POST(req: NextRequest) {
   const child = spawn(
     python(),
     ["-u", path.join(r, "ml", "scripts", "pipeline_seg.py"), r,
-     "--epochs", String(epochs), "--folds", String(folds)],
+     "--epochs", String(epochs), "--folds", String(folds), "--batch", String(batch)],
     { cwd: r, detached: true, stdio: ["ignore", log, log] },
   );
   child.unref();
   if (child.pid) fs.writeFileSync(PID(), String(child.pid));
 
-  return NextResponse.json({ ok: true, pid: child.pid, epochs, folds, cases: cases.length });
+  return NextResponse.json({ ok: true, pid: child.pid, epochs, folds, batch, cases: cases.length });
 }
 
 export async function DELETE() {

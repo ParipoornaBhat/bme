@@ -168,6 +168,9 @@ export async function POST(req: NextRequest) {
   const him = Boolean(body.him);
   const tta = Boolean(body.tta);
 
+  const freeze = body.freeze !== undefined && body.freeze !== null && body.freeze !== "" ? Math.max(0, Number(body.freeze)) : null;
+  const patience = body.patience !== undefined && body.patience !== null && body.patience !== "" ? Math.max(1, Number(body.patience)) : null;
+
   if (!ARCHS.includes(arch as (typeof ARCHS)[number])) {
     return NextResponse.json({ error: `unsupported arch: ${arch}` }, { status: 400 });
   }
@@ -184,6 +187,8 @@ export async function POST(req: NextRequest) {
     // and the progress view is useless exactly when it is wanted.
     ["-u", path.join(r, "ml", "scripts", "train_2d.py"), r,
      "--arch", arch, "--folds", String(folds), "--epochs", String(epochs),
+     ...(freeze !== null ? ["--freeze", String(freeze)] : []),
+     ...(patience !== null ? ["--patience", String(patience)] : []),
      ...(him ? ["--dataset", "slices2d_him"] : []),
      ...(tta ? ["--tta"] : [])],
     { cwd: r, detached: true, stdio: ["ignore", log, log] },
@@ -192,10 +197,10 @@ export async function POST(req: NextRequest) {
   if (child.pid) fs.writeFileSync(PID(), String(child.pid));
   fs.writeFileSync(
     JOB(),
-    JSON.stringify({ arch, folds, epochs, him, tta, startedAt: Date.now(), pid: child.pid }),
+    JSON.stringify({ arch, folds, epochs, him, tta, freeze, patience, startedAt: Date.now(), pid: child.pid }),
   );
 
-  return NextResponse.json({ ok: true, pid: child.pid, arch, folds, epochs, him, tta });
+  return NextResponse.json({ ok: true, pid: child.pid, arch, folds, epochs, him, tta, freeze, patience });
 }
 
 /**

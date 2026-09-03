@@ -255,15 +255,38 @@ across sets; and count green pixels per file with the mask above.
 
 ---
 
-## Uncommitted at handoff
+## Session Update (2026-09-04) — 2D Focus, Literature Analysis & Training UI Overhaul
 
-- `ml/scripts/import_2d.py` — new
-- `docs/HANDOFF.md` — this file
-- `docs/STATUS.md` — new step 0, two new known-problem rows
-- `.gitignore` — `/labled_data_bme/` and `/Annotated/`
+### 1. Verification & Git Sync
+- Ran `python -m py_compile ml/scripts/import_2d.py` and `pnpm typecheck` — all clean with 0 errors.
+- Staged clean non-data files and pushed all 9 pending commits to `origin/main` (`da0cec3..7c1f521`).
+- Working tree was synced clean with remote.
 
-`git status` is clean of data: the only untracked things are the two docs and
-the script.
+### 2. External Data Redundancy Checked
+- Confirmed that `D:\Final yr Prj\Annotated\labled_data_bme` (outside repo) contains all 384 items (381 image files, 120 MB).
+- Confirmed that the `labled_data_bme/` folder at repo root was an exact duplicate and is safe to delete.
 
-Plus the ~12 commits from earlier sessions that have never been pushed. Nothing
-was pushed, and nothing will be without you asking.
+### 3. Literature Analysis: Why Detection + 2D U-Net Is the Superior Approach
+User requested to focus strictly on 2D and asked if pairing a Detection Model (BME presence/absence) with a 2D U-Net is a better approach based on the papers in `RP/`:
+- **Paper 02 & Paper 03:** A standalone U-Net segmenter produces false-positive lesion islands on healthy scans because edema is <1% of voxels. Pairing an upfront Detection (Classification) model as a screening filter with a 2D U-Net segmenter solves this problem and reflects clinical triage.
+- **Paper 04:** 2D CNN classifiers on fat-suppressed knee MRI achieve high detection performance (up to 0.964 AUC with High-Intensity Masking).
+- **Paper 10 & Paper 09:** 2D U-Net **beat 3D U-Net** on bone marrow (89–90% vs 86–88% F1) because knee MRI scans have high slice-thickness anisotropy (~10:1 ratio, 0.35 mm in-plane vs 3–4 mm slice gap). 2D operates on native in-plane resolution without slice-gap blur.
+- **Paper 01:** Dual-channel U-Net predicting bone marrow and lesion simultaneously outperforms lesion-only segmentation and clips false positives outside the bone.
+
+### 4. Training UI & API Updates
+Updated the web app (`/training`) and backend routes to fully reflect the two-stage 2D pipeline:
+- **`client/nextjs/src/app/(dashboard)/training/page.tsx`**:
+  - Re-titled header to **2D Deep Learning Training**, detailing both Detection (Screening) and 2D U-Net (Segmentation).
+  - Renamed tabs:
+    - `1. Detection (BME Present / Absent)`: ResNet-18/34/50, ConvNeXt, EfficientNet-B0, DenseNet-121. Added **Freeze Blocks** (0, 4, 6, 8) and **Patience** (Early Stopping).
+    - `2. Segmentation (2D U-Net Mark Edema)`: Prominently displayed **2D Dual-Channel U-Net**, **Dice + Focal Loss**, and outputs (`Bone + BME`). Added **Folds (2-10)** and **Batch Size (4, 8, 16, 32)** controls.
+- **`client/nextjs/src/app/api/training/route.ts`**:
+  - Added support for `--freeze` and `--patience` parameters passed to `ml/scripts/train_2d.py`.
+- **`client/nextjs/src/app/api/training-seg/route.ts`**:
+  - Added support for `--batch` parameter passed to `ml/scripts/pipeline_seg.py` and `ml/scripts/train_2d_seg.py`.
+- **Typecheck Verified**: `pnpm typecheck` passed with 0 errors across `@bme/shared`, `@bme/db`, and `nextjs`.
+
+### 5. Next Steps
+1. Optionally delete the redundant `labled_data_bme` folder from the repo root.
+2. Launch the 2D Detection freeze sweep or 2D U-Net directly from the `/training` web UI or CLI.
+3. Keep focus strictly on the 2D pipeline.

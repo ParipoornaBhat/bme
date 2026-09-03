@@ -87,6 +87,8 @@ export default function TrainingPage() {
   const [arch, setArch] = useState("resnet18");
   const [folds, setFolds] = useState(5);
   const [epochs, setEpochs] = useState(4);
+  const [freeze, setFreeze] = useState<string>("");
+  const [patience, setPatience] = useState<string>("5");
   const [him, setHim] = useState(false);
   const [tta, setTta] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -94,6 +96,8 @@ export default function TrainingPage() {
   const [tab, setTab] = useState<"cls" | "seg">("cls");
   const [seg, setSeg] = useState<SegState | null>(null);
   const [segEpochs, setSegEpochs] = useState(40);
+  const [segFolds, setSegFolds] = useState(5);
+  const [segBatch, setSegBatch] = useState(8);
   const [segBusy, setSegBusy] = useState(false);
   const logRef = useRef<HTMLPreElement>(null);
 
@@ -118,7 +122,11 @@ export default function TrainingPage() {
       const r = await fetch("/api/training-seg", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ epochs: segEpochs, folds: 5 }),
+        body: JSON.stringify({
+          epochs: segEpochs,
+          folds: segFolds,
+          batch: segBatch,
+        }),
       });
       const j = await r.json();
       if (!r.ok) alert(j.error ?? "could not start");
@@ -155,7 +163,15 @@ export default function TrainingPage() {
       const res = await fetch("/api/training", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ arch, folds, epochs, him, tta }),
+        body: JSON.stringify({
+          arch,
+          folds,
+          epochs,
+          him,
+          tta,
+          freeze: freeze === "" ? null : Number(freeze),
+          patience: patience === "" ? null : Number(patience),
+        }),
       });
       const j = await res.json();
       if (!res.ok) alert(j.error ?? "could not start");
@@ -188,16 +204,16 @@ export default function TrainingPage() {
   return (
     <div className="space-y-6">
       <div>
-        <h1 className="text-2xl font-semibold tracking-tight">Training</h1>
+        <h1 className="text-2xl font-semibold tracking-tight">2D Deep Learning Training</h1>
         <p className="mt-1 text-sm text-muted-foreground">
-          2D classifier. Every model listed ships with torchvision — switching needs no install.
+          Two complementary 2D pipelines: <strong>Detection / Screening</strong> (Is BME Present?) and <strong>2D U-Net</strong> (Dual-Channel Bone &amp; Edema Segmentation).
         </p>
       </div>
 
       <div className="flex gap-1 border-b border-border">
         {([
-          ["cls", "Detect (yes / no)", Layers],
-          ["seg", "Mark the edema", Target],
+          ["cls", "1. Detection (BME Present / Absent)", Layers],
+          ["seg", "2. Segmentation (2D U-Net Mark Edema)", Target],
         ] as const).map(([id, label, Icon]) => (
           <button key={id} onClick={() => setTab(id)}
             className={`-mb-px inline-flex items-center gap-2 border-b-2 px-4 py-2 text-sm font-medium transition ${
@@ -211,10 +227,18 @@ export default function TrainingPage() {
       {tab === "seg" ? (
         <div className="space-y-4">
           <div className="rounded-lg border border-border border-l-4 border-l-primary bg-card p-4 text-sm text-muted-foreground">
-            <span className="font-semibold text-foreground">This is the model that marks edema.</span>{" "}
-            It learns from the cases you annotate, so it needs labels — unlike the detector, whose
-            label is just the folder a scan came from. One click runs the whole chain: convert and
-            validate the annotations, cut them into 2D image/mask pairs, then train.
+            <div className="flex flex-wrap items-center gap-2 mb-2">
+              <span className="font-semibold text-foreground text-base">2D Dual-Channel U-Net Segmenter</span>
+              <span className="rounded bg-primary/10 text-primary px-2 py-0.5 text-xs font-medium">Architecture: 2D U-Net</span>
+              <span className="rounded bg-muted px-2 py-0.5 text-xs font-medium">Loss: Dice + Focal</span>
+              <span className="rounded bg-muted px-2 py-0.5 text-xs font-medium">Outputs: Bone + BME</span>
+            </div>
+            <p className="leading-relaxed">
+              Learns joint representation of <strong>Bone Marrow</strong> (Channel 1) and <strong>BME Lesion</strong> (Channel 2).
+              At inference, the predicted lesion is clipped to the bone mask, removing muscle and joint-effusion false positives
+              (grounded in <em>Research Papers 01 &amp; 03</em>). 2D U-Net operates directly on crisp in-plane slice resolution,
+              outperforming 3D models on anisotropic MRI volumes (<em>Research Paper 10</em>).
+            </p>
           </div>
 
           <div className="rounded-lg border border-border bg-card p-4">
@@ -233,11 +257,39 @@ export default function TrainingPage() {
 
               <label className="text-sm">
                 <span className="mb-1 block text-xs font-semibold uppercase tracking-wider text-muted-foreground">
+                  Model
+                </span>
+                <div className="rounded-md border border-border bg-muted/50 px-3 py-2 text-sm font-medium">
+                  2D Dual-Channel U-Net
+                </div>
+              </label>
+
+              <label className="text-sm">
+                <span className="mb-1 block text-xs font-semibold uppercase tracking-wider text-muted-foreground">
                   Epochs
                 </span>
                 <input type="number" min={1} max={200} value={segEpochs} disabled={seg?.running}
                   onChange={(e) => setSegEpochs(Number(e.target.value))}
-                  className="w-24 rounded-md border border-border bg-background px-3 py-2 text-sm" />
+                  className="w-20 rounded-md border border-border bg-background px-3 py-2 text-sm" />
+              </label>
+
+              <label className="text-sm">
+                <span className="mb-1 block text-xs font-semibold uppercase tracking-wider text-muted-foreground">
+                  Folds
+                </span>
+                <input type="number" min={2} max={10} value={segFolds} disabled={seg?.running}
+                  onChange={(e) => setSegFolds(Number(e.target.value))}
+                  className="w-20 rounded-md border border-border bg-background px-3 py-2 text-sm" />
+              </label>
+
+              <label className="text-sm">
+                <span className="mb-1 block text-xs font-semibold uppercase tracking-wider text-muted-foreground">
+                  Batch size
+                </span>
+                <select value={segBatch} onChange={(e) => setSegBatch(Number(e.target.value))} disabled={seg?.running}
+                  className="rounded-md border border-border bg-background px-3 py-2 text-sm">
+                  {[4, 8, 16, 32].map((b) => <option key={b} value={b}>{b}</option>)}
+                </select>
               </label>
 
               <div className="ml-auto">
@@ -250,7 +302,7 @@ export default function TrainingPage() {
                   <button onClick={startSeg} disabled={segBusy || (seg?.annotated ?? 0) === 0}
                     className="inline-flex items-center gap-2 rounded-md bg-primary px-4 py-2 text-sm font-medium text-primary-foreground disabled:opacity-40">
                     {segBusy ? <Loader2 className="h-4 w-4 animate-spin" /> : <Play className="h-4 w-4" />}
-                    Train on my annotations
+                    Train 2D U-Net
                   </button>
                 )}
               </div>
@@ -269,7 +321,7 @@ export default function TrainingPage() {
             <div className="rounded-lg border border-border bg-card p-4">
               <div className="mb-2 inline-flex items-center gap-2 text-xs font-semibold uppercase tracking-wider text-muted-foreground">
                 {seg?.running && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
-                {seg?.running ? "Running" : "Last run"}
+                {seg?.running ? "Running 2D U-Net Training" : "Last run"}
               </div>
               <pre className="max-h-64 overflow-auto rounded bg-muted p-3 font-mono text-[11px] leading-relaxed">
                 {seg?.log || "waiting for output\u2026"}
@@ -280,7 +332,7 @@ export default function TrainingPage() {
           {seg?.metrics && (
             <div className="rounded-lg border border-border bg-card p-4">
               <div className="mb-3 text-xs font-semibold uppercase tracking-wider text-muted-foreground">
-                Segmentation result &mdash; {seg.metrics.n_cases} case(s), {seg.metrics.n_slices} slices
+                2D U-Net result &mdash; {seg.metrics.n_cases} case(s), {seg.metrics.n_slices} slices
               </div>
               <div className="grid grid-cols-1 gap-2 sm:grid-cols-3">
                 {(["bone_dice", "lesion_dice", "lesion_sensitivity"] as const).map((k) => {
@@ -330,6 +382,29 @@ export default function TrainingPage() {
             </span>
             <input type="number" min={1} max={50} value={epochs} disabled={running}
               onChange={(e) => setEpochs(Number(e.target.value))}
+              className="w-20 rounded-md border border-border bg-background px-3 py-2 text-sm" />
+          </label>
+
+          <label className="text-sm">
+            <span className="mb-1 block text-xs font-semibold uppercase tracking-wider text-muted-foreground">
+              Freeze blocks
+            </span>
+            <select value={freeze} onChange={(e) => setFreeze(e.target.value)} disabled={running}
+              className="rounded-md border border-border bg-background px-3 py-2 text-sm">
+              <option value="">Full fine-tuning (0)</option>
+              <option value="4">4 blocks</option>
+              <option value="6">6 blocks</option>
+              <option value="8">8 blocks</option>
+            </select>
+          </label>
+
+          <label className="text-sm">
+            <span className="mb-1 block text-xs font-semibold uppercase tracking-wider text-muted-foreground">
+              Patience
+            </span>
+            <input type="number" min={1} max={20} value={patience} disabled={running}
+              placeholder="5"
+              onChange={(e) => setPatience(e.target.value)}
               className="w-20 rounded-md border border-border bg-background px-3 py-2 text-sm" />
           </label>
 
