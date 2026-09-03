@@ -68,10 +68,10 @@ export default function AnnotatePage() {
   const done = cases.filter((c) => c.annotated).length;
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-3">
       <div className="flex flex-wrap items-end justify-between gap-4">
         <div>
-          <h1 className="text-2xl font-semibold tracking-tight">Annotate</h1>
+          <h1 className="text-xl font-semibold tracking-tight">Annotate</h1>
           <p className="mt-1 text-sm text-muted-foreground">
             {done} of {cases.length} cases annotated
             {needFrom.length > 0 && (
@@ -181,7 +181,8 @@ export default function AnnotatePage() {
               </select>
             </div>
 
-            <div className="max-h-[560px] space-y-1 overflow-y-auto rounded-lg border border-border p-1">
+            <div className="space-y-1 overflow-y-auto rounded-lg border border-border p-1"
+              style={{ maxHeight: "min(calc(100vh - 340px), 1060px)" }}>
               {visible.map((c) => (
                 <button
                   key={c.id}

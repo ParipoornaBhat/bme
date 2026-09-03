@@ -30,7 +30,7 @@ import Render3D from "./Render3D";
  */
 
 export const SEGMENTS = [
-  { value: 1, name: "bone_marrow", label: "Bone marrow", color: "#dbd2b5" },
+  { value: 1, name: "bone_marrow", label: "Bone marrow", color: "#3ddc84" },
   { value: 2, name: "bme", label: "Edema (BME)", color: "#f24c38" },
   { value: 3, name: "uncertain", label: "Uncertain", color: "#8c8c99" },
 ] as const;
@@ -552,9 +552,9 @@ export default function Viewer({ caseId, onSaved }: { caseId: string; onSaved?: 
   }
 
   return (
-    <div className="space-y-3">
+    <div className="space-y-2">
       {/* toolbar */}
-      <div className="flex flex-wrap items-center gap-2 rounded-lg border border-border bg-card p-3">
+      <div className="flex flex-wrap items-center gap-2 rounded-lg border border-border bg-card p-2">
         {SEGMENTS.map((s, i) => (
           <button key={s.value}
             onClick={() => { setSeg(s.value); setErasing(false); }}
@@ -624,15 +624,21 @@ export default function Viewer({ caseId, onSaved }: { caseId: string; onSaved?: 
       </div>
 
       {/* Four-Up: three orthogonal views plus an info panel, as in Slicer */}
-      <div className="grid gap-1.5 lg:grid-cols-2">
+      <div
+        className="grid gap-1.5 lg:grid-cols-2 lg:grid-rows-2"
+        // Fit the four views in the viewport rather than forcing square tiles,
+        // which pushed the bottom two below the fold and made checking a lesion
+        // across planes a scrolling exercise.
+        style={{ height: "min(calc(100vh - 300px), 1100px)", minHeight: 460 }}
+      >
         {PLANES.map((p) => {
           const g = planeGeom(p, vol);
           const depth = g.depth;
           const s = sliceOf(p, vol, cursor);
           return (
             <div key={p}
-              className="flex flex-col rounded-lg border-2 bg-black p-1.5"
-              style={{ borderColor: PLANE_COLOR[p], aspectRatio: "1 / 1" }}>
+              className="flex min-h-0 flex-col overflow-hidden rounded-lg border-2 bg-black p-1.5"
+              style={{ borderColor: PLANE_COLOR[p] }}>
               <div className="mb-1 flex shrink-0 items-center justify-between gap-1 px-1 text-[10px] uppercase tracking-wider"
                 style={{ color: PLANE_COLOR[p] }}>
                 <span>{p}</span>
