@@ -1,13 +1,31 @@
 # BME Project — what exists, what is used, what is next
 
-Last updated: 2026-09-01 · 31 commits
+Last updated: 2026-09-01 · 35 commits
 
 ---
 
 ## 1. Where the project stands in one line
 
-Two independent pipelines. **2D works and has real numbers.** **3D is fully built but has never
-trained, because it needs annotations that do not exist yet.**
+**Three** models are built. The 2D *classifier* works and has real numbers. The 2D *segmenter*
+and the 3D segmenter are written and smoke-tested but have never trained, because both need
+annotations that do not exist yet.
+
+## 1b. The three models, and why there are three
+
+| Model | Question it answers | Needs drawing? | Output |
+|---|---|---|---|
+| **2D classifier** | "Does this scan have edema?" | No — the folder is the label | Yes/no + confidence |
+| **2D segmenter** | "Where is the edema on this slice?" | Yes | A mask, per slice |
+| **3D segmenter** | "Where is it in the volume, and how big?" | Yes | 3D mask, mm³, surface |
+
+The classifier exists because it needed **zero annotation** and could produce a number
+immediately. That is also its ceiling: it cannot mark anything, and a per-case label applied to
+every slice is noisy by construction.
+
+**The two segmenters share one annotation effort.** A 3D annotation is a stack of 2D ones, so
+`make_2d_seg.py` slices the same `.seg.nrrd` files into image/mask pairs. Annotate once, train
+both. There is deliberately no separate 2D annotation tool — it would be the same work done
+twice.
 
 ---
 
@@ -85,7 +103,10 @@ the ledger**: who annotated which case, when, and the segment sizes.
 | `rename_archives.py` / `rename_images.py` | Renames files to case IDs, keeps an undo map |
 | `convert.py` | DICOM → NIfTI, picks each case's primary sequence |
 | `make_2d.py` | Cuts volumes into 1,975 training images |
-| `train_2d.py` | 2D classifier, patient-level cross-validation |
+| `train_2d.py` | 2D classifier (yes/no), patient-level cross-validation |
+| `make_2d_seg.py` | Slices the 3D annotations into 2D image/mask pairs |
+| `train_2d_seg.py` | 2D U-Net that **marks** the edema — bone + lesion channels |
+| `gradcam.py` | Grad-CAM heatmaps on held-out folds |
 | `seg2nifti.py` | Slicer `.seg.nrrd` → training labels, **with validation** |
 | `build_dataset.py` | nnU-Net layout + patient-level splits |
 | `train.py` | nnU-Net wrapper |
