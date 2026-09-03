@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Eraser, Lasso, Loader2, Minus, Paintbrush, Plus, Redo2, RotateCcw, Save } from "lucide-react";
+import { Eraser, Lasso, Link2, Link2Off, Loader2, Minus, Paintbrush, Plus, Redo2, RotateCcw, Save } from "lucide-react";
 import { useSession } from "~/lib/auth-client";
 import Render3D from "./Render3D";
 
@@ -143,6 +143,10 @@ export default function Viewer({ caseId, onSaved }: { caseId: string; onSaved?: 
   // keeping the others wide for context.
   const [zoom, setZoom] = useState<Record<Plane, number>>({ axial: 1, coronal: 1, sagittal: 1 });
   const [maskInside, setMaskInside] = useState(true);
+  // Locked by default: painting should not drag the other two views around.
+  // Slicer behaves the same way — the crosshair moves when you deliberately
+  // move it, not as a side effect of every brush stroke.
+  const [locked, setLocked] = useState(true);
   const [cursor, setCursor] = useState<Cursor>({ i: 0, j: 0, k: 0 });
   const [dirty, setDirty] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -490,6 +494,7 @@ export default function Viewer({ caseId, onSaved }: { caseId: string; onSaved?: 
       else if (e.key === "3") setSeg(3);
       else if (e.key.toLowerCase() === "e") setErasing((v) => !v);
       else if (e.key.toLowerCase() === "p") setTool((v) => (v === "brush" ? "pencil" : "brush"));
+      else if (e.key.toLowerCase() === "l") setLocked((v) => !v);
       else if (e.key === "Enter") { e.preventDefault(); commitOutline(); }
       else if (e.key === "Escape") {
         outline.current = []; pencilPlane.current = null; setOutlineTick((n) => n + 1); drawAll();
@@ -606,6 +611,16 @@ export default function Viewer({ caseId, onSaved }: { caseId: string; onSaved?: 
           Only inside bone
         </label>
 
+        <button onClick={() => setLocked((v) => !v)}
+          title={locked
+            ? "Views locked: painting leaves the other two slices where they are"
+            : "Views linked: clicking moves the crosshair and the other two follow"}
+          className={`inline-flex items-center gap-1.5 rounded-md border px-2.5 py-1.5 text-sm ${
+            locked ? "border-border" : "border-primary bg-accent"}`}>
+          {locked ? <Link2Off className="h-4 w-4" /> : <Link2 className="h-4 w-4" />}
+          {locked ? "Views locked" : "Views linked"}
+        </button>
+
         <div className="ml-auto flex items-center gap-2">
           <button onClick={undo} title="Undo  (Ctrl+Z)"
             className="inline-flex items-center gap-1.5 rounded-md border border-border px-2.5 py-1.5 text-sm">
@@ -688,7 +703,7 @@ export default function Viewer({ caseId, onSaved }: { caseId: string; onSaved?: 
                   } else {
                     painting.current = true;
                     paintAt(p, e);
-                    moveCursor(p, hit.a, hit.b);
+                    if (!locked) moveCursor(p, hit.a, hit.b);
                   }
                 }}
                 onMouseMove={(e) => {
@@ -758,7 +773,8 @@ export default function Viewer({ caseId, onSaved }: { caseId: string; onSaved?: 
               <kbd className="font-mono">E</kbd><span>Erase on/off</span>
               <kbd className="font-mono">[ ]</kbd><span>Brush size</span>
               <kbd className="font-mono">Scroll</kbd><span>Move through slices</span>
-              <kbd className="font-mono">Shift+click</kbd><span>Crosshair only</span>
+              <kbd className="font-mono">Shift+click</kbd><span>Move crosshair (always)</span>
+              <kbd className="font-mono">L</kbd><span>Lock / link views</span>
             </div>
             {outlineTick >= 0 && outline.current.length > 2 && (
               <p className="mt-2 rounded bg-accent px-2 py-1 font-medium text-foreground">
