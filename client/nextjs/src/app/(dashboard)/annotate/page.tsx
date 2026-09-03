@@ -71,8 +71,8 @@ export default function AnnotatePage() {
     <div className="space-y-3">
       <div className="flex flex-wrap items-end justify-between gap-4">
         <div>
-          <h1 className="text-xl font-semibold tracking-tight">Annotate</h1>
-          <p className="mt-1 text-sm text-muted-foreground">
+          <h1 className="text-lg font-semibold tracking-tight">Annotate</h1>
+          <p className="text-xs text-muted-foreground">
             {done} of {cases.length} cases annotated
             {needFrom.length > 0 && (
               <span className="ml-2 text-amber-600 dark:text-amber-400">
@@ -129,7 +129,7 @@ export default function AnnotatePage() {
           <button
             key={id}
             onClick={() => setTab(id)}
-            className={`-mb-px inline-flex items-center gap-2 border-b-2 px-4 py-2.5 text-sm font-medium transition ${
+            className={`-mb-px inline-flex items-center gap-2 border-b-2 px-4 py-1.5 text-sm font-medium transition ${
               tab === id
                 ? "border-primary text-foreground"
                 : "border-transparent text-muted-foreground hover:text-foreground"
@@ -182,7 +182,7 @@ export default function AnnotatePage() {
             </div>
 
             <div className="space-y-1 overflow-y-auto rounded-lg border border-border p-1"
-              style={{ maxHeight: "min(calc(100vh - 340px), 1060px)" }}>
+              style={{ maxHeight: "min(calc(100vh - 250px), 1100px)" }}>
               {visible.map((c) => (
                 <button
                   key={c.id}

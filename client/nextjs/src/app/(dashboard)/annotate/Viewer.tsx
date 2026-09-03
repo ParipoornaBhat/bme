@@ -147,6 +147,9 @@ export default function Viewer({ caseId, onSaved }: { caseId: string; onSaved?: 
   // Slicer behaves the same way — the crosshair moves when you deliberately
   // move it, not as a side effect of every brush stroke.
   const [locked, setLocked] = useState(true);
+  // Which view the arrow keys act on. Set by hovering, so navigation follows
+  // the pointer without needing a click that might paint.
+  const [activePlane, setActivePlane] = useState<Plane>("axial");
   const [cursor, setCursor] = useState<Cursor>({ i: 0, j: 0, k: 0 });
   const [dirty, setDirty] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -501,10 +504,20 @@ export default function Viewer({ caseId, onSaved }: { caseId: string; onSaved?: 
       }
       else if (e.key === "[") setBrush((b) => Math.max(1, b - 1));
       else if (e.key === "]") setBrush((b) => Math.min(20, b + 1));
+      else if (["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight",
+                "PageUp", "PageDown"].includes(e.key)) {
+        if (!vol) return;
+        e.preventDefault();
+        const ax = vol.axes[activePlane].slice;
+        const depth = vol.dims[ax];
+        const big = e.key.startsWith("Page") ? 10 : 1;
+        const dir = (e.key === "ArrowUp" || e.key === "ArrowRight" || e.key === "PageUp") ? 1 : -1;
+        setCursor((c) => setAxis(c, ax, Math.min(depth - 1, Math.max(0, axisVal(c, ax) + dir * big))));
+      }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [undo, redo, commitOutline, drawAll]);
+  }, [undo, redo, commitOutline, drawAll, vol, activePlane]);
 
   // ---- save ------------------------------------------------------------
   const save = async () => {
@@ -644,7 +657,7 @@ export default function Viewer({ caseId, onSaved }: { caseId: string; onSaved?: 
         // Fit the four views in the viewport rather than forcing square tiles,
         // which pushed the bottom two below the fold and made checking a lesion
         // across planes a scrolling exercise.
-        style={{ height: "min(calc(100vh - 300px), 1100px)", minHeight: 460 }}
+        style={{ height: "min(calc(100vh - 215px), 1100px)", minHeight: 440 }}
       >
         {PLANES.map((p) => {
           const g = planeGeom(p, vol);
@@ -652,8 +665,13 @@ export default function Viewer({ caseId, onSaved }: { caseId: string; onSaved?: 
           const s = sliceOf(p, vol, cursor);
           return (
             <div key={p}
+              onMouseEnter={() => setActivePlane(p)}
               className="flex min-h-0 flex-col overflow-hidden rounded-lg border-2 bg-black p-1.5"
-              style={{ borderColor: PLANE_COLOR[p] }}>
+              style={{
+                borderColor: PLANE_COLOR[p],
+                opacity: activePlane === p ? 1 : 0.94,
+                boxShadow: activePlane === p ? `0 0 0 1px ${PLANE_COLOR[p]}` : undefined,
+              }}>
               <div className="mb-1 flex shrink-0 items-center justify-between gap-1 px-1 text-[10px] uppercase tracking-wider"
                 style={{ color: PLANE_COLOR[p] }}>
                 <span>{p}</span>
@@ -730,11 +748,10 @@ export default function Viewer({ caseId, onSaved }: { caseId: string; onSaved?: 
                   drawAll();
                 }}
                 onMouseLeave={() => { painting.current = false; }}
-                onWheel={(e) => {
-                  const d = e.deltaY > 0 ? 1 : -1;
-                  setCursor((c) => setAxis(c, g.axis.slice, 
-                    Math.min(depth - 1, Math.max(0, axisVal(c, g.axis.slice) + d))));
-                }}
+                // Deliberately no onWheel. Scrolling stepped the slice, which
+                // fought with page scrolling and moved the image out from under
+                // the brush mid-stroke. Arrow keys step slices instead.
+                onMouseEnter={() => setActivePlane(p)}
               />
               </div>
               </div>
@@ -772,7 +789,8 @@ export default function Viewer({ caseId, onSaved }: { caseId: string; onSaved?: 
               <kbd className="font-mono">Esc</kbd><span>Discard outline</span>
               <kbd className="font-mono">E</kbd><span>Erase on/off</span>
               <kbd className="font-mono">[ ]</kbd><span>Brush size</span>
-              <kbd className="font-mono">Scroll</kbd><span>Move through slices</span>
+              <kbd className="font-mono">&uarr; &darr;</kbd><span>Step slice (hovered view)</span>
+              <kbd className="font-mono">PgUp/PgDn</kbd><span>Step 10 slices</span>
               <kbd className="font-mono">Shift+click</kbd><span>Move crosshair (always)</span>
               <kbd className="font-mono">L</kbd><span>Lock / link views</span>
             </div>
