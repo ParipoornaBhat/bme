@@ -789,7 +789,7 @@ export default function Viewer({ caseId, onSaved }: { caseId: string; onSaved?: 
               <kbd className="font-mono">Esc</kbd><span>Discard outline</span>
               <kbd className="font-mono">E</kbd><span>Erase on/off</span>
               <kbd className="font-mono">[ ]</kbd><span>Brush size</span>
-              <kbd className="font-mono">&uarr; &darr;</kbd><span>Step slice (hovered view)</span>
+              <kbd className="font-mono">&uarr;&darr;&larr;&rarr;</kbd><span>Step slice (hovered view)</span>
               <kbd className="font-mono">PgUp/PgDn</kbd><span>Step 10 slices</span>
               <kbd className="font-mono">Shift+click</kbd><span>Move crosshair (always)</span>
               <kbd className="font-mono">L</kbd><span>Lock / link views</span>
