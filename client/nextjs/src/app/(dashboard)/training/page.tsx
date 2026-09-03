@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Loader2, Play, Square, Trash2, Trophy } from "lucide-react";
+import { Layers, Loader2, PenTool, Play, Square, Target, Trash2, Trophy } from "lucide-react";
 
 type Metric = { accuracy: number; precision: number; recall: number; f1: number; auc: number; n: number };
 type Prog = {
@@ -9,6 +9,16 @@ type Prog = {
   currentFold: number; currentEpoch: number; folds: number; epochs: number;
   etaSeconds: number | null; elapsedSeconds: number | null;
 };
+type SegMetrics = {
+  model: string; device: string; folds: number; epochs: number;
+  n_slices: number; n_cases: number; note: string;
+  summary: Record<string, { mean: number; std: number } | null>;
+};
+type SegState = {
+  annotated: number; cases: string[]; running: boolean;
+  metrics: SegMetrics | null; log: string;
+};
+
 type Run = {
   id: string; arch: string; folds: number; epochs: number;
   finishedAt: string | null; nSlices: number; nCases: number;
@@ -81,6 +91,10 @@ export default function TrainingPage() {
   const [tta, setTta] = useState(false);
   const [busy, setBusy] = useState(false);
   const [progress, setProgress] = useState<Prog | null>(null);
+  const [tab, setTab] = useState<"cls" | "seg">("cls");
+  const [seg, setSeg] = useState<SegState | null>(null);
+  const [segEpochs, setSegEpochs] = useState(40);
+  const [segBusy, setSegBusy] = useState(false);
   const logRef = useRef<HTMLPreElement>(null);
 
   const load = useCallback(async () => {
@@ -91,7 +105,38 @@ export default function TrainingPage() {
     setProgress(j.progress ?? null);
   }, []);
 
-  useEffect(() => { load(); }, [load]);
+  const loadSeg = useCallback(async () => {
+    try {
+      const r = await fetch("/api/training-seg", { cache: "no-store" });
+      if (r.ok) setSeg(await r.json());
+    } catch { /* optional */ }
+  }, []);
+
+  const startSeg = async () => {
+    setSegBusy(true);
+    try {
+      const r = await fetch("/api/training-seg", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ epochs: segEpochs, folds: 5 }),
+      });
+      const j = await r.json();
+      if (!r.ok) alert(j.error ?? "could not start");
+    } finally { setSegBusy(false); setTimeout(loadSeg, 1200); }
+  };
+
+  const stopSeg = async () => {
+    await fetch("/api/training-seg", { method: "DELETE" });
+    loadSeg();
+  };
+
+  useEffect(() => { load(); loadSeg(); }, [load, loadSeg]);
+
+  useEffect(() => {
+    if (!seg?.running) return;
+    const id = setInterval(loadSeg, 4000);
+    return () => clearInterval(id);
+  }, [seg?.running, loadSeg]);
 
   // Poll only while a run is in flight.
   useEffect(() => {
@@ -149,6 +194,115 @@ export default function TrainingPage() {
         </p>
       </div>
 
+      <div className="flex gap-1 border-b border-border">
+        {([
+          ["cls", "Detect (yes / no)", Layers],
+          ["seg", "Mark the edema", Target],
+        ] as const).map(([id, label, Icon]) => (
+          <button key={id} onClick={() => setTab(id)}
+            className={`-mb-px inline-flex items-center gap-2 border-b-2 px-4 py-2 text-sm font-medium transition ${
+              tab === id ? "border-primary text-foreground"
+                : "border-transparent text-muted-foreground hover:text-foreground"}`}>
+            <Icon className="h-4 w-4" /> {label}
+          </button>
+        ))}
+      </div>
+
+      {tab === "seg" ? (
+        <div className="space-y-4">
+          <div className="rounded-lg border border-border border-l-4 border-l-primary bg-card p-4 text-sm text-muted-foreground">
+            <span className="font-semibold text-foreground">This is the model that marks edema.</span>{" "}
+            It learns from the cases you annotate, so it needs labels — unlike the detector, whose
+            label is just the folder a scan came from. One click runs the whole chain: convert and
+            validate the annotations, cut them into 2D image/mask pairs, then train.
+          </div>
+
+          <div className="rounded-lg border border-border bg-card p-4">
+            <div className="flex flex-wrap items-end gap-4">
+              <div>
+                <div className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">
+                  Annotated cases
+                </div>
+                <div className="mt-1 text-2xl font-semibold tabular-nums">
+                  {seg?.annotated ?? 0}
+                  <span className="ml-2 text-sm font-normal text-muted-foreground">
+                    {(seg?.annotated ?? 0) < 5 ? "\u2014 aim for 10 before trusting a number" : "ready"}
+                  </span>
+                </div>
+              </div>
+
+              <label className="text-sm">
+                <span className="mb-1 block text-xs font-semibold uppercase tracking-wider text-muted-foreground">
+                  Epochs
+                </span>
+                <input type="number" min={1} max={200} value={segEpochs} disabled={seg?.running}
+                  onChange={(e) => setSegEpochs(Number(e.target.value))}
+                  className="w-24 rounded-md border border-border bg-background px-3 py-2 text-sm" />
+              </label>
+
+              <div className="ml-auto">
+                {seg?.running ? (
+                  <button onClick={stopSeg}
+                    className="inline-flex items-center gap-2 rounded-md border border-destructive px-4 py-2 text-sm font-medium text-destructive">
+                    <Square className="h-4 w-4" /> Stop
+                  </button>
+                ) : (
+                  <button onClick={startSeg} disabled={segBusy || (seg?.annotated ?? 0) === 0}
+                    className="inline-flex items-center gap-2 rounded-md bg-primary px-4 py-2 text-sm font-medium text-primary-foreground disabled:opacity-40">
+                    {segBusy ? <Loader2 className="h-4 w-4 animate-spin" /> : <Play className="h-4 w-4" />}
+                    Train on my annotations
+                  </button>
+                )}
+              </div>
+            </div>
+
+            {(seg?.annotated ?? 0) === 0 && (
+              <p className="mt-3 inline-flex items-center gap-2 rounded border border-amber-500/40 bg-amber-500/10 p-2 text-xs">
+                <PenTool className="h-3.5 w-3.5" />
+                Nothing to train on yet. Annotate a case on the <strong>Annotate</strong> page, save,
+                then come back.
+              </p>
+            )}
+          </div>
+
+          {(seg?.running || seg?.log) && (
+            <div className="rounded-lg border border-border bg-card p-4">
+              <div className="mb-2 inline-flex items-center gap-2 text-xs font-semibold uppercase tracking-wider text-muted-foreground">
+                {seg?.running && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
+                {seg?.running ? "Running" : "Last run"}
+              </div>
+              <pre className="max-h-64 overflow-auto rounded bg-muted p-3 font-mono text-[11px] leading-relaxed">
+                {seg?.log || "waiting for output\u2026"}
+              </pre>
+            </div>
+          )}
+
+          {seg?.metrics && (
+            <div className="rounded-lg border border-border bg-card p-4">
+              <div className="mb-3 text-xs font-semibold uppercase tracking-wider text-muted-foreground">
+                Segmentation result &mdash; {seg.metrics.n_cases} case(s), {seg.metrics.n_slices} slices
+              </div>
+              <div className="grid grid-cols-1 gap-2 sm:grid-cols-3">
+                {(["bone_dice", "lesion_dice", "lesion_sensitivity"] as const).map((k) => {
+                  const s = seg.metrics!.summary[k];
+                  return (
+                    <div key={k} className="rounded-lg border border-border p-3">
+                      <div className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+                        {k.replace(/_/g, " ")}
+                      </div>
+                      <div className="mt-1 text-xl font-semibold tabular-nums">
+                        {s ? `${s.mean.toFixed(3)} \u00b1 ${s.std.toFixed(3)}` : "\u2014"}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+              <p className="mt-3 text-xs text-muted-foreground">{seg.metrics.note}</p>
+            </div>
+          )}
+        </div>
+      ) : (
+        <>
       <div className="rounded-lg border border-border bg-card p-4">
         <div className="flex flex-wrap items-end gap-4">
           <label className="text-sm">
@@ -347,6 +501,8 @@ export default function TrainingPage() {
           is split by patient, so no case appears in both training and validation.
         </p>
       </div>
+        </>
+      )}
     </div>
   );
 }
