@@ -226,3 +226,7 @@ notebooks/scratch/
 *.njsproj
 *.sln
 *.sw?
+
+# stray copy of the teammate 2D batch, dropped in the repo root (PHI)
+/labled_data_bme/
+/Annotated/

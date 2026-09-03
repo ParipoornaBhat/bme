@@ -4,7 +4,7 @@
 If you are picking this project up cold (new chat, new teammate, new machine), read this
 file first, then [SUMMARY.md](SUMMARY.md) for the full picture, then [PRD.md](PRD.md).
 
-Last updated: **2026-09-01**
+Last updated: **2026-09-04**
 
 ---
 
@@ -53,6 +53,11 @@ Phases are defined in [PRD.md](PRD.md) §8.
 ## Do this next
 
 In order. Each step's output is the next step's input.
+
+0. **2D import completed (225 images, 134 marks).** See [HANDOFF.md](HANDOFF.md).
+   Spot-check 3-4 images for burned-in viewer text before using in presentations/reports.
+   Optional: run the freeze-depth sweep on the expanded dataset
+   (`for f in 0 4 6 8; do python ml/scripts/train_2d.py --freeze $f --patience 5 --epochs 30; done`).
 
 1. **Annotate in the browser: `/annotate` → 3D volume tab.** Pick a case, paint, save.
    No file dragging, no folder picking, and the segments are named correctly for you.
@@ -165,6 +170,8 @@ Carried from [PRD.md](PRD.md) §10, updated with what the data answered.
 | **Every case filename carries a patient name** | PHI exposure | Fixed by step 1. Data is gitignored, so nothing has leaked. |
 | 23 cases have full PHI in DICOM headers | PHI exposure | Fixed by step 1. |
 | Burned-in pixel text unchecked | Anonymisers do not touch pixels | `deid.py` reports the `BurnedInAnnotation` flag; still spot-check visually. |
+| **The teammate 2D exports carry a burned-in viewer overlay** | ~34,300 coloured pixels in a fixed position in every file, in both the marked and unmarked folders. If it contains a name or MRN, these images cannot go in the report. | Open three or four and look at the edges. See [HANDOFF.md](HANDOFF.md). Storing them under gitignored `data/` is safe either way. |
+| The marks in that batch are **green**, not red | The earlier `BME_ALL_IMAGES` set used red pen, so red-based detection finds nothing here | `import_2d.py` tests green. Confirm the per-file distribution before trusting the count. |
 | `BME/IMRAZ.zip` has no DICOM (PNG only) | −1 case | Re-export or drop. |
 | 17 non-BME cases have a PNG but no volume | −17 potential cases | Numbers 7, 17–25, 28, 29, 32, 33, 35, 36, 43. Re-export or drop. |
 | ~10:1 voxel anisotropy | 3D surfaces look terraced | Taubin smoothing in Stage E is required, not cosmetic. |
