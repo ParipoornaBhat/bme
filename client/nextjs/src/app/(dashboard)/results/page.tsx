@@ -46,7 +46,7 @@ type CamEntry = { case_id: string; true: number; pred: number; prob: number; thu
 type CamPayload = {
   available: boolean; running: boolean; log: string;
   data: null | { arch: string; device: string; n: number; held_out_fold: number;
-                 caveat: string; entries: CamEntry[] };
+                 caveat: string; epochs: number; entries: CamEntry[] };
 };
 
 const pct = (v?: number) =>
@@ -286,10 +286,28 @@ export default function ResultsPage() {
             {cam?.available && cam.data ? (
               <>
                 <p className="mb-3 text-xs text-muted-foreground">
-                  {cam.data.arch} on {cam.data.device}, explaining held-out fold{" "}
+                  {cam.data.arch} on {cam.data.device}, {cam.data.epochs} epoch
+                  {cam.data.epochs === 1 ? "" : "s"}, explaining held-out fold{" "}
                   {cam.data.held_out_fold} — <strong>these slices were never trained on</strong>.
                   Red marks the regions that most raised the model&apos;s score.
                 </p>
+                {(() => {
+                  // A model that predicts one class for nearly everything has not
+                  // learnt anything, and its heatmaps mean nothing. Say so rather
+                  // than letting a wall of green ticks imply it is working.
+                  const n = cam.data.entries.length;
+                  const pos = cam.data.entries.filter((e) => e.pred === 1).length;
+                  const skew = Math.max(pos, n - pos) / Math.max(1, n);
+                  return skew >= 0.9 ? (
+                    <p className="mb-3 rounded border border-amber-500/40 bg-amber-500/10 p-2 text-xs">
+                      <strong>This model predicts &ldquo;{pos > n - pos ? "BME" : "clear"}&rdquo;
+                      on {Math.round(skew * 100)}% of slices.</strong> It has collapsed to one
+                      class and has not learnt the task, so these heatmaps show what an untrained
+                      network attends to — not evidence about edema. Train properly, then
+                      regenerate.
+                    </p>
+                  ) : null;
+                })()}
                 <div className="grid grid-cols-2 gap-2 sm:grid-cols-4 lg:grid-cols-6">
                   {cam.data.entries.map((e, i) => (
                     <figure key={i} className="m-0">
@@ -298,17 +316,39 @@ export default function ResultsPage() {
                         className="w-full rounded border border-border" />
                       <figcaption className="mt-1 text-[10px] leading-tight text-muted-foreground">
                         <span className="tabular-nums">{e.case_id}</span>
-                        <span className={`ml-1 font-semibold ${e.pred === e.true ? "text-emerald-600 dark:text-emerald-400" : "text-rose-600 dark:text-rose-400"}`}>
-                          {e.pred === e.true ? "correct" : "wrong"}
+                        <span className={`ml-1 font-semibold ${e.pred === e.true ? "text-emerald-600 dark:text-emerald-400" : "text-amber-600 dark:text-amber-400"}`}>
+                          {e.pred === e.true ? "agrees" : "differs"}
                         </span>
                         <span className="block tabular-nums opacity-70">
-                          p={e.prob.toFixed(2)} · {e.true ? "BME" : "clear"}
+                          p={e.prob.toFixed(2)} · case is {e.true ? "BME" : "clear"}
                         </span>
                       </figcaption>
                     </figure>
                   ))}
                 </div>
-                <p className="mt-3 text-xs text-muted-foreground">{cam.data.caveat}</p>
+                <div className="mt-3 space-y-2 text-xs text-muted-foreground">
+                  <p>
+                    <span className="font-semibold text-foreground">
+                      &ldquo;Agrees&rdquo; is not the same as &ldquo;correct&rdquo;.
+                    </span>{" "}
+                    The comparison is against the <em>case</em> label — which folder the scan came
+                    from — applied to every slice of it. A BME patient&apos;s scan contains many
+                    slices with no edema on them, so a slice marked{" "}
+                    <span className="text-amber-600 dark:text-amber-400">differs</span> may well be
+                    a slice the model read correctly. <strong>Only you can judge a single
+                    slice</strong>; this column shows label agreement, nothing more.
+                  </p>
+                  <p>
+                    <span className="font-semibold text-foreground">
+                      Heat outside the bone is expected here.
+                    </span>{" "}
+                    The classifier has no anatomical constraint — it attends anywhere in the image,
+                    muscle included. That is precisely the failure the segmentation model is built
+                    to avoid: it predicts bone and lesion together and clips the lesion to bone, so
+                    muscle cannot be labelled as edema.
+                  </p>
+                  <p>{cam.data.caveat}</p>
+                </div>
               </>
             ) : !cam?.running ? (
               <p className="py-6 text-center text-sm text-muted-foreground">
