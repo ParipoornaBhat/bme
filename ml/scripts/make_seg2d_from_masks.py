@@ -37,6 +37,7 @@ def find_image(slices_dir: Path, stem: str) -> Path | None:
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("base", help="Base repository path")
+    ap.add_argument("--size", type=int, default=256, help="Target square dimension (default: 256)")
     ap.add_argument("--apply", action="store_true", help="Write files to data/seg2d")
     args = ap.parse_args()
 
@@ -98,8 +99,10 @@ def main():
         im = Image.open(img_path).convert("L")
         m = Image.open(mask_path)
 
-        if m.size != im.size:
-            m = m.resize(im.size, Image.NEAREST)
+        if im.size != (args.size, args.size):
+            im = im.resize((args.size, args.size), Image.BILINEAR)
+        if m.size != (args.size, args.size):
+            m = m.resize((args.size, args.size), Image.NEAREST)
 
         arr = np.asarray(m, dtype=np.uint8)
         has_lesion = int(np.any(arr == BME))
@@ -121,13 +124,36 @@ def main():
         cases.add(case_id)
 
     idx_csv = out_dir / "index.csv"
-    with idx_csv.open("w", newline="", encoding="utf-8") as fh:
-        w = csv.DictWriter(fh, fieldnames=["case_id", "image", "mask", "has_lesion"])
-        w.writeheader()
-        w.writerows(rows)
+    existing_rows = []
+    if idx_csv.exists():
+        try:
+            with idx_csv.open("r", encoding="utf-8") as fh:
+                existing_rows = list(csv.DictReader(fh))
+        except Exception:
+            existing_rows = []
 
-    print(f"\nWrote {len(rows)} slice pairs across {len(cases)} case(s) to {out_dir}")
-    print(f"Lesion positive slices: {n_with_lesion} / {len(rows)}")
+    # Map by relative image path to merge seamlessly without duplicates
+    by_img = {r.get("image"): r for r in existing_rows if r.get("image")}
+    for r in rows:
+        by_img[r["image"]] = r
+
+    merged_rows = list(by_img.values())
+
+    fieldnames = ["case_id", "slice", "image", "mask", "has_lesion", "bone_px", "bme_px"]
+    # Ensure all fieldnames exist in dicts
+    for r in merged_rows:
+        for f in fieldnames:
+            if f not in r:
+                r[f] = ""
+
+    with idx_csv.open("w", newline="", encoding="utf-8") as fh:
+        w = csv.DictWriter(fh, fieldnames=fieldnames)
+        w.writeheader()
+        w.writerows(merged_rows)
+
+    print(f"\nWrote {len(rows)} 2D slice pairs across {len(cases)} case(s) to {out_dir}")
+    print(f"Total slices in index (2D + existing 3D slices): {len(merged_rows)}")
+    print(f"Lesion positive 2D slices: {n_with_lesion} / {len(rows)}")
     print(f"Index written to {idx_csv}")
 
 

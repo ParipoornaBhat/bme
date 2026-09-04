@@ -112,8 +112,14 @@ class SegDS(Dataset):
         raw_im = Image.open(self.root / r["image"])
         if raw_im.mode != "L":
             raw_im = raw_im.convert("L")
+        if raw_im.size != (256, 256):
+            raw_im = raw_im.resize((256, 256), Image.BILINEAR)
         img = np.asarray(raw_im, dtype=np.float32) / 255.0
-        msk = np.asarray(Image.open(self.root / r["mask"]), dtype=np.uint8)
+
+        mask_im = Image.open(self.root / r["mask"])
+        if mask_im.size != (256, 256):
+            mask_im = mask_im.resize((256, 256), Image.NEAREST)
+        msk = np.asarray(mask_im, dtype=np.uint8)
 
         if self.train:
             # Geometric only. Brightness jitter is risky here: edema IS

@@ -124,7 +124,7 @@ class SliceDS(Dataset):
         aug = [T.RandomHorizontalFlip(),
                T.RandomAffine(degrees=8, translate=(0.05, 0.05), scale=(0.92, 1.08)),
                T.ColorJitter(brightness=0.15, contrast=0.15)] if train else []
-        self.tf = T.Compose([T.Grayscale(3), *aug, T.ToTensor(),
+        self.tf = T.Compose([T.Grayscale(3), T.Resize((256, 256)), *aug, T.ToTensor(),
                              T.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])])
 
     def __len__(self):
