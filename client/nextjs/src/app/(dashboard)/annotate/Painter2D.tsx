@@ -577,15 +577,33 @@ export default function Painter2D() {
     [tool, drawOutlineOverlay, renderMaskToCanvas],
   );
 
-  const getCanvasCoords = (e: React.MouseEvent<HTMLCanvasElement>) => {
+  const getCanvasCoords = (
+    e: React.MouseEvent<HTMLCanvasElement> | React.TouchEvent<HTMLCanvasElement> | Touch,
+  ) => {
     const canvas = maskCanvasRef.current;
     if (!canvas) return { x: 0, y: 0 };
     const rect = canvas.getBoundingClientRect();
     const scaleX = canvas.width / rect.width;
     const scaleY = canvas.height / rect.height;
+
+    let clientX = 0;
+    let clientY = 0;
+    if ("touches" in e) {
+      if (e.touches.length > 0) {
+        clientX = e.touches[0].clientX;
+        clientY = e.touches[0].clientY;
+      } else if (e.changedTouches && e.changedTouches.length > 0) {
+        clientX = e.changedTouches[0].clientX;
+        clientY = e.changedTouches[0].clientY;
+      }
+    } else {
+      clientX = e.clientX;
+      clientY = e.clientY;
+    }
+
     return {
-      x: Math.max(0, Math.min(canvas.width - 1, Math.round((e.clientX - rect.left) * scaleX))),
-      y: Math.max(0, Math.min(canvas.height - 1, Math.round((e.clientY - rect.top) * scaleY))),
+      x: Math.max(0, Math.min(canvas.width - 1, Math.round((clientX - rect.left) * scaleX))),
+      y: Math.max(0, Math.min(canvas.height - 1, Math.round((clientY - rect.top) * scaleY))),
     };
   };
 
@@ -596,6 +614,111 @@ export default function Painter2D() {
       finishLockedDraw();
     } else {
       startLockedDraw(pos);
+    }
+  };
+
+  // Touch handlers for touchscreen devices (smartphones, tablets, touch laptops)
+  const handleTouchStart = (e: React.TouchEvent<HTMLCanvasElement>) => {
+    if (e.touches.length > 1) return; // Ignore pinch/multitouch gestures
+    e.preventDefault();
+
+    if (tool === "pan") {
+      setIsPanning(true);
+      const touch = e.touches[0];
+      panStartRef.current = { x: touch.clientX - pan.x, y: touch.clientY - pan.y };
+      return;
+    }
+
+    const pos = getCanvasCoords(e);
+
+    // If locked draw is already active, tapping once finishes and commits the stroke!
+    if (isLockedDrawRef.current) {
+      finishLockedDraw();
+      lastTapTimeRef.current = 0;
+      return;
+    }
+
+    // Touchscreen double tap detection (two taps within 350ms)
+    const now = Date.now();
+    if (now - lastTapTimeRef.current < 350) {
+      lastTapTimeRef.current = 0;
+      startLockedDraw(pos);
+      return;
+    }
+    lastTapTimeRef.current = now;
+
+    // Single touch start (standard touch draw without locking)
+    if (tool === "pencil") {
+      isDrawingRef.current = true;
+      outlineRef.current = [[pos.x, pos.y]];
+      drawOutlineOverlay();
+      return;
+    }
+
+    pushUndo();
+    isDrawingRef.current = true;
+    lastPosRef.current = pos;
+    paintAt(pos.x, pos.y);
+    renderMaskToCanvas();
+  };
+
+  const handleTouchMove = (e: React.TouchEvent<HTMLCanvasElement>) => {
+    if (e.touches.length > 1) return;
+    e.preventDefault();
+
+    if (tool === "pan") {
+      if (isPanning && e.touches.length === 1) {
+        const touch = e.touches[0];
+        setPan({
+          x: touch.clientX - panStartRef.current.x,
+          y: touch.clientY - panStartRef.current.y,
+        });
+      }
+      return;
+    }
+
+    if (!isDrawingRef.current) return;
+    const pos = getCanvasCoords(e);
+
+    if (tool === "pencil") {
+      const pts = outlineRef.current;
+      const last = pts[pts.length - 1];
+      if (!last || Math.hypot(pos.x - last[0], pos.y - last[1]) >= 2) {
+        pts.push([pos.x, pos.y]);
+        drawOutlineOverlay();
+      }
+      return;
+    }
+
+    const last = lastPosRef.current || pos;
+    const dist = Math.hypot(pos.x - last.x, pos.y - last.y);
+    const steps = Math.max(1, Math.ceil(dist / 2));
+    for (let i = 0; i <= steps; i++) {
+      const t = i / steps;
+      paintAt(Math.round(last.x + (pos.x - last.x) * t), Math.round(last.y + (pos.y - last.y) * t));
+    }
+
+    lastPosRef.current = pos;
+    renderMaskToCanvas();
+  };
+
+  const handleTouchEnd = (e: React.TouchEvent<HTMLCanvasElement>) => {
+    e.preventDefault();
+    if (isPanning) {
+      setIsPanning(false);
+    }
+    // If locked draw mode is active, lifting finger from touchscreen does not end drawing
+    if (isLockedDrawRef.current) {
+      return;
+    }
+    if (!isDrawingRef.current) return;
+    isDrawingRef.current = false;
+    lastPosRef.current = null;
+
+    if (tool === "pencil") {
+      commitOutline();
+    } else {
+      triggerAutoSaveIfNeeded();
     }
   };
 
@@ -1405,12 +1528,16 @@ export default function Painter2D() {
               ref={maskCanvasRef}
               width={imgDim.w || 512}
               height={imgDim.h || 512}
-              style={{ width: "100%", height: "100%" }}
+              style={{ width: "100%", height: "100%", touchAction: "none" }}
               onMouseDown={handleMouseDown}
               onMouseMove={handleMouseMove}
               onMouseUp={handleMouseUp}
               onMouseLeave={handleMouseUp}
               onDoubleClick={handleDoubleClick}
+              onTouchStart={handleTouchStart}
+              onTouchMove={handleTouchMove}
+              onTouchEnd={handleTouchEnd}
+              onTouchCancel={handleTouchEnd}
               className={`absolute inset-0 block ${
                 tool === "pan" ? (isPanning ? "cursor-grabbing" : "cursor-grab") : "cursor-crosshair"
               }`}
@@ -1420,16 +1547,16 @@ export default function Painter2D() {
               ref={overlayCanvasRef}
               width={imgDim.w || 512}
               height={imgDim.h || 512}
-              style={{ width: "100%", height: "100%" }}
+              style={{ width: "100%", height: "100%", touchAction: "none" }}
               className="absolute inset-0 block pointer-events-none"
             />
           </div>
 
-          {/* Touchpad Double-Tap Draw Active Indicator */}
+          {/* Touch / Touchpad Double-Tap Draw Active Indicator */}
           {isLockedDraw && (
             <div className="absolute top-3 left-1/2 -translate-x-1/2 z-20 flex items-center gap-2 rounded-full border border-sky-500/60 bg-sky-950/90 backdrop-blur-md px-4 py-1.5 text-xs text-sky-200 shadow-xl shadow-sky-950/50 animate-pulse">
               <span className="h-2 w-2 rounded-full bg-sky-400 animate-ping" />
-              <span className="font-semibold tracking-wide">Touchpad Draw Active:</span>
+              <span className="font-semibold tracking-wide">Touch / Touchpad Draw Active:</span>
               <span className="text-sky-300">Glide finger to mark &bull; Single Tap or Esc to finish</span>
             </div>
           )}
