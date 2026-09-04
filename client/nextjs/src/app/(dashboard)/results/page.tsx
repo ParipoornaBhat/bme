@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { Activity, Boxes, Eye, Layers, Loader2, RefreshCw } from "lucide-react";
+import { Activity, Boxes, CheckCircle2, Eye, Layers, Loader2, RefreshCw } from "lucide-react";
 import TestImage from "./TestImage";
 
 /**
@@ -24,6 +24,8 @@ type Payload = {
   twoD: {
     available: boolean;
     reviewCount: number;
+    selectedRun: string | null;
+    selectionExplicit: boolean;
     metrics: null | {
       model: string; device: string; folds: number; epochs: number; seed: number;
       n_slices: number; n_cases: number;
@@ -84,6 +86,9 @@ export default function ResultsPage() {
   const [cam, setCam] = useState<CamPayload | null>(null);
   const [camBusy, setCamBusy] = useState(false);
   const [camError, setCamError] = useState<string | null>(null);
+  // The same choice the training page writes. Both read data/results2d/selected.json,
+  // so marking a run in either place changes what the other shows.
+  const [runs, setRuns] = useState<{ id: string; arch: string; folds: number; epochs: number }[]>([]);
 
   // Hydrate results tab from localStorage
   useEffect(() => {
@@ -108,11 +113,22 @@ export default function ResultsPage() {
     try {
       const res = await fetch("/api/results", { cache: "no-store" });
       if (res.ok) setData(await res.json());
+      const rr = await fetch("/api/training", { cache: "no-store" });
+      if (rr.ok) setRuns((await rr.json()).runs ?? []);
     } catch (e) {
       console.error(e);
     } finally {
       setLoading(false);
     }
+  };
+
+  const markRun = async (id: string | null) => {
+    await fetch("/api/selected-model", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ run: id }),
+    });
+    load();
   };
 
   const loadCam = async () => {
@@ -212,6 +228,46 @@ export default function ResultsPage() {
             </div>
           ) : m ? (
             <>
+              <div className="rounded-lg border border-border bg-card p-4">
+                <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+                  <span className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">
+                    Model in use
+                  </span>
+                  {data.twoD.selectionExplicit ? (
+                    <span className="inline-flex items-center gap-1.5 text-xs text-primary">
+                      <CheckCircle2 className="h-3.5 w-3.5" /> marked
+                    </span>
+                  ) : (
+                    <span className="text-xs text-muted-foreground">
+                      nothing marked — showing the latest run
+                    </span>
+                  )}
+                </div>
+                <div className="flex flex-wrap items-center gap-2">
+                  <select
+                    value={data.twoD.selectedRun ?? ""}
+                    onChange={(e) => markRun(e.target.value || null)}
+                    className="min-w-[18rem] rounded-md border border-border bg-background px-2 py-1.5 text-sm">
+                    <option value="">Latest run (no choice saved)</option>
+                    {runs.map((r) => (
+                      <option key={r.id} value={r.id}>
+                        {r.arch} · {r.folds} folds · {r.epochs} epochs · {r.id.slice(0, 13)}
+                      </option>
+                    ))}
+                  </select>
+                  {data.twoD.selectionExplicit && (
+                    <button onClick={() => markRun(null)}
+                      className="rounded-md border border-border px-2.5 py-1.5 text-xs text-muted-foreground hover:text-foreground">
+                      Unmark
+                    </button>
+                  )}
+                </div>
+                <p className="mt-2 text-xs text-muted-foreground">
+                  Every number on this page comes from this run. The same choice is shown on the
+                  Training page — changing it in either place changes both.
+                </p>
+              </div>
+
               <MetricRow label="Case level — the headline number" m={m.case_level} />
               <MetricRow label="Slice level — noisy labels, read the caveat" m={m.slice_level} muted />
 

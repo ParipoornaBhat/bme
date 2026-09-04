@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import fs from "node:fs";
 import path from "node:path";
+import { readSelected } from "~/lib/selectedModel";
 import { spawn } from "node:child_process";
 
 /**
@@ -147,6 +148,7 @@ export async function GET() {
   return NextResponse.json({
     archs: ARCHS,
     runs: listRuns(),
+    selected: readSelected(),
     running: isRunning,
     log: tail,
     job: isRunning ? job : null,

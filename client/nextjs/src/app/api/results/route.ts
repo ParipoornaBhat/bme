@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import fs from "node:fs";
 import path from "node:path";
+import { selectedMetrics } from "~/lib/selectedModel";
 
 /**
  * Serves model results to the dashboard.
@@ -68,13 +69,19 @@ function worklistSummary() {
 }
 
 export async function GET() {
-  const metrics2d = readJson("data/results2d/metrics.json");
+  // The marked run, not whatever trained last. Falls back to the newest run
+  // when nothing is marked, and says so via `explicit` so the page can show
+  // "latest" rather than implying somebody chose it.
+  const sel = selectedMetrics();
+  const metrics2d = sel.metrics ?? readJson("data/results2d/metrics.json");
   const review2d = readJson("data/results2d/review.json");
 
   return NextResponse.json({
     twoD: {
       available: Boolean(metrics2d),
       metrics: metrics2d,
+      selectedRun: sel.id,
+      selectionExplicit: sel.explicit,
       reviewCount: Array.isArray(review2d) ? review2d.length : 0,
     },
     threeD: {
