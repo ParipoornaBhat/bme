@@ -3,6 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { readSelected } from "~/lib/selectedModel";
 import { torchDevice } from "~/lib/torchDevice";
+import { conflictingJob } from "~/lib/jobs";
 import { spawn } from "node:child_process";
 
 /**
@@ -161,6 +162,10 @@ export async function GET() {
 }
 
 export async function POST(req: NextRequest) {
+  const clash = conflictingJob("classifier");
+  if (clash) {
+    return NextResponse.json({ error: clash.message }, { status: 409 });
+  }
   if (running() !== null) {
     return NextResponse.json({ error: "a training run is already in progress" }, { status: 409 });
   }

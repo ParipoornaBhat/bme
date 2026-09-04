@@ -1,17 +1,12 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import { Cpu, HardDrive, Loader2, RefreshCw, Zap } from "lucide-react";
+import { HardDrive, Loader2, RefreshCw } from "lucide-react";
+import { SystemMonitor, useSystem } from "~/components/SystemMonitor";
 
 type Item = {
   label: string; group: string; path: string; exists: boolean; bytes: number; files: number;
   reason?: string; removable?: string;
-};
-type Sys = {
-  cpu: { loadPercent: number | null; cores: number; model: string | null; tempC: number | null; tempNote: string };
-  gpu: { name: string; utilPercent: number; memUsedMB: number; memTotalMB: number; tempC: number } | null;
-  memory: { totalGB: number; freeGB: number };
-  note: string;
 };
 type Group = { name: string; bytes: number; files: number; items: Item[] };
 type Payload = {
@@ -39,7 +34,7 @@ const HUES: Record<string, string> = {
 export default function StoragePage() {
   const [data, setData] = useState<Payload | null>(null);
   const [loading, setLoading] = useState(true);
-  const [sys, setSys] = useState<Sys | null>(null);
+  const sys = useSystem(4000);
   const [reverting, setReverting] = useState(false);
 
   const load = useCallback(async () => {
@@ -50,21 +45,6 @@ export default function StoragePage() {
     } finally {
       setLoading(false);
     }
-  }, []);
-
-  // Telemetry polls on its own cadence: it changes every second, while the
-  // directory walk is expensive and only changes when somebody trains.
-  useEffect(() => {
-    let alive = true;
-    const tick = async () => {
-      try {
-        const r = await fetch("/api/system", { cache: "no-store" });
-        if (r.ok && alive) setSys(await r.json());
-      } catch { /* telemetry is optional */ }
-    };
-    tick();
-    const id = setInterval(tick, 3000);
-    return () => { alive = false; clearInterval(id); };
   }, []);
 
   const revertTorch = async () => {
@@ -152,50 +132,7 @@ export default function StoragePage() {
         </div>
       </div>
 
-      {sys && (
-        <div className="grid gap-3 sm:grid-cols-2">
-          <div className="rounded-lg border border-border bg-card p-4">
-            <div className="mb-2 flex items-center justify-between">
-              <span className="inline-flex items-center gap-2 text-sm font-semibold">
-                <Cpu className="h-4 w-4 text-muted-foreground" /> CPU
-              </span>
-              <span className="text-sm tabular-nums">
-                {sys.cpu.loadPercent != null ? `${sys.cpu.loadPercent}%` : "—"}
-              </span>
-            </div>
-            <div className="h-1.5 overflow-hidden rounded-full bg-muted">
-              <div className="h-full rounded-full bg-violet-500 transition-all duration-700"
-                style={{ width: `${sys.cpu.loadPercent ?? 0}%` }} />
-            </div>
-            <p className="mt-2 text-xs text-muted-foreground">
-              {sys.cpu.cores} threads &middot; RAM {(sys.memory.totalGB - sys.memory.freeGB).toFixed(1)}
-              /{sys.memory.totalGB} GB
-            </p>
-            <p className="mt-1 text-[11px] text-muted-foreground/70">{sys.cpu.tempNote}</p>
-          </div>
-
-          <div className="rounded-lg border border-border bg-card p-4">
-            <div className="mb-2 flex items-center justify-between">
-              <span className="inline-flex items-center gap-2 text-sm font-semibold">
-                <Zap className="h-4 w-4 text-muted-foreground" /> GPU
-              </span>
-              <span className="text-sm tabular-nums">
-                {sys.gpu ? `${sys.gpu.utilPercent}% · ${sys.gpu.tempC}°C` : "none"}
-              </span>
-            </div>
-            <div className="h-1.5 overflow-hidden rounded-full bg-muted">
-              <div className="h-full rounded-full bg-teal-500 transition-all duration-700"
-                style={{ width: `${sys.gpu?.utilPercent ?? 0}%` }} />
-            </div>
-            <p className="mt-2 text-xs text-muted-foreground">
-              {sys.gpu
-                ? `${sys.gpu.name} · VRAM ${(sys.gpu.memUsedMB / 1024).toFixed(1)}/${(sys.gpu.memTotalMB / 1024).toFixed(1)} GB`
-                : "No NVIDIA GPU detected."}
-            </p>
-            <p className="mt-1 text-[11px] text-muted-foreground/70">{sys.note}</p>
-          </div>
-        </div>
-      )}
+      <SystemMonitor sys={sys} variant="cards" />
 
       <div className="space-y-4">
         {data.groups.map((g) => (

@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { CheckCircle2, ChevronDown, Circle, Info, Layers, Loader2, PenTool, Play, Square, Target, Trash2, Trophy } from "lucide-react";
+import { SystemMonitor, useSystem } from "~/components/SystemMonitor";
 
 type Metric = { accuracy: number; precision: number; recall: number; f1: number; auc: number; n: number };
 type Prog = {
@@ -253,6 +254,8 @@ export default function TrainingPage() {
   const [showWhy, setShowWhy] = useState(false);
   const [showTerms, setShowTerms] = useState(false);
   const logRef = useRef<HTMLPreElement>(null);
+  const busyNow = running || Boolean(seg?.running);
+  const sys = useSystem(busyNow ? 2000 : 5000);
 
   // Restore training tab and options from localStorage
   useEffect(() => {
@@ -440,6 +443,8 @@ export default function TrainingPage() {
       </div>
 
       {showTerms && <Terms />}
+
+      <SystemMonitor sys={sys} />
 
       {tab === "seg" ? (
         <div className="space-y-4">

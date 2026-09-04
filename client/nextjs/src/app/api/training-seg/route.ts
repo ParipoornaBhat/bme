@@ -3,6 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { spawn } from "node:child_process";
 import { torchDevice } from "~/lib/torchDevice";
+import { conflictingJob } from "~/lib/jobs";
 
 /**
  * Segmentation training: annotations in, a model that marks edema out.
@@ -190,6 +191,10 @@ export async function GET() {
 export async function POST(req: NextRequest) {
   if (running()) {
     return NextResponse.json({ error: "already training" }, { status: 409 });
+  }
+  const clash = conflictingJob("segmentation");
+  if (clash) {
+    return NextResponse.json({ error: clash.message }, { status: 409 });
   }
   const cases = annotatedCases();
   if (cases.length === 0) {
