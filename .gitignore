@@ -20,8 +20,10 @@
 /phi/
 *_PHI*
 
-# Reference papers — copyrighted PDFs, not ours to redistribute
-/RP/
+# Reference papers — the PDFs are copyrighted and not ours to redistribute,
+# but our own analysis of them is our work and belongs in the repo.
+/RP/*
+!/RP/ANALYSIS.md
 /papers/
 *.pdf
 !docs/**/*.pdf

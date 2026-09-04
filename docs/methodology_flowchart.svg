@@ -1,0 +1,139 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 700" width="1280" height="700" font-family="Segoe UI, Calibri, Arial, sans-serif">
+  <defs>
+    <marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#4a5568"/>
+    </marker>
+    <marker id="af" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#b7791f"/>
+    </marker>
+  </defs>
+
+  <rect width="1280" height="700" fill="#ffffff"/>
+
+  <text x="640" y="40" text-anchor="middle" font-size="26" font-weight="600" fill="#1a202c">Methodology — Explainable BME Detection and Segmentation in Knee MRI</text>
+
+  <!-- ============ STAGE 1: DATA ============ -->
+  <rect x="30" y="72" width="1220" height="118" rx="10" fill="#f7fafc" stroke="#cbd5e0" stroke-width="1.5"/>
+  <text x="48" y="96" font-size="14" font-weight="700" fill="#4a5568" letter-spacing="1">1 &#183; DATA PREPARATION</text>
+
+  <rect x="52" y="108" width="200" height="66" rx="8" fill="#ffffff" stroke="#3182ce" stroke-width="2"/>
+  <text x="152" y="133" text-anchor="middle" font-size="15" font-weight="600" fill="#1a202c">MRI Acquisition</text>
+  <text x="152" y="155" text-anchor="middle" font-size="12.5" fill="#4a5568">Knee MRI, fat-suppressed</text>
+
+  <rect x="300" y="108" width="200" height="66" rx="8" fill="#ffffff" stroke="#3182ce" stroke-width="2"/>
+  <text x="400" y="133" text-anchor="middle" font-size="15" font-weight="600" fill="#1a202c">De-identification</text>
+  <text x="400" y="155" text-anchor="middle" font-size="12.5" fill="#4a5568">Headers + filenames &#8594; IDs</text>
+
+  <rect x="548" y="108" width="200" height="66" rx="8" fill="#ffffff" stroke="#3182ce" stroke-width="2"/>
+  <text x="648" y="133" text-anchor="middle" font-size="15" font-weight="600" fill="#1a202c">Curation</text>
+  <text x="648" y="155" text-anchor="middle" font-size="12.5" fill="#4a5568">Deduplicate, group by patient</text>
+
+  <rect x="796" y="108" width="200" height="66" rx="8" fill="#ffffff" stroke="#3182ce" stroke-width="2"/>
+  <text x="896" y="133" text-anchor="middle" font-size="15" font-weight="600" fill="#1a202c">2D Dataset</text>
+  <text x="896" y="155" text-anchor="middle" font-size="12.5" fill="#4a5568">94 images &#183; 87 patients</text>
+
+  <rect x="1044" y="108" width="184" height="66" rx="8" fill="#fffaf0" stroke="#b7791f" stroke-width="2"/>
+  <text x="1136" y="133" text-anchor="middle" font-size="15" font-weight="600" fill="#1a202c">Patient-level split</text>
+  <text x="1136" y="155" text-anchor="middle" font-size="12.5" fill="#744210">No patient in two folds</text>
+
+  <line x1="252" y1="141" x2="296" y2="141" stroke="#4a5568" stroke-width="2" marker-end="url(#a)"/>
+  <line x1="500" y1="141" x2="544" y2="141" stroke="#4a5568" stroke-width="2" marker-end="url(#a)"/>
+  <line x1="748" y1="141" x2="792" y2="141" stroke="#4a5568" stroke-width="2" marker-end="url(#a)"/>
+  <line x1="996" y1="141" x2="1040" y2="141" stroke="#4a5568" stroke-width="2" marker-end="url(#a)"/>
+
+  <!-- ============ STAGE 2: TWO TRACKS ============ -->
+  <text x="48" y="228" font-size="14" font-weight="700" fill="#4a5568" letter-spacing="1">2 &#183; TWO COMPLEMENTARY MODELS</text>
+
+  <!-- Track A -->
+  <rect x="30" y="244" width="600" height="196" rx="10" fill="#ebf8ff" stroke="#3182ce" stroke-width="1.5"/>
+  <text x="52" y="270" font-size="15" font-weight="700" fill="#2c5282">Track A &#8212; Detection (does this scan show BME?)</text>
+
+  <rect x="52" y="286" width="168" height="62" rx="8" fill="#ffffff" stroke="#3182ce" stroke-width="2"/>
+  <text x="136" y="311" text-anchor="middle" font-size="14" font-weight="600" fill="#1a202c">ResNet-18</text>
+  <text x="136" y="331" text-anchor="middle" font-size="12" fill="#4a5568">ImageNet pretrained</text>
+
+  <rect x="252" y="286" width="168" height="62" rx="8" fill="#ffffff" stroke="#3182ce" stroke-width="2"/>
+  <text x="336" y="311" text-anchor="middle" font-size="14" font-weight="600" fill="#1a202c">Transfer learning</text>
+  <text x="336" y="331" text-anchor="middle" font-size="12" fill="#4a5568">Layer freezing, early stop</text>
+
+  <rect x="452" y="286" width="158" height="62" rx="8" fill="#ffffff" stroke="#3182ce" stroke-width="2"/>
+  <text x="531" y="311" text-anchor="middle" font-size="14" font-weight="600" fill="#1a202c">BME / No BME</text>
+  <text x="531" y="331" text-anchor="middle" font-size="12" fill="#4a5568">per-case decision</text>
+
+  <rect x="252" y="364" width="358" height="56" rx="8" fill="#ffffff" stroke="#805ad5" stroke-width="2"/>
+  <text x="431" y="387" text-anchor="middle" font-size="14" font-weight="600" fill="#1a202c">Grad-CAM explainability</text>
+  <text x="431" y="406" text-anchor="middle" font-size="12" fill="#4a5568">shows which region drove the prediction</text>
+
+  <line x1="220" y1="317" x2="248" y2="317" stroke="#4a5568" stroke-width="2" marker-end="url(#a)"/>
+  <line x1="420" y1="317" x2="448" y2="317" stroke="#4a5568" stroke-width="2" marker-end="url(#a)"/>
+  <line x1="531" y1="348" x2="531" y2="360" stroke="#4a5568" stroke-width="2" marker-end="url(#a)"/>
+
+  <!-- Track B -->
+  <rect x="650" y="244" width="600" height="196" rx="10" fill="#f0fff4" stroke="#38a169" stroke-width="1.5"/>
+  <text x="672" y="270" font-size="15" font-weight="700" fill="#276749">Track B &#8212; Segmentation (where is the edema?)</text>
+
+  <rect x="672" y="286" width="168" height="62" rx="8" fill="#ffffff" stroke="#38a169" stroke-width="2"/>
+  <text x="756" y="311" text-anchor="middle" font-size="14" font-weight="600" fill="#1a202c">Expert annotation</text>
+  <text x="756" y="331" text-anchor="middle" font-size="12" fill="#4a5568">in-browser painter</text>
+
+  <rect x="872" y="286" width="168" height="62" rx="8" fill="#ffffff" stroke="#38a169" stroke-width="2"/>
+  <text x="956" y="311" text-anchor="middle" font-size="14" font-weight="600" fill="#1a202c">2D U-Net</text>
+  <text x="956" y="331" text-anchor="middle" font-size="12" fill="#4a5568">Dice + Focal loss</text>
+
+  <rect x="1072" y="286" width="158" height="62" rx="8" fill="#ffffff" stroke="#38a169" stroke-width="2"/>
+  <text x="1151" y="311" text-anchor="middle" font-size="14" font-weight="600" fill="#1a202c">Lesion mask</text>
+  <text x="1151" y="331" text-anchor="middle" font-size="12" fill="#4a5568">bone marrow + BME</text>
+
+  <rect x="672" y="364" width="558" height="56" rx="8" fill="#ffffff" stroke="#38a169" stroke-width="2" stroke-dasharray="5 4"/>
+  <text x="951" y="387" text-anchor="middle" font-size="14" font-weight="600" fill="#1a202c">Annotate &#8594; retrain loop</text>
+  <text x="951" y="406" text-anchor="middle" font-size="12" fill="#4a5568">model predictions reviewed and corrected, then fed back as labels</text>
+
+  <line x1="840" y1="317" x2="868" y2="317" stroke="#4a5568" stroke-width="2" marker-end="url(#a)"/>
+  <line x1="1040" y1="317" x2="1068" y2="317" stroke="#4a5568" stroke-width="2" marker-end="url(#a)"/>
+
+  <line x1="1136" y1="174" x2="1136" y2="212" stroke="#4a5568" stroke-width="2"/>
+  <line x1="1136" y1="212" x2="336" y2="212" stroke="#4a5568" stroke-width="2"/>
+  <line x1="336" y1="212" x2="336" y2="282" stroke="#4a5568" stroke-width="2" marker-end="url(#a)"/>
+  <line x1="756" y1="212" x2="756" y2="282" stroke="#4a5568" stroke-width="2" marker-end="url(#a)"/>
+
+  <!-- feedback arrow -->
+  <path d="M1230 392 L1252 392 L1252 250 L1151 250 L1151 282" fill="none" stroke="#b7791f" stroke-width="2" stroke-dasharray="6 4" marker-end="url(#af)"/>
+
+  <!-- ============ STAGE 3: EVALUATION ============ -->
+  <text x="48" y="480" font-size="14" font-weight="700" fill="#4a5568" letter-spacing="1">3 &#183; EVALUATION</text>
+
+  <rect x="30" y="496" width="1220" height="120" rx="10" fill="#f7fafc" stroke="#cbd5e0" stroke-width="1.5"/>
+
+  <rect x="52" y="516" width="230" height="80" rx="8" fill="#ffffff" stroke="#4a5568" stroke-width="2"/>
+  <text x="167" y="546" text-anchor="middle" font-size="14.5" font-weight="600" fill="#1a202c">5-fold cross-validation</text>
+  <text x="167" y="567" text-anchor="middle" font-size="12" fill="#4a5568">grouped by patient</text>
+  <text x="167" y="585" text-anchor="middle" font-size="12" fill="#4a5568">mean &#177; std across folds</text>
+
+  <rect x="312" y="516" width="230" height="80" rx="8" fill="#ffffff" stroke="#3182ce" stroke-width="2"/>
+  <text x="427" y="546" text-anchor="middle" font-size="14.5" font-weight="600" fill="#1a202c">Detection metrics</text>
+  <text x="427" y="567" text-anchor="middle" font-size="12" fill="#4a5568">AUC, sensitivity, specificity</text>
+  <text x="427" y="585" text-anchor="middle" font-size="12" fill="#4a5568">per-class recall (imbalanced)</text>
+
+  <rect x="572" y="516" width="230" height="80" rx="8" fill="#ffffff" stroke="#38a169" stroke-width="2"/>
+  <text x="687" y="546" text-anchor="middle" font-size="14.5" font-weight="600" fill="#1a202c">Segmentation metrics</text>
+  <text x="687" y="567" text-anchor="middle" font-size="12" fill="#4a5568">Dice, lesion sensitivity</text>
+  <text x="687" y="585" text-anchor="middle" font-size="12" fill="#4a5568">false positives per case</text>
+
+  <rect x="832" y="516" width="230" height="80" rx="8" fill="#ffffff" stroke="#805ad5" stroke-width="2"/>
+  <text x="947" y="546" text-anchor="middle" font-size="14.5" font-weight="600" fill="#1a202c">Explainability</text>
+  <text x="947" y="567" text-anchor="middle" font-size="12" fill="#4a5568">Grad-CAM overlay review</text>
+  <text x="947" y="585" text-anchor="middle" font-size="12" fill="#4a5568">radiologist plausibility check</text>
+
+  <rect x="1092" y="516" width="136" height="80" rx="8" fill="#fffaf0" stroke="#b7791f" stroke-width="2"/>
+  <text x="1160" y="551" text-anchor="middle" font-size="14.5" font-weight="600" fill="#1a202c">Held-out</text>
+  <text x="1160" y="571" text-anchor="middle" font-size="14.5" font-weight="600" fill="#1a202c">test set</text>
+  <text x="1160" y="589" text-anchor="middle" font-size="11.5" fill="#744210">evaluated once</text>
+
+  <line x1="336" y1="440" x2="336" y2="470" stroke="#4a5568" stroke-width="2"/>
+  <line x1="951" y1="440" x2="951" y2="470" stroke="#4a5568" stroke-width="2"/>
+  <line x1="336" y1="470" x2="640" y2="470" stroke="#4a5568" stroke-width="2"/>
+  <line x1="951" y1="470" x2="640" y2="470" stroke="#4a5568" stroke-width="2"/>
+  <line x1="640" y1="470" x2="640" y2="492" stroke="#4a5568" stroke-width="2" marker-end="url(#a)"/>
+
+  <text x="640" y="644" text-anchor="middle" font-size="12.5" fill="#718096">Figure 1. Overall framework. Detection answers whether edema is present; segmentation localises it. Splits are grouped by patient so no individual appears in both training and validation.</text>
+</svg>
