@@ -100,6 +100,8 @@ export default function Painter2D() {
   const lastPosRef = useRef<{ x: number; y: number } | null>(null);
   const outlineRef = useRef<Array<[number, number]>>([]);
   const lastLoadedStemRef = useRef<string>("");
+  const loadedSliceRef = useRef<Case2DSlice | null>(null);
+  const loadRequestIdRef = useRef<number>(0);
 
   const resetZoom = useCallback(() => {
     setZoom(1);
@@ -285,6 +287,8 @@ export default function Painter2D() {
       return;
     }
     lastLoadedStemRef.current = sliceKey;
+    const currentRequestId = ++loadRequestIdRef.current;
+    const sliceSnapshot = selected;
 
     let cancelled = false;
     const img = new Image();
@@ -292,7 +296,7 @@ export default function Painter2D() {
     img.src = `/api/cases2d?image=${encodeURIComponent(selectedRelPath)}`;
 
     img.onload = async () => {
-      if (cancelled) return;
+      if (cancelled || loadRequestIdRef.current !== currentRequestId) return;
       const w = img.naturalWidth;
       const h = img.naturalHeight;
       imgDimRef.current = { w, h };
@@ -324,27 +328,27 @@ export default function Painter2D() {
 
       const maskArr = new Uint8Array(w * h);
       maskDataRef.current = maskArr;
+      loadedSliceRef.current = sliceSnapshot;
       undoStackRef.current = [];
       redoStackRef.current = [];
       isDirtyRef.current = false;
       if (autoSaveTimeoutRef.current) clearTimeout(autoSaveTimeoutRef.current);
-
 
       // Try to load existing mask
       try {
         const maskRes = await fetch(
           `/api/annotation2d/${selectedCaseId}?stem=${encodeURIComponent(selectedStem)}&raw=true`,
         );
-        if (cancelled) return;
+        if (cancelled || loadRequestIdRef.current !== currentRequestId) return;
         if (maskRes.ok && maskRes.headers.get("content-type")?.includes("image")) {
           const blob = await maskRes.blob();
-          if (cancelled) return;
+          if (cancelled || loadRequestIdRef.current !== currentRequestId) return;
           const maskImg = new Image();
           const blobUrl = URL.createObjectURL(blob);
           maskImg.src = blobUrl;
           maskImg.onload = () => {
             URL.revokeObjectURL(blobUrl);
-            if (cancelled) return;
+            if (cancelled || loadRequestIdRef.current !== currentRequestId) return;
             const mw = maskImg.naturalWidth || w;
             const mh = maskImg.naturalHeight || h;
             const off = document.createElement("canvas");
@@ -377,14 +381,14 @@ export default function Painter2D() {
           renderMaskToCanvas();
         }
       } catch {
-        if (!cancelled) renderMaskToCanvas();
+        if (!cancelled && loadRequestIdRef.current === currentRequestId) renderMaskToCanvas();
       }
     };
 
-  return () => {
+    return () => {
       cancelled = true;
     };
-  }, [selectedRelPath, selectedCaseId, selectedStem, renderMaskToCanvas]);
+  }, [selectedRelPath, selectedCaseId, selectedStem, selected, renderMaskToCanvas]);
 
   // Clear overlay canvas
   const clearOverlay = useCallback(() => {
@@ -537,26 +541,42 @@ export default function Painter2D() {
     renderMaskToCanvas();
     if (autoSave && isDirtyRef.current) {
       if (autoSaveTimeoutRef.current) clearTimeout(autoSaveTimeoutRef.current);
+      const targetSlice = loadedSliceRef.current;
+      const pixelSnapshot = maskDataRef.current ? new Uint8Array(maskDataRef.current) : null;
+      const dimSnapshot = { ...imgDimRef.current };
       autoSaveTimeoutRef.current = setTimeout(() => {
         const c = countsRef.current;
-        if (c.bone + c.bme + c.uncertain > 0) {
-          saveMaskInternal({ isAuto: true });
+        if (c.bone + c.bme + c.uncertain > 0 && targetSlice && pixelSnapshot) {
+          saveMaskInternal({
+            isAuto: true,
+            targetSlice,
+            pixelData: pixelSnapshot,
+            dimensions: dimSnapshot,
+          });
         }
       }, 400);
     }
   }, [clearOverlay, isErasing, activeLabel, maskInside, renderMaskToCanvas, autoSave]);
 
   const triggerAutoSaveIfNeeded = useCallback(() => {
-    if (!autoSave || !selected) return;
+    if (!autoSave) return;
     if (autoSaveTimeoutRef.current) clearTimeout(autoSaveTimeoutRef.current);
+    const targetSlice = loadedSliceRef.current;
+    const pixelSnapshot = maskDataRef.current ? new Uint8Array(maskDataRef.current) : null;
+    const dimSnapshot = { ...imgDimRef.current };
     autoSaveTimeoutRef.current = setTimeout(() => {
       const c = countsRef.current;
       const total = c.bone + c.bme + c.uncertain;
-      if (total > 0 && isDirtyRef.current) {
-        saveMaskInternal({ isAuto: true });
+      if (total > 0 && isDirtyRef.current && targetSlice && pixelSnapshot) {
+        saveMaskInternal({
+          isAuto: true,
+          targetSlice,
+          pixelData: pixelSnapshot,
+          dimensions: dimSnapshot,
+        });
       }
     }, 400);
-  }, [autoSave, selected]);
+  }, [autoSave]);
 
   const finishLockedDraw = useCallback(() => {
     if (!isLockedDrawRef.current) return;
@@ -835,16 +855,29 @@ export default function Painter2D() {
     }
   };
 
-  const saveMaskInternal = async ({ isAuto = false } = {}) => {
-    const { w, h } = imgDimRef.current;
-    if (!selected || !maskDataRef.current || w === 0 || h === 0) return;
+  const saveMaskInternal = async ({
+    isAuto = false,
+    targetSlice,
+    pixelData,
+    dimensions,
+  }: {
+    isAuto?: boolean;
+    targetSlice?: Case2DSlice;
+    pixelData?: Uint8Array;
+    dimensions?: { w: number; h: number };
+  } = {}) => {
+    const sliceToSave = targetSlice || loadedSliceRef.current || selected;
+    const dims = dimensions || imgDimRef.current;
+    const pixels = pixelData || (maskDataRef.current ? new Uint8Array(maskDataRef.current) : null);
+
+    if (!sliceToSave || !pixels || dims.w === 0 || dims.h === 0) return;
     const c = countsRef.current;
     const totalPixels = c.bone + c.bme + c.uncertain;
 
     // Bug fix: if user didn't annotate (0 pixels), never mark as saved & annotated
     if (totalPixels === 0) {
       if (!isAuto) {
-        if (selected.hasMask) {
+        if (sliceToSave.hasMask) {
           if (confirm("This annotation is currently blank. Would you like to delete the saved mask?")) {
             await deleteMask();
           }
@@ -864,14 +897,14 @@ export default function Painter2D() {
 
     try {
       const res = await fetch(
-        `/api/annotation2d/${selected.caseId}?stem=${encodeURIComponent(selected.stem)}`,
+        `/api/annotation2d/${sliceToSave.caseId}?stem=${encodeURIComponent(sliceToSave.stem)}`,
         {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
-            width: w,
-            height: h,
-            pixels: Array.from(maskDataRef.current),
+            width: dims.w,
+            height: dims.h,
+            pixels: Array.from(pixels),
           }),
         },
       );
@@ -891,13 +924,13 @@ export default function Painter2D() {
         // Refresh local slice state
         setSlices((prev) =>
           prev.map((s) =>
-            s.relPath === selected.relPath
+            s.relPath === sliceToSave.relPath
               ? { ...s, hasMask: true, maskSavedAt: now.toISOString() }
               : s,
           ),
         );
         setSelected((prev) =>
-          prev && prev.relPath === selected.relPath
+          prev && prev.relPath === sliceToSave.relPath
             ? { ...prev, hasMask: true, maskSavedAt: now.toISOString() }
             : prev,
         );
@@ -1147,10 +1180,23 @@ export default function Painter2D() {
                 <button
                   key={s.relPath}
                   onClick={() => {
+                    if (s.relPath === selected?.relPath) return;
+
+                    // Flush any pending auto-save for currently loaded slice
+                    if (autoSaveTimeoutRef.current) {
+                      clearTimeout(autoSaveTimeoutRef.current);
+                      autoSaveTimeoutRef.current = null;
+                    }
+
                     if (autoSave && isDirtyRef.current) {
                       const c = countsRef.current;
-                      if (c.bone + c.bme + c.uncertain > 0) {
-                        saveMaskInternal({ isAuto: true });
+                      if (c.bone + c.bme + c.uncertain > 0 && loadedSliceRef.current && maskDataRef.current) {
+                        saveMaskInternal({
+                          isAuto: true,
+                          targetSlice: loadedSliceRef.current,
+                          pixelData: new Uint8Array(maskDataRef.current),
+                          dimensions: { ...imgDimRef.current },
+                        });
                       }
                     }
                     setSelected(s);
