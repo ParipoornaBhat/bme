@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { AlertTriangle, Boxes, CheckCircle2, Circle, Download, Layers, Search, Users } from "lucide-react";
 import Viewer from "./Viewer";
+import Painter2D from "./Painter2D";
 
 type Case = {
   id: string;
@@ -141,16 +142,7 @@ export default function AnnotatePage() {
         ))}
       </div>
 
-      {tab === "2d" && (
-        <div className="rounded-lg border border-border border-l-4 border-l-primary bg-card p-4 text-sm text-muted-foreground">
-          <span className="font-semibold text-foreground">
-            The 2D model needs no drawing.
-          </span>{" "}
-          Its label is the case class you already have — BME or not. Slices were extracted
-          automatically from all 107 volumes. Use the <strong>Model Results</strong> page to
-          see how it performs, and the review page to check individual predictions.
-        </div>
-      )}
+      {tab === "2d" && <Painter2D />}
 
       {tab === "3d" && (
         <div className="grid gap-3 lg:grid-cols-[230px_minmax(0,1fr)]">

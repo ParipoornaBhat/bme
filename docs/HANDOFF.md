@@ -118,18 +118,14 @@ than as a headline number.
 The old figure, for reference and no longer comparable because the dataset
 changed entirely: case-level AUC 0.658, F1 0.589.
 
-### Segmenter — blocked, and not on annotation effort
+### Segmenter — unblocked: 2D annotation tool built
 
-There is **no 2D annotation tool.** The "2D slices" tab in `/annotate` is a text
-panel saying the 2D model needs no drawing — true for the classifier, false
-since the segmenter arrived. Every painting path in the app works on a 3D volume
-and saves `.seg.nrrd`; nothing can open a PNG.
-
-So train -> annotate -> retrain cannot complete. Building that tool is the next
-piece of work: [PLAN_2D_ANNOTATION.md](PLAN_2D_ANNOTATION.md). The plan's first
-step is deliberately not the UI — it is proving the data contract with one
-hand-made mask, because that is where a mismatch would otherwise surface after
-fifty cases had been painted.
+The 2D annotation tool is now built and live:
+- `/annotate` -> "2D slices" tab hosts an interactive canvas painter (`Painter2D.tsx`).
+- Allows selecting any 2D slice from `data/slices2d`, painting Bone Marrow (`1`), BME Lesion (`2`), Uncertain (`3`), and Eraser (`0`).
+- Saves masks to `data/annotations2d/<case_id>/<stem>.mask.png` as standard 8-bit grayscale PNGs.
+- `ml/scripts/make_seg2d_from_masks.py` converts the masks into `data/seg2d/` (images, masks, index.csv).
+- `ml/scripts/pipeline_seg.py` and `/api/training-seg` now automatically detect 2D annotations and chain directly into `train_2d_seg.py` (2D Dual-Channel U-Net).
 
 ---
 

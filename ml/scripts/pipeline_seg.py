@@ -43,35 +43,39 @@ def main():
     base = Path(args.base)
     scripts = base / "ml" / "scripts"
 
-    ann = base / "data" / "annotations"
-    n = len(list(ann.glob("*/*.seg.nrrd"))) if ann.is_dir() else 0
-    if n == 0:
+    ann3d = base / "data" / "annotations"
+    ann2d = base / "data" / "annotations2d"
+    n_3d = len(list(ann3d.glob("*/*.seg.nrrd"))) if ann3d.is_dir() else 0
+    n_2d_masks = len(list(ann2d.glob("*/*.png"))) if ann2d.is_dir() else 0
+
+    if n_3d == 0 and n_2d_masks == 0:
         sys.exit(
             "No annotations found.\n\n"
-            "  Annotate a few cases first: open /annotate, pick a case, paint\n"
-            "  bone_marrow and bme, and save. Then run this again.\n\n"
+            "  Annotate cases first: open /annotate (either 2D slices or 3D volume),\n"
+            "  paint bone_marrow and bme, and save. Then run this again.\n\n"
             "  The segmentation model cannot be trained without labels — that is\n"
             "  the whole difference between it and the yes/no classifier."
         )
-    print(f"{n} annotated case(s) found")
-    if n < args.folds:
-        print(f"!! only {n} case(s) but {args.folds} folds requested — "
-              f"dropping to {max(2, n)}-fold")
-        args.folds = max(2, n)
-    if n < 5:
-        print("!! fewer than 5 cases: treat any number from this run as a smoke "
-              "test, not a result.")
 
-    ok = (
-        run("1/3  Converting and validating annotations",
-            [str(scripts / "seg2nifti.py"), str(base), "--force"])
-        and run("2/3  Building 2D image/mask pairs",
-                [str(scripts / "make_2d_seg.py"), str(base), "--force"])
-        and run("3/3  Training the segmentation model",
-                [str(scripts / "train_2d_seg.py"), str(base),
-                 "--folds", str(args.folds), "--epochs", str(args.epochs),
-                 "--batch", str(args.batch)])
-    )
+    print(f"{n_3d} 3D volume case(s) and {n_2d_masks} 2D slice mask(s) found")
+
+    steps_ok = True
+    if n_3d > 0:
+        steps_ok = (
+            run("1/3  Converting and validating 3D annotations",
+                [str(scripts / "seg2nifti.py"), str(base), "--force"])
+            and run("2/3  Extracting 2D pairs from 3D annotations",
+                    [str(scripts / "make_2d_seg.py"), str(base), "--force"])
+        )
+
+    if n_2d_masks > 0 and steps_ok:
+        steps_ok = run("2b/3 Assembling 2D slice masks",
+                       [str(scripts / "make_seg2d_from_masks.py"), str(base), "--apply"])
+
+    ok = steps_ok and run("3/3  Training the 2D U-Net segmentation model",
+                          [str(scripts / "train_2d_seg.py"), str(base),
+                           "--folds", str(args.folds), "--epochs", str(args.epochs),
+                           "--batch", str(args.batch)])
 
     if ok:
         print("\n" + "=" * 64)

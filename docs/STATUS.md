@@ -61,10 +61,11 @@ In order. Each step's output is the next step's input.
    the 2D dataset. `data/slices2d` is build output: `python ml/scripts/build_2d.py
    "D:/Final yr Prj/bme" --apply` regenerates it.
 
-0b. **The 2D segmenter is blocked on a missing tool, not on annotation effort.**
-   There is no way to paint a PNG in the app. Plan to build it:
-   [PLAN_2D_ANNOTATION.md](PLAN_2D_ANNOTATION.md). Build the data contract and
-   the converter first, the UI last.
+0b. **2D slice annotation tool built.** `/annotate` -> "2D slices" tab now has an
+   interactive canvas painter (`Painter2D.tsx`) with brush, eraser, labels, undo, and save.
+   Masks save to `data/annotations2d/<case>/<stem>.mask.png` as exact uint8 PNGs (0=bg,
+   1=bone, 2=bme, 3=uncertain). `ml/scripts/make_seg2d_from_masks.py` converts them into
+   `data/seg2d/` for `train_2d_seg.py`.
 
 1. **Annotate in the browser: `/annotate` → 3D volume tab.** Pick a case, paint, save.
    No file dragging, no folder picking, and the segments are named correctly for you.

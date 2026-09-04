@@ -52,11 +52,23 @@ function running() {
 /** Cases with a saved annotation — the prerequisite for training at all. */
 function annotatedCases(): string[] {
   const dir = path.join(root(), "data", "annotations");
-  if (!fs.existsSync(dir)) return [];
-  return fs
-    .readdirSync(dir)
-    .filter((c) => fs.existsSync(path.join(dir, c, `${c}.seg.nrrd`)))
-    .sort();
+  const cases3d = fs.existsSync(dir)
+    ? fs.readdirSync(dir).filter((c) => fs.existsSync(path.join(dir, c, `${c}.seg.nrrd`)))
+    : [];
+
+  const dir2d = path.join(root(), "data", "annotations2d");
+  const cases2d = fs.existsSync(dir2d)
+    ? fs.readdirSync(dir2d).filter((c) => {
+        const sub = path.join(dir2d, c);
+        try {
+          return fs.statSync(sub).isDirectory() && fs.readdirSync(sub).some((f) => f.endsWith(".png"));
+        } catch {
+          return false;
+        }
+      })
+    : [];
+
+  return Array.from(new Set([...cases3d, ...cases2d])).sort();
 }
 
 export async function GET() {

@@ -76,14 +76,14 @@ Same mapping as 3D, **keyed by name, never by order**:
 Paint bone marrow even when it feels redundant. A lesion-only model has no idea
 where bone ends and reports edema in soft tissue.
 
-### Files to add
+### Files added
 
-| file | ~lines | does |
-|---|---|---|
-| `api/cases2d/route.ts` | 60 | list `data/slices2d` images + whether a mask exists |
-| `api/annotation2d/[caseId]/route.ts` | 90 | GET mask png, POST mask png |
-| `annotate/Painter2D.tsx` | 250 | canvas: brush, eraser, label picker, zoom, undo, save |
-| `ml/scripts/make_seg2d_from_masks.py` | 90 | masks + images -> `data/seg2d/` |
+| file | ~lines | does | state |
+|---|---|---|---|
+| `api/cases2d/route.ts` | 80 | list `data/slices2d` images + serve slice images | ✅ implemented |
+| `api/annotation2d/[caseId]/route.ts` | 130 | GET mask png, POST mask png (exact uint8 PNG encoding) | ✅ implemented |
+| `annotate/Painter2D.tsx` | 380 | canvas: brush, eraser, labels, undo, save | ✅ implemented |
+| `ml/scripts/make_seg2d_from_masks.py` | 135 | masks + images -> `data/seg2d/` | ✅ implemented |
 
 Modify `annotate/page.tsx` — replace the placeholder in the `2d` tab with
 `<Painter2D/>`. Everything else stays.

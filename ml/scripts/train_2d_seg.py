@@ -109,7 +109,10 @@ class SegDS(Dataset):
 
     def __getitem__(self, i):
         r = self.rows[i]
-        img = np.asarray(Image.open(self.root / r["image"]), dtype=np.float32) / 255.0
+        raw_im = Image.open(self.root / r["image"])
+        if raw_im.mode != "L":
+            raw_im = raw_im.convert("L")
+        img = np.asarray(raw_im, dtype=np.float32) / 255.0
         msk = np.asarray(Image.open(self.root / r["mask"]), dtype=np.uint8)
 
         if self.train:
