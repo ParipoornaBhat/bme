@@ -345,15 +345,30 @@ export default function Painter2D() {
           maskImg.onload = () => {
             URL.revokeObjectURL(blobUrl);
             if (cancelled) return;
+            const mw = maskImg.naturalWidth || w;
+            const mh = maskImg.naturalHeight || h;
             const off = document.createElement("canvas");
-            off.width = w;
-            off.height = h;
+            off.width = mw;
+            off.height = mh;
             const offCtx = off.getContext("2d");
             if (offCtx) {
-              offCtx.drawImage(maskImg, 0, 0, w, h);
-              const pxData = offCtx.getImageData(0, 0, w, h).data;
-              for (let i = 0; i < maskArr.length; i++) {
-                maskArr[i] = pxData[i * 4]; // Grayscale value 0, 1, 2, 3
+              offCtx.drawImage(maskImg, 0, 0);
+              const pxData = offCtx.getImageData(0, 0, mw, mh).data;
+              if (mw === w && mh === h) {
+                for (let i = 0; i < maskArr.length; i++) {
+                  maskArr[i] = pxData[i * 4];
+                }
+              } else {
+                // If mask file dimensions differ from base slice, scale proportionally
+                const scaleX = mw / w;
+                const scaleY = mh / h;
+                for (let y = 0; y < h; y++) {
+                  const sy = Math.min(mh - 1, Math.floor(y * scaleY));
+                  for (let x = 0; x < w; x++) {
+                    const sx = Math.min(mw - 1, Math.floor(x * scaleX));
+                    maskArr[y * w + x] = pxData[(sy * mw + sx) * 4];
+                  }
+                }
               }
               renderMaskToCanvas();
             }
@@ -527,7 +542,7 @@ export default function Painter2D() {
         if (c.bone + c.bme + c.uncertain > 0) {
           saveMaskInternal({ isAuto: true });
         }
-      }, 1400);
+      }, 400);
     }
   }, [clearOverlay, isErasing, activeLabel, maskInside, renderMaskToCanvas, autoSave]);
 
@@ -540,7 +555,7 @@ export default function Painter2D() {
       if (total > 0 && isDirtyRef.current) {
         saveMaskInternal({ isAuto: true });
       }
-    }, 1400);
+    }, 400);
   }, [autoSave, selected]);
 
   const finishLockedDraw = useCallback(() => {
@@ -1132,6 +1147,12 @@ export default function Painter2D() {
                 <button
                   key={s.relPath}
                   onClick={() => {
+                    if (autoSave && isDirtyRef.current) {
+                      const c = countsRef.current;
+                      if (c.bone + c.bme + c.uncertain > 0) {
+                        saveMaskInternal({ isAuto: true });
+                      }
+                    }
                     setSelected(s);
                     try {
                       localStorage.setItem("bme_painter2d_selected", `${s.caseId}/${s.stem}`);
