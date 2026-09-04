@@ -5,6 +5,7 @@ import {
   Check,
   CheckCircle2,
   Eraser,
+  Lasso,
   Layers,
   Loader2,
   Paintbrush,
@@ -35,7 +36,8 @@ export default function Painter2D() {
   const [selected, setSelected] = useState<Case2DSlice | null>(null);
   const [filter, setFilter] = useState<"all" | "bme" | "non_bme" | "annotated" | "unannotated">("all");
   const [query, setQuery] = useState("");
-
+  const [tool, setTool] = useState<"brush" | "pencil">("brush");
+  const [maskInside, setMaskInside] = useState(false);
   const [activeLabel, setActiveLabel] = useState<number>(1);
   const [brushSize, setBrushSize] = useState(12);
   const [isErasing, setIsErasing] = useState(false);
@@ -47,11 +49,13 @@ export default function Painter2D() {
 
   const bgCanvasRef = useRef<HTMLCanvasElement>(null);
   const maskCanvasRef = useRef<HTMLCanvasElement>(null);
+  const overlayCanvasRef = useRef<HTMLCanvasElement>(null);
   const maskDataRef = useRef<Uint8Array | null>(null);
   const imgDimRef = useRef<{ w: number; h: number }>({ w: 0, h: 0 });
   const undoStackRef = useRef<Uint8Array[]>([]);
   const isDrawingRef = useRef(false);
   const lastPosRef = useRef<{ x: number; y: number } | null>(null);
+  const outlineRef = useRef<Array<[number, number]>>([]);
   const lastLoadedStemRef = useRef<string>("");
 
   // Load slices once on mount
@@ -190,6 +194,12 @@ export default function Painter2D() {
         maskCanvas.height = h;
       }
 
+      const overlayCanvas = overlayCanvasRef.current;
+      if (overlayCanvas) {
+        overlayCanvas.width = w;
+        overlayCanvas.height = h;
+      }
+
       const maskArr = new Uint8Array(w * h);
       maskDataRef.current = maskArr;
       undoStackRef.current = [];
@@ -230,10 +240,52 @@ export default function Painter2D() {
       }
     };
 
-    return () => {
+  return () => {
       cancelled = true;
     };
   }, [selectedRelPath, selectedCaseId, selectedStem, renderMaskToCanvas]);
+
+  // Clear overlay canvas
+  const clearOverlay = useCallback(() => {
+    const canvas = overlayCanvasRef.current;
+    if (!canvas) return;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return;
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+  }, []);
+
+  // Redraw live pencil polygon outline
+  const drawOutlineOverlay = useCallback(() => {
+    const canvas = overlayCanvasRef.current;
+    if (!canvas) return;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return;
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+    const pts = outlineRef.current;
+    if (pts.length < 2) return;
+
+    ctx.save();
+    ctx.strokeStyle = isErasing
+      ? "rgba(239, 68, 68, 0.9)"
+      : activeLabel === 1
+      ? "rgba(16, 185, 129, 0.95)"
+      : activeLabel === 2
+      ? "rgba(239, 68, 68, 0.95)"
+      : "rgba(245, 158, 11, 0.95)";
+    ctx.lineWidth = 2;
+    ctx.lineJoin = "round";
+    ctx.lineCap = "round";
+    ctx.setLineDash([4, 4]);
+
+    ctx.beginPath();
+    ctx.moveTo(pts[0][0], pts[0][1]);
+    for (let i = 1; i < pts.length; i++) {
+      ctx.lineTo(pts[i][0], pts[i][1]);
+    }
+    ctx.stroke();
+    ctx.restore();
+  }, [isErasing, activeLabel]);
 
   // Painting drawing logic
   const paintAt = (cx: number, cy: number) => {
@@ -254,11 +306,70 @@ export default function Painter2D() {
       const rowOffset = y * imgDim.w;
       for (let x = minX; x <= maxX; x++) {
         if ((x - cx) * (x - cx) + dy2 <= r2) {
-          mask[rowOffset + x] = val;
+          const idx = rowOffset + x;
+          // Only inside bone guard: prevents accidental painting outside bone marrow
+          if (maskInside && !isErasing && activeLabel !== 1 && mask[idx] !== 1 && mask[idx] !== activeLabel) {
+            continue;
+          }
+          mask[idx] = val;
         }
       }
     }
   };
+
+  /**
+   * Pencil: close the traced outline and fill everything inside it using even-odd scanline fill.
+   */
+  const commitOutline = useCallback(() => {
+    const pts = outlineRef.current;
+    outlineRef.current = [];
+    clearOverlay();
+
+    const mask = maskDataRef.current;
+    const { w, h } = imgDimRef.current;
+    if (!mask || w === 0 || h === 0 || pts.length < 3) {
+      return;
+    }
+
+    pushUndo();
+
+    let minB = Infinity,
+      maxB = -Infinity;
+    for (const [, b] of pts) {
+      if (b < minB) minB = b;
+      if (b > maxB) maxB = b;
+    }
+    minB = Math.max(0, Math.floor(minB));
+    maxB = Math.min(h - 1, Math.ceil(maxB));
+
+    const val = isErasing ? 0 : activeLabel;
+
+    for (let b = minB; b <= maxB; b++) {
+      const xs: number[] = [];
+      for (let i = 0, j = pts.length - 1; i < pts.length; j = i++) {
+        const [ax, ay] = pts[i],
+          [bx, by] = pts[j];
+        if (ay > b !== by > b) {
+          xs.push(ax + ((b - ay) / (by - ay)) * (bx - ax));
+        }
+      }
+      xs.sort((m, n) => m - n);
+      for (let k = 0; k + 1 < xs.length; k += 2) {
+        const from = Math.max(0, Math.ceil(xs[k]));
+        const to = Math.min(w - 1, Math.floor(xs[k + 1]));
+        const rowOffset = b * w;
+        for (let a = from; a <= to; a++) {
+          const idx = rowOffset + a;
+          if (maskInside && !isErasing && activeLabel !== 1 && mask[idx] !== 1 && mask[idx] !== activeLabel) {
+            continue;
+          }
+          mask[idx] = val;
+        }
+      }
+    }
+
+    renderMaskToCanvas();
+  }, [clearOverlay, isErasing, activeLabel, maskInside, renderMaskToCanvas]);
 
   const getCanvasCoords = (e: React.MouseEvent<HTMLCanvasElement>) => {
     const canvas = maskCanvasRef.current;
@@ -274,9 +385,17 @@ export default function Painter2D() {
 
   const handleMouseDown = (e: React.MouseEvent<HTMLCanvasElement>) => {
     if (e.button !== 0) return;
+    const pos = getCanvasCoords(e);
+
+    if (tool === "pencil") {
+      isDrawingRef.current = true;
+      outlineRef.current = [[pos.x, pos.y]];
+      drawOutlineOverlay();
+      return;
+    }
+
     pushUndo();
     isDrawingRef.current = true;
-    const pos = getCanvasCoords(e);
     lastPosRef.current = pos;
     paintAt(pos.x, pos.y);
     renderMaskToCanvas();
@@ -285,6 +404,17 @@ export default function Painter2D() {
   const handleMouseMove = (e: React.MouseEvent<HTMLCanvasElement>) => {
     if (!isDrawingRef.current) return;
     const pos = getCanvasCoords(e);
+
+    if (tool === "pencil") {
+      const pts = outlineRef.current;
+      const last = pts[pts.length - 1];
+      if (!last || Math.hypot(pos.x - last[0], pos.y - last[1]) >= 2) {
+        pts.push([pos.x, pos.y]);
+        drawOutlineOverlay();
+      }
+      return;
+    }
+
     const last = lastPosRef.current || pos;
 
     // Line interpolation between mouse move steps
@@ -300,8 +430,13 @@ export default function Painter2D() {
   };
 
   const handleMouseUp = () => {
+    if (!isDrawingRef.current) return;
     isDrawingRef.current = false;
     lastPosRef.current = null;
+
+    if (tool === "pencil") {
+      commitOutline();
+    }
   };
 
   const saveMask = async () => {
@@ -349,7 +484,8 @@ export default function Painter2D() {
       if (e.key === "1") { setActiveLabel(1); setIsErasing(false); }
       else if (e.key === "2") { setActiveLabel(2); setIsErasing(false); }
       else if (e.key === "3") { setActiveLabel(3); setIsErasing(false); }
-      else if (e.key === "0" || e.key.toLowerCase() === "e") { setIsErasing(true); }
+      else if (e.key === "0" || e.key.toLowerCase() === "e") { setIsErasing((prev) => !prev); }
+      else if (e.key.toLowerCase() === "p") { setTool((t) => (t === "brush" ? "pencil" : "brush")); }
       else if (e.key === "z" && (e.ctrlKey || e.metaKey)) { e.preventDefault(); undo(); }
       else if (e.key === "s" && (e.ctrlKey || e.metaKey)) { e.preventDefault(); saveMask(); }
       else if (e.key === "[") { setBrushSize((b) => Math.max(2, b - 4)); }
@@ -473,31 +609,69 @@ export default function Painter2D() {
               </button>
             ))}
 
+            <div className="mx-1 h-5 w-px bg-border" />
+
+            {/* Tool Mode: Brush vs Pencil (Lasso Outline) */}
+            <div className="inline-flex overflow-hidden rounded-md border border-border">
+              <button
+                type="button"
+                onClick={() => setTool("brush")}
+                title="Brush mode (P toggles)"
+                className={`inline-flex items-center gap-1 px-2 py-1 text-xs transition ${
+                  tool === "brush" ? "bg-primary text-primary-foreground font-medium" : "bg-background text-muted-foreground hover:text-foreground"
+                }`}
+              >
+                <Paintbrush className="h-3 w-3" /> Brush
+              </button>
+              <button
+                type="button"
+                onClick={() => setTool("pencil")}
+                title="Pencil mode — trace an outline, the inside auto-fills (P toggles)"
+                className={`inline-flex items-center gap-1 border-l border-border px-2 py-1 text-xs transition ${
+                  tool === "pencil" ? "bg-primary text-primary-foreground font-medium" : "bg-background text-muted-foreground hover:text-foreground"
+                }`}
+              >
+                <Lasso className="h-3 w-3" /> Pencil
+              </button>
+            </div>
+
             <button
-              onClick={() => setIsErasing(true)}
+              onClick={() => setIsErasing((e) => !e)}
               className={`inline-flex items-center gap-1.5 rounded-md px-2.5 py-1 text-xs font-medium border transition ${
                 isErasing
                   ? "border-destructive bg-destructive/10 text-destructive ring-1 ring-destructive"
                   : "border-border bg-background text-muted-foreground hover:text-foreground"
               }`}
             >
-              <Eraser className="h-3.5 w-3.5" /> Eraser <span className="text-[10px] opacity-60">(0)</span>
+              <Eraser className="h-3.5 w-3.5" /> Eraser <span className="text-[10px] opacity-60">(E)</span>
             </button>
+
+            <label className="flex items-center gap-1.5 text-xs text-muted-foreground cursor-pointer select-none ml-1">
+              <input
+                type="checkbox"
+                checked={maskInside}
+                onChange={(e) => setMaskInside(e.target.checked)}
+                className="rounded border-border accent-primary h-3.5 w-3.5"
+              />
+              <span>Only inside bone</span>
+            </label>
           </div>
 
           <div className="flex items-center gap-3">
-            <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
-              <Paintbrush className="h-3.5 w-3.5" />
-              <span>Brush: {brushSize}px</span>
-              <input
-                type="range"
-                min={2}
-                max={50}
-                value={brushSize}
-                onChange={(e) => setBrushSize(Number(e.target.value))}
-                className="w-20 accent-primary"
-              />
-            </div>
+            {tool === "brush" && (
+              <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
+                <Paintbrush className="h-3.5 w-3.5" />
+                <span>Size: {brushSize}px</span>
+                <input
+                  type="range"
+                  min={2}
+                  max={50}
+                  value={brushSize}
+                  onChange={(e) => setBrushSize(Number(e.target.value))}
+                  className="w-20 accent-primary"
+                />
+              </div>
+            )}
 
             <button
               onClick={undo}
@@ -571,6 +745,11 @@ export default function Painter2D() {
               onMouseUp={handleMouseUp}
               onMouseLeave={handleMouseUp}
               className="absolute inset-0 block cursor-crosshair"
+            />
+            {/* Live pencil polygon overlay preview canvas */}
+            <canvas
+              ref={overlayCanvasRef}
+              className="absolute inset-0 block pointer-events-none"
             />
           </div>
         </div>
