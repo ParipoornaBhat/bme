@@ -5,6 +5,8 @@ import {
   Check,
   CheckCircle2,
   Eraser,
+  Hand,
+  Info,
   Lasso,
   Layers,
   Loader2,
@@ -40,7 +42,7 @@ export default function Painter2D() {
   const [selected, setSelected] = useState<Case2DSlice | null>(null);
   const [filter, setFilter] = useState<"all" | "bme" | "non_bme" | "annotated" | "unannotated">("all");
   const [query, setQuery] = useState("");
-  const [tool, setTool] = useState<"brush" | "pencil">("brush");
+  const [tool, setTool] = useState<"brush" | "pencil" | "pan">("brush");
   const [maskInside, setMaskInside] = useState(false);
   const [activeLabel, setActiveLabel] = useState<number>(1);
   const [brushSize, setBrushSize] = useState(12);
@@ -55,6 +57,8 @@ export default function Painter2D() {
   const [pan, setPan] = useState<{ x: number; y: number }>({ x: 0, y: 0 });
   const [isPanning, setIsPanning] = useState(false);
   const panStartRef = useRef<{ x: number; y: number }>({ x: 0, y: 0 });
+  const [hoveredSlice, setHoveredSlice] = useState<Case2DSlice | null>(null);
+  const [hoverPos, setHoverPos] = useState<{ x: number; y: number }>({ x: 0, y: 0 });
 
   const bgCanvasRef = useRef<HTMLCanvasElement>(null);
   const maskCanvasRef = useRef<HTMLCanvasElement>(null);
@@ -73,7 +77,7 @@ export default function Painter2D() {
     setPan({ x: 0, y: 0 });
   }, []);
 
-  // Load slices once on mount
+  // Load slices once on mount (supporting ?case=...&stem=... deep linking)
   useEffect(() => {
     let mounted = true;
     (async () => {
@@ -85,7 +89,14 @@ export default function Painter2D() {
         if (!mounted) return;
         const list: Case2DSlice[] = data.slices || [];
         setSlices(list);
-        setSelected((prev) => prev ?? (list.length > 0 ? list[0] : null));
+
+        const urlParams = typeof window !== "undefined" ? new URLSearchParams(window.location.search) : null;
+        const targetCase = urlParams?.get("case");
+        const targetStem = urlParams?.get("stem");
+        const matched = list.find(
+          (s) => (targetStem && s.stem === targetStem) || (targetCase && s.caseId === targetCase)
+        );
+        setSelected((prev) => prev ?? matched ?? (list.length > 0 ? list[0] : null));
       } finally {
         if (mounted) setLoading(false);
       }
@@ -422,6 +433,13 @@ export default function Painter2D() {
 
   const handleMouseDown = (e: React.MouseEvent<HTMLCanvasElement>) => {
     if (e.button !== 0) return;
+
+    if (tool === "pan") {
+      setIsPanning(true);
+      panStartRef.current = { x: e.clientX - pan.x, y: e.clientY - pan.y };
+      return;
+    }
+
     const pos = getCanvasCoords(e);
 
     if (tool === "pencil") {
@@ -439,6 +457,16 @@ export default function Painter2D() {
   };
 
   const handleMouseMove = (e: React.MouseEvent<HTMLCanvasElement>) => {
+    if (tool === "pan") {
+      if (isPanning) {
+        setPan({
+          x: e.clientX - panStartRef.current.x,
+          y: e.clientY - panStartRef.current.y,
+        });
+      }
+      return;
+    }
+
     if (!isDrawingRef.current) return;
     const pos = getCanvasCoords(e);
 
@@ -467,6 +495,9 @@ export default function Painter2D() {
   };
 
   const handleMouseUp = () => {
+    if (isPanning) {
+      setIsPanning(false);
+    }
     if (!isDrawingRef.current) return;
     isDrawingRef.current = false;
     lastPosRef.current = null;
@@ -523,6 +554,8 @@ export default function Painter2D() {
       else if (e.key === "3") { setActiveLabel(3); setIsErasing(false); }
       else if (e.key === "0" || e.key.toLowerCase() === "e") { setIsErasing((prev) => !prev); }
       else if (e.key.toLowerCase() === "p") { setTool((t) => (t === "brush" ? "pencil" : "brush")); }
+      else if (e.key.toLowerCase() === "h") { setTool((t) => (t === "pan" ? "brush" : "pan")); }
+      else if (e.key.toLowerCase() === "b") { setTool("brush"); }
       else if (e.key === "z" && (e.ctrlKey || e.metaKey)) { e.preventDefault(); undo(); }
       else if (e.key === "s" && (e.ctrlKey || e.metaKey)) { e.preventDefault(); saveMask(); }
       else if (e.key === "[") { setBrushSize((b) => Math.max(2, b - 4)); }
@@ -594,15 +627,27 @@ export default function Painter2D() {
                 <button
                   key={s.relPath}
                   onClick={() => setSelected(s)}
-                  className={`w-full flex items-center justify-between rounded px-2.5 py-2 text-left text-xs transition border ${
+                  onMouseEnter={(e) => {
+                    setHoveredSlice(s);
+                    setHoverPos({ x: e.clientX, y: e.clientY });
+                  }}
+                  onMouseMove={(e) => {
+                    setHoverPos({ x: e.clientX, y: e.clientY });
+                  }}
+                  onMouseLeave={() => setHoveredSlice(null)}
+                  title={`Case ID: ${s.caseId}\nSlice Stem: ${s.stem}\nPath: ${s.relPath}\nClass: ${s.label === "bme" ? "BME Positive" : "Non-BME"}\nStatus: ${s.hasMask ? "Annotated" : "Unannotated"}${s.maskSavedAt ? " (" + new Date(s.maskSavedAt).toLocaleString() + ")" : ""}`}
+                  className={`w-full group flex items-center justify-between rounded px-2.5 py-2 text-left text-xs transition border ${
                     active
                       ? "border-primary bg-primary/10 text-foreground font-medium"
                       : "border-transparent hover:bg-muted/60 text-muted-foreground"
                   }`}
                 >
-                  <div className="truncate pr-2">
-                    <span className="font-mono font-medium text-foreground">{s.caseId}</span>
-                    <span className="ml-1.5 opacity-60 text-[10px] truncate">{s.stem}</span>
+                  <div className="truncate pr-2 flex items-center gap-1.5">
+                    <Info className="h-3 w-3 text-muted-foreground/40 group-hover:text-primary transition shrink-0" />
+                    <div className="truncate">
+                      <span className="font-mono font-medium text-foreground">{s.caseId}</span>
+                      <span className="ml-1.5 opacity-60 text-[10px] truncate">{s.stem}</span>
+                    </div>
                   </div>
                   <div className="flex items-center gap-1.5 shrink-0">
                     <span
@@ -648,12 +693,12 @@ export default function Painter2D() {
 
             <div className="mx-1 h-5 w-px bg-border" />
 
-            {/* Tool Mode: Brush vs Pencil (Lasso Outline) */}
+            {/* Tool Mode: Brush vs Pencil (Lasso Outline) vs Hand (Pan Canvas) */}
             <div className="inline-flex overflow-hidden rounded-md border border-border">
               <button
                 type="button"
                 onClick={() => setTool("brush")}
-                title="Brush mode (P toggles)"
+                title="Brush mode (P toggles, B selects)"
                 className={`inline-flex items-center gap-1 px-2 py-1 text-xs transition ${
                   tool === "brush" ? "bg-primary text-primary-foreground font-medium" : "bg-background text-muted-foreground hover:text-foreground"
                 }`}
@@ -669,6 +714,16 @@ export default function Painter2D() {
                 }`}
               >
                 <Lasso className="h-3 w-3" /> Pencil
+              </button>
+              <button
+                type="button"
+                onClick={() => setTool("pan")}
+                title="Hand mode — click & drag to pan canvas (H toggles)"
+                className={`inline-flex items-center gap-1 border-l border-border px-2 py-1 text-xs transition ${
+                  tool === "pan" ? "bg-primary text-primary-foreground font-medium" : "bg-background text-muted-foreground hover:text-foreground"
+                }`}
+              >
+                <Hand className="h-3 w-3" /> Hand
               </button>
             </div>
 
@@ -802,7 +857,26 @@ export default function Painter2D() {
         {/* Viewport Canvas Container with Zoom and Pan */}
         <div
           ref={viewportRef}
-          className="relative flex-1 overflow-hidden rounded border border-border/80 bg-black/95 flex items-center justify-center select-none p-2 cursor-default"
+          className={`relative flex-1 overflow-hidden rounded border border-border/80 bg-black/95 flex items-center justify-center select-none p-2 ${
+            tool === "pan" ? (isPanning ? "cursor-grabbing" : "cursor-grab") : "cursor-default"
+          }`}
+          onMouseDown={(e) => {
+            if (tool === "pan" && e.button === 0) {
+              setIsPanning(true);
+              panStartRef.current = { x: e.clientX - pan.x, y: e.clientY - pan.y };
+            }
+          }}
+          onMouseMove={(e) => {
+            if (tool === "pan" && isPanning) {
+              setPan({
+                x: e.clientX - panStartRef.current.x,
+                y: e.clientY - panStartRef.current.y,
+              });
+            }
+          }}
+          onMouseUp={() => {
+            if (isPanning) setIsPanning(false);
+          }}
           onWheel={(e) => {
             e.preventDefault();
             const delta = e.deltaY < 0 ? 0.15 : -0.15;
@@ -837,7 +911,9 @@ export default function Painter2D() {
               onMouseMove={handleMouseMove}
               onMouseUp={handleMouseUp}
               onMouseLeave={handleMouseUp}
-              className="absolute inset-0 block cursor-crosshair"
+              className={`absolute inset-0 block ${
+                tool === "pan" ? (isPanning ? "cursor-grabbing" : "cursor-grab") : "cursor-crosshair"
+              }`}
             />
             {/* Live pencil polygon overlay preview canvas */}
             <canvas
@@ -850,6 +926,56 @@ export default function Painter2D() {
           </div>
         </div>
       </div>
+
+      {/* Floating Info Tooltip on Slice Hover */}
+      {hoveredSlice && (
+        <div
+          style={{
+            top: Math.min(window.innerHeight - 170, Math.max(10, hoverPos.y - 40)),
+            left: Math.min(window.innerWidth - 300, hoverPos.x + 18),
+          }}
+          className="fixed z-50 pointer-events-none w-72 rounded-lg border border-border bg-card/95 p-3 shadow-2xl backdrop-blur text-xs"
+        >
+          <div className="flex items-center justify-between border-b border-border pb-1.5">
+            <div className="flex items-center gap-1.5 font-medium text-foreground">
+              <Info className="h-3.5 w-3.5 text-primary" />
+              <span className="font-mono font-semibold">{hoveredSlice.caseId}</span>
+            </div>
+            <span
+              className={`text-[10px] px-2 py-0.5 rounded-full font-semibold ${
+                hoveredSlice.label === "bme"
+                  ? "bg-red-500/20 text-red-400 border border-red-500/30"
+                  : "bg-blue-500/20 text-blue-400 border border-blue-500/30"
+              }`}
+            >
+              {hoveredSlice.label === "bme" ? "BME Positive" : "Non-BME"}
+            </span>
+          </div>
+          <div className="mt-2 space-y-1.5 text-[11px]">
+            <div>
+              <span className="text-muted-foreground font-medium">Slice stem:</span>
+              <div className="font-mono text-foreground font-medium break-all">{hoveredSlice.stem}</div>
+            </div>
+            <div>
+              <span className="text-muted-foreground font-medium">File Path:</span>
+              <div className="font-mono text-muted-foreground break-all">{hoveredSlice.relPath}</div>
+            </div>
+            <div className="flex items-center justify-between pt-1 border-t border-border/50">
+              <span className="text-muted-foreground">Annotation status:</span>
+              <span className={hoveredSlice.hasMask ? "text-emerald-400 font-medium flex items-center gap-1" : "text-amber-400"}>
+                {hoveredSlice.hasMask ? (
+                  <>
+                    <CheckCircle2 className="h-3 w-3" />
+                    {hoveredSlice.maskSavedAt ? new Date(hoveredSlice.maskSavedAt).toLocaleDateString() : "Annotated"}
+                  </>
+                ) : (
+                  "Unannotated"
+                )}
+              </span>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

@@ -165,6 +165,10 @@ def segment(base: Path, img: Image.Image, device: str) -> dict:
     flat[bone] = BONE_RGB
     flat[lesion] = LESION_RGB
 
+    indexed = np.zeros((SEG_SIZE, SEG_SIZE), dtype=np.uint8)
+    indexed[bone] = 1
+    indexed[lesion] = 2
+
     return {
         "available": True,
         "lesion_present": bool(n_lesion > 0),
@@ -180,6 +184,7 @@ def segment(base: Path, img: Image.Image, device: str) -> dict:
         "trained_at": man.get("created_at"),
         "summary": man.get("summary"),
         "mask": dataurl(Image.fromarray(flat)),
+        "indexed_mask": dataurl(Image.fromarray(indexed, mode="L")),
         "overlay": dataurl(Image.fromarray((np.clip(rgb, 0, 1) * 255).astype(np.uint8))),
         "note": ("Areas are pixels on the 256x256 model canvas. These 2D exports carry no "
                  "pixel spacing, so mm^2 cannot be computed and is not guessed."),

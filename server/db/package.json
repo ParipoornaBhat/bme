@@ -19,7 +19,8 @@
     "db:status": "node --import tsx src/scripts/status.ts",
     "db:help": "node --import tsx src/scripts/help.ts",
     "db:push": "tsx node_modules/drizzle-kit/bin.cjs push",
-    "db:studio": "tsx node_modules/drizzle-kit/bin.cjs studio"
+    "db:studio": "tsx node_modules/drizzle-kit/bin.cjs studio",
+    "db:sync": "node --import tsx src/scripts/sync.ts"
   },
   "dependencies": {
     "@neondatabase/serverless": "0.10.4",

@@ -27,6 +27,7 @@
     "db:help": "pnpm --filter @bme/db db:help",
     "db:push": "pnpm --filter @bme/db db:push",
     "db:studio": "pnpm --filter @bme/db db:studio",
+    "db:sync": "pnpm --filter @bme/db db:sync",
     "migrate:generate": "pnpm --filter @bme/db db:generate --name",
     "migrate:deploy": "pnpm --filter @bme/db db:migrate",
     "clean": "node scripts/clean.js",

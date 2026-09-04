@@ -1,7 +1,8 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { AlertTriangle, ArrowRight, Check, ImageUp, Loader2, X } from "lucide-react";
+import { AlertTriangle, ArrowRight, Check, Database, ImageUp, Loader2, Paintbrush, X } from "lucide-react";
+import { useRouter } from "next/navigation";
 
 /**
  * Upload one 2D slice, run the trained models on it, show what came back.
@@ -49,6 +50,7 @@ type Segmentation =
       trained_at: string | null;
       summary: Record<string, { mean: number; std: number } | null> | null;
       mask: string;
+      indexed_mask?: string;
       overlay: string;
       note: string;
     };
@@ -121,6 +123,63 @@ export default function TestImage() {
   const [result, setResult] = useState<Result | null>(null);
   const [drag, setDrag] = useState(false);
   const input = useRef<HTMLInputElement>(null);
+  const router = useRouter();
+
+  const [promoteCaseId, setPromoteCaseId] = useState("");
+  const [promoteLabel, setPromoteLabel] = useState<"bme" | "non_bme">("bme");
+  const [includeMask, setIncludeMask] = useState(true);
+  const [promoting, setPromoting] = useState(false);
+  const [promoteSuccess, setPromoteSuccess] = useState<string | null>(null);
+  const [promoteError, setPromoteError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (result) {
+      const isYes = result.detection?.available && result.detection.label === "YES";
+      setPromoteLabel(isYes ? "bme" : "non_bme");
+      const cleanStem = (result.input.filename || "").replace(/\.[^/.]+$/, "").replace(/[^a-zA-Z0-9_-]/g, "_");
+      setPromoteCaseId(cleanStem ? `TEST-${cleanStem.slice(0, 16)}` : `TEST-${Date.now().toString().slice(-4)}`);
+      setIncludeMask(Boolean(result.segmentation?.available));
+      setPromoteSuccess(null);
+      setPromoteError(null);
+    }
+  }, [result]);
+
+  const handleAddToDataset = async () => {
+    if (!result) return;
+    setPromoting(true);
+    setPromoteError(null);
+    try {
+      const segObj = result.segmentation?.available ? result.segmentation : null;
+      const maskPayload = includeMask && segObj
+        ? (segObj as { indexed_mask?: string; mask: string }).indexed_mask || segObj.mask
+        : null;
+
+      const res = await fetch("/api/cases2d", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          imageData: result.input.preview,
+          maskData: maskPayload,
+          caseId: promoteCaseId.trim() || `TEST-${Date.now().toString().slice(-4)}`,
+          label: promoteLabel,
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok || data.error) {
+        setPromoteError(data.error || "Failed to add slice to dataset");
+        return;
+      }
+
+      setPromoteSuccess(`Added slice as ${data.stem}! Opening in Annotator...`);
+      setTimeout(() => {
+        router.push(`/annotate?case=${encodeURIComponent(data.caseId)}&stem=${encodeURIComponent(data.stem)}`);
+      }, 1000);
+    } catch (err: unknown) {
+      setPromoteError(String(err));
+    } finally {
+      setPromoting(false);
+    }
+  };
 
   const loadStatus = useCallback(async () => {
     try {
@@ -395,6 +454,106 @@ export default function TestImage() {
           ) : (
             <Missing reason={seg?.reason ?? "No segmentation model."} />
           )}
+
+          {/* ------------------------------------------- add to dataset for continuous learning */}
+          <div className="rounded-lg border border-primary/40 bg-primary/5 p-4 space-y-3">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div>
+                <div className="flex items-center gap-2 text-xs font-semibold uppercase tracking-wider text-primary">
+                  <Database className="h-4 w-4" /> Add slice to training dataset & recorrect mask
+                </div>
+                <p className="text-xs text-muted-foreground mt-0.5">
+                  Promote this slice into the 2D curated dataset, open it in the 2D Annotator to refine or correct boundaries, and save it so the model can be retrained.
+                </p>
+              </div>
+            </div>
+
+            <div className="grid gap-3 sm:grid-cols-3 pt-1">
+              <div>
+                <label className="text-[11px] font-medium text-muted-foreground block mb-1">
+                  Case ID
+                </label>
+                <input
+                  value={promoteCaseId}
+                  onChange={(e) => setPromoteCaseId(e.target.value)}
+                  placeholder="e.g. TEST-001"
+                  className="w-full rounded-md border border-border bg-background px-2.5 py-1.5 text-xs font-mono"
+                />
+              </div>
+
+              <div>
+                <label className="text-[11px] font-medium text-muted-foreground block mb-1">
+                  Assigned Classification
+                </label>
+                <div className="flex rounded-md border border-border overflow-hidden">
+                  <button
+                    type="button"
+                    onClick={() => setPromoteLabel("bme")}
+                    className={`flex-1 py-1.5 text-xs font-medium transition ${
+                      promoteLabel === "bme"
+                        ? "bg-red-500/20 text-red-400 font-semibold"
+                        : "bg-background text-muted-foreground hover:text-foreground"
+                    }`}
+                  >
+                    BME Positive
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setPromoteLabel("non_bme")}
+                    className={`flex-1 py-1.5 text-xs font-medium border-l border-border transition ${
+                      promoteLabel === "non_bme"
+                        ? "bg-blue-500/20 text-blue-400 font-semibold"
+                        : "bg-background text-muted-foreground hover:text-foreground"
+                    }`}
+                  >
+                    Non-BME
+                  </button>
+                </div>
+              </div>
+
+              <div className="flex flex-col justify-end">
+                {result.segmentation?.available && (
+                  <label className="flex items-center gap-2 text-xs text-muted-foreground cursor-pointer select-none mb-2">
+                    <input
+                      type="checkbox"
+                      checked={includeMask}
+                      onChange={(e) => setIncludeMask(e.target.checked)}
+                      className="rounded border-border accent-primary h-3.5 w-3.5"
+                    />
+                    <span>Include predicted mask as draft</span>
+                  </label>
+                )}
+
+                <button
+                  type="button"
+                  disabled={promoting}
+                  onClick={handleAddToDataset}
+                  className="inline-flex items-center justify-center gap-1.5 rounded-md bg-primary px-3 py-2 text-xs font-medium text-primary-foreground hover:bg-primary/90 transition shadow-sm disabled:opacity-50"
+                >
+                  {promoting ? (
+                    <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                  ) : (
+                    <Paintbrush className="h-3.5 w-3.5" />
+                  )}
+                  {promoting ? "Adding to Dataset..." : "Add & Open in Annotator"}
+                </button>
+              </div>
+            </div>
+
+            {promoteSuccess && (
+              <div className="rounded border border-emerald-500/40 bg-emerald-500/10 p-2 text-xs text-emerald-400 flex items-center gap-2">
+                <Check className="h-4 w-4 shrink-0" />
+                <span>{promoteSuccess}</span>
+              </div>
+            )}
+
+            {promoteError && (
+              <div className="rounded border border-destructive/40 bg-destructive/10 p-2 text-xs text-destructive flex items-center gap-2">
+                <AlertTriangle className="h-4 w-4 shrink-0" />
+                <span>{promoteError}</span>
+              </div>
+            )}
+          </div>
 
           <p className="text-xs text-muted-foreground">
             Ran on {result.device}. Preprocessing: {result.preprocessing.steps.join(" → ")}.{" "}
