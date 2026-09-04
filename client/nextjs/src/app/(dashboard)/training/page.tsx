@@ -20,6 +20,11 @@ type SegState = {
   metrics: SegMetrics | null; log: string; progress: SegProg | null;
 };
 
+type Torch = {
+  cudaAvailable: boolean; deviceName: string | null; vramGB: number | null;
+  torchVersion: string | null; cudaBuild: string | null; reason: string | null;
+};
+
 type Run = {
   id: string; arch: string; folds: number; epochs: number;
   finishedAt: string | null; nSlices: number; nCases: number;
@@ -174,6 +179,52 @@ function Terms() {
   );
 }
 
+/**
+ * Where to train. Shown in both tabs because the choice matters far more for
+ * segmentation (20-40x) than for the classifier, and a reader who saw it only
+ * once would reasonably assume it applied to whichever tab they were on.
+ *
+ * "GPU" is disabled, with the reason attached, when torch cannot actually use
+ * one — an option that silently does nothing is worse than no option.
+ */
+function DevicePicker({
+  torch, value, onChange, disabled,
+}: {
+  torch: Torch | null;
+  value: "auto" | "cuda" | "cpu";
+  onChange: (v: "auto" | "cuda" | "cpu") => void;
+  disabled?: boolean;
+}) {
+  const gpuReady = Boolean(torch?.cudaAvailable);
+  return (
+    <div className="flex flex-col gap-1">
+      <label className="text-xs font-medium text-muted-foreground">Run on</label>
+      <select
+        value={value}
+        disabled={disabled}
+        onChange={(e) => onChange(e.target.value as "auto" | "cuda" | "cpu")}
+        className="rounded-md border border-border bg-background px-2 py-1.5 text-sm disabled:opacity-50">
+        <option value="auto">Auto{gpuReady ? " (GPU)" : " (CPU)"}</option>
+        <option value="cuda" disabled={!gpuReady}>
+          GPU{gpuReady && torch?.deviceName ? ` — ${torch.deviceName}` : " (unavailable)"}
+        </option>
+        <option value="cpu">CPU</option>
+      </select>
+      <p className="max-w-[22rem] text-[11px] leading-snug text-muted-foreground">
+        {gpuReady ? (
+          <>
+            {torch?.deviceName}
+            {torch?.vramGB ? ` · ${torch.vramGB} GB` : ""} ready. Segmentation is roughly
+            20–40× faster here than on CPU.
+          </>
+        ) : (
+          torch?.reason ?? "Checking what this machine can use…"
+        )}
+      </p>
+    </div>
+  );
+}
+
 export default function TrainingPage() {
   const [archs, setArchs] = useState<string[]>([]);
   const [runs, setRuns] = useState<Run[]>([]);
@@ -197,6 +248,8 @@ export default function TrainingPage() {
   const [segFolds, setSegFolds] = useState(5);
   const [segBatch, setSegBatch] = useState(8);
   const [segBusy, setSegBusy] = useState(false);
+  const [torch, setTorch] = useState<Torch | null>(null);
+  const [device, setDevice] = useState<"auto" | "cuda" | "cpu">("auto");
   const [showWhy, setShowWhy] = useState(false);
   const [showTerms, setShowTerms] = useState(false);
   const logRef = useRef<HTMLPreElement>(null);
@@ -218,6 +271,8 @@ export default function TrainingPage() {
       if (savedPatience !== null) setPatience(savedPatience);
       const savedHim = localStorage.getItem("bme_training_him");
       if (savedHim !== null) setHim(savedHim === "true");
+      const savedDevice = localStorage.getItem("bme_training_device");
+      if (savedDevice === "auto" || savedDevice === "cuda" || savedDevice === "cpu") setDevice(savedDevice);
       const savedTta = localStorage.getItem("bme_training_tta");
       if (savedTta !== null) setTta(savedTta === "true");
       const savedSegEpochs = localStorage.getItem("bme_training_seg_epochs");
@@ -241,6 +296,7 @@ export default function TrainingPage() {
     const j = await res.json();
     setArchs(j.archs); setRuns(j.runs); setRunning(j.running); setLog(j.log);
     setSelected(j.selected ?? null);
+    setTorch(j.torch ?? null);
     setProgress(j.progress ?? null);
   }, []);
 
@@ -261,6 +317,7 @@ export default function TrainingPage() {
           epochs: segEpochs,
           folds: segFolds,
           batch: segBatch,
+          device,
         }),
       });
       const j = await r.json();
@@ -306,6 +363,7 @@ export default function TrainingPage() {
           tta,
           freeze: freeze === "" ? null : Number(freeze),
           patience: patience === "" ? null : Number(patience),
+          device,
         }),
       });
       const j = await res.json();
@@ -484,6 +542,9 @@ export default function TrainingPage() {
                   </button>
                 )}
               </div>
+
+              <DevicePicker torch={torch} value={device} disabled={seg?.running}
+                onChange={(v) => { setDevice(v); try { localStorage.setItem("bme_training_device", v); } catch { /* ignore */ } }} />
             </div>
 
             {(seg?.annotated ?? 0) === 0 && (
@@ -622,6 +683,9 @@ export default function TrainingPage() {
               onChange={(e) => setPatience(e.target.value)}
               className="w-20 rounded-md border border-border bg-background px-3 py-2 text-sm" />
           </label>
+
+          <DevicePicker torch={torch} value={device} disabled={running}
+            onChange={(v) => { setDevice(v); try { localStorage.setItem("bme_training_device", v); } catch { /* ignore */ } }} />
 
           <div className="flex flex-col gap-1.5 text-sm">
             <label className="inline-flex items-center gap-2">

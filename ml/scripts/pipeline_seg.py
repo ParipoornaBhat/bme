@@ -38,6 +38,7 @@ def main():
     ap.add_argument("--folds", type=int, default=5)
     ap.add_argument("--epochs", type=int, default=40)
     ap.add_argument("--batch", type=int, default=8)
+    ap.add_argument("--device", choices=("auto", "cuda", "cpu"), default="auto")
     args = ap.parse_args()
 
     base = Path(args.base)
@@ -75,7 +76,7 @@ def main():
     ok = steps_ok and run("3/3  Training the 2D U-Net segmentation model",
                           [str(scripts / "train_2d_seg.py"), str(base),
                            "--folds", str(args.folds), "--epochs", str(args.epochs),
-                           "--batch", str(args.batch)])
+                           "--batch", str(args.batch), "--device", args.device])
 
     if ok:
         print("\n" + "=" * 64)

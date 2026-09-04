@@ -130,6 +130,32 @@ def build_model(arch: str, n_classes: int = 2):
     return model
 
 
+def resolve_device(choice: str) -> str:
+    """Turn --device into a torch device string.
+
+    'cuda' is honoured strictly: if the GPU is not usable the run stops rather
+    than quietly falling back. A segmentation run is 20-40x slower on CPU, and
+    silently taking that path turns a four-minute job into ninety minutes with
+    nothing on screen to say why.
+
+    'auto' prefers the GPU and says which it chose, so a CPU run is never a
+    surprise either.
+    """
+    if choice == "cpu":
+        return "cpu"
+    if torch.cuda.is_available():
+        return "cuda"
+    if choice == "cuda":
+        why = (
+            "this PyTorch is a CPU-only build (torch.version.cuda is None); "
+            "reinstall with a CUDA wheel"
+            if torch.version.cuda is None
+            else "no CUDA device is visible to PyTorch"
+        )
+        raise SystemExit(f"--device cuda requested but unavailable: {why}")
+    return "cpu"
+
+
 def set_seed(s=SEED):
     random.seed(s); np.random.seed(s); torch.manual_seed(s)
     torch.cuda.manual_seed_all(s)
@@ -376,6 +402,10 @@ def main():
                          "(ResNet-18 has 10; published work found ~6 best)")
     ap.add_argument("--patience", type=int, default=0, metavar="N",
                     help="early-stop after N epochs without a validation AUC gain")
+    ap.add_argument("--device", choices=("auto", "cuda", "cpu"), default="auto",
+                    help="where to train. 'auto' uses the GPU when one is "
+                         "usable and falls back to CPU; 'cuda' fails loudly "
+                         "rather than training slowly by accident")
     ap.add_argument("--threshold", choices=("auto", "fixed"), default="fixed",
                     help="'fixed' uses 0.5 (default, and measured better here); "
                          "'auto' picks it per fold on the TRAINING fold by "
@@ -398,7 +428,7 @@ def main():
 
     rows = list(csv.DictReader(open(idx, encoding="utf-8")))
     by_case, folds = patient_folds(rows, args.folds)
-    device = "cuda" if torch.cuda.is_available() else "cpu"
+    device = resolve_device(args.device)
 
     print(f"slices {len(rows)}   cases {len(by_case)}   device {device}   "
           f"arch {args.arch}   dataset {args.dataset}")

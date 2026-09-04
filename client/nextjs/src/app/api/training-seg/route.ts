@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import fs from "node:fs";
 import path from "node:path";
 import { spawn } from "node:child_process";
+import { torchDevice } from "~/lib/torchDevice";
 
 /**
  * Segmentation training: annotations in, a model that marks edema out.
@@ -174,6 +175,7 @@ export async function GET() {
   }
   const isRunning = running();
   return NextResponse.json({
+    torch: torchDevice(),
     annotated: cases.length,
     cases,
     running: isRunning,
@@ -201,6 +203,7 @@ export async function POST(req: NextRequest) {
   const epochs = Math.min(Math.max(Number(body.epochs ?? 40), 1), 200);
   const folds = Math.min(Math.max(Number(body.folds ?? 5), 2), 10);
   const batch = Math.min(Math.max(Number(body.batch ?? 8), 1), 64);
+  const device = ["auto", "cuda", "cpu"].includes(body.device) ? body.device : "auto";
 
   const r = root();
   fs.mkdirSync(path.join(r, "data", "results2dseg"), { recursive: true });
@@ -209,14 +212,15 @@ export async function POST(req: NextRequest) {
   const child = spawn(
     python(),
     ["-u", path.join(r, "ml", "scripts", "pipeline_seg.py"), r,
-     "--epochs", String(epochs), "--folds", String(folds), "--batch", String(batch)],
+     "--epochs", String(epochs), "--folds", String(folds), "--batch", String(batch),
+     "--device", device],
     { cwd: r, detached: true, stdio: ["ignore", log, log] },
   );
   child.unref();
   if (child.pid) fs.writeFileSync(PID(), String(child.pid));
   fs.writeFileSync(
     JOB(),
-    JSON.stringify({ startedAt: Date.now(), folds, epochs, batch }, null, 2),
+    JSON.stringify({ startedAt: Date.now(), folds, epochs, batch, device }, null, 2),
   );
 
   return NextResponse.json({ ok: true, pid: child.pid, epochs, folds, batch, cases: cases.length });

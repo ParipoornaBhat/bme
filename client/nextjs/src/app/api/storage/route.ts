@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import fs from "node:fs";
 import path from "node:path";
+import { spawn } from "node:child_process";
 
 /**
  * Storage breakdown across the project.
@@ -41,12 +42,26 @@ function walk(dir: string): { bytes: number; files: number } {
   return { bytes, files };
 }
 
-function entry(root: string, rel: string, label: string, group: string) {
+function entry(
+  root: string,
+  rel: string,
+  label: string,
+  group: string,
+  extra?: { reason?: string; removable?: string },
+) {
   const p = path.join(root, rel);
   const exists = fs.existsSync(p);
   const { bytes, files } = exists ? walk(p) : { bytes: 0, files: 0 };
-  return { label, group, path: rel, exists, bytes, files };
+  return { label, group, path: rel, exists, bytes, files, ...extra };
 }
+
+// site-packages sits inside .venv, which the walker skips by name. These are
+// addressed directly so the CUDA download is visible and accountable rather
+// than hidden inside an excluded directory.
+const SITE =
+  process.platform === "win32"
+    ? "ml/.venv/Lib/site-packages"
+    : "ml/.venv/lib/python3/site-packages";
 
 export async function GET() {
   const root = path.resolve(process.cwd(), "..", "..");
@@ -68,6 +83,22 @@ export async function GET() {
     entry(root, "data/results2d", "2D results & run history", "Models & results"),
     entry(root, "models", "Saved model weights", "Models & results"),
 
+    entry(root, `${SITE}/torch`, "PyTorch (CUDA build)", "GPU support", {
+      reason:
+        "Installed to train on the RTX 4050 instead of the CPU. Segmentation is roughly 20-40x faster on the GPU. The bulk of this is the bundled CUDA runtime (cuDNN, cuBLAS), not PyTorch itself.",
+      removable: "cpu-torch",
+    }),
+    entry(root, `${SITE}/nvidia`, "NVIDIA CUDA libraries", "GPU support", {
+      reason:
+        "CUDA runtime shipped as separate packages. Present only on some platforms; on Windows these libraries are usually bundled inside PyTorch above.",
+      removable: "cpu-torch",
+    }),
+    entry(root, `${SITE}/torchvision`, "torchvision", "GPU support", {
+      reason:
+        "Image models and transforms. Reinstalled alongside PyTorch so the two builds match - a CUDA torch with a CPU torchvision fails at import.",
+      removable: "cpu-torch",
+    }),
+
     entry(root, "client", "Web client", "Code"),
     entry(root, "server", "API & database code", "Code"),
     entry(root, "ml", "Python pipeline", "Code"),
@@ -75,7 +106,7 @@ export async function GET() {
   ];
 
   // Group totals, in a fixed order so the UI does not reshuffle between polls.
-  const order = ["Source data", "Processed — 3D", "Processed — 2D", "Models & results", "Code"];
+  const order = ["Source data", "Processed — 3D", "Processed — 2D", "Models & results", "GPU support", "Code"];
   const groups = order.map((g) => {
     const rows = items.filter((i) => i.group === g);
     return {
@@ -100,5 +131,47 @@ export async function GET() {
     totalFiles: items.reduce((s, i) => s + i.files, 0),
     disk,
     note: "node_modules, .git and virtualenvs excluded.",
+  });
+}
+
+/**
+ * Revert to the CPU-only PyTorch, freeing the CUDA runtime.
+ *
+ * Deliberately a reinstall rather than a delete. Removing the CUDA DLLs from
+ * inside the package would free the same space and leave an import error
+ * behind; swapping the wheel leaves a working environment that simply trains
+ * on the CPU again. The CPU wheel is a fraction of the CUDA one, so this is a
+ * net saving even though it downloads.
+ *
+ * Runs detached and returns immediately: pip takes minutes and an HTTP request
+ * should not be held open for it.
+ */
+export async function DELETE() {
+  const root = path.resolve(process.cwd(), "..", "..");
+  const py =
+    process.platform === "win32"
+      ? path.join(root, "ml", ".venv", "Scripts", "python.exe")
+      : path.join(root, "ml", ".venv", "bin", "python");
+  if (!fs.existsSync(py)) {
+    return NextResponse.json({ error: "python environment not found" }, { status: 400 });
+  }
+
+  const logPath = path.join(root, "data", "results2d", "torch-revert.log");
+  fs.mkdirSync(path.dirname(logPath), { recursive: true });
+  const log = fs.openSync(logPath, "w");
+
+  const child = spawn(
+    py,
+    ["-m", "pip", "install", "--index-url", "https://download.pytorch.org/whl/cpu",
+     "torch==2.13.0", "torchvision==0.28.0", "--force-reinstall"],
+    { cwd: root, detached: true, stdio: ["ignore", log, log] },
+  );
+  child.unref();
+
+  return NextResponse.json({
+    ok: true,
+    started: true,
+    note: "Switching back to CPU-only PyTorch. This takes a few minutes; restart the dev server afterwards so the GPU check re-runs.",
+    log: "data/results2d/torch-revert.log",
   });
 }

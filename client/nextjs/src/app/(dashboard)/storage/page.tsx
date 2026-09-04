@@ -1,9 +1,18 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import { HardDrive, Loader2, RefreshCw } from "lucide-react";
+import { Cpu, HardDrive, Loader2, RefreshCw, Zap } from "lucide-react";
 
-type Item = { label: string; group: string; path: string; exists: boolean; bytes: number; files: number };
+type Item = {
+  label: string; group: string; path: string; exists: boolean; bytes: number; files: number;
+  reason?: string; removable?: string;
+};
+type Sys = {
+  cpu: { loadPercent: number | null; cores: number; model: string | null; tempC: number | null; tempNote: string };
+  gpu: { name: string; utilPercent: number; memUsedMB: number; memTotalMB: number; tempC: number } | null;
+  memory: { totalGB: number; freeGB: number };
+  note: string;
+};
 type Group = { name: string; bytes: number; files: number; items: Item[] };
 type Payload = {
   groups: Group[]; total: number; totalFiles: number;
@@ -23,12 +32,15 @@ const HUES: Record<string, string> = {
   "Processed — 3D": "bg-sky-500",
   "Processed — 2D": "bg-emerald-500",
   "Models & results": "bg-amber-500",
+  "GPU support": "bg-teal-500",
   Code: "bg-violet-500",
 };
 
 export default function StoragePage() {
   const [data, setData] = useState<Payload | null>(null);
   const [loading, setLoading] = useState(true);
+  const [sys, setSys] = useState<Sys | null>(null);
+  const [reverting, setReverting] = useState(false);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -39,6 +51,33 @@ export default function StoragePage() {
       setLoading(false);
     }
   }, []);
+
+  // Telemetry polls on its own cadence: it changes every second, while the
+  // directory walk is expensive and only changes when somebody trains.
+  useEffect(() => {
+    let alive = true;
+    const tick = async () => {
+      try {
+        const r = await fetch("/api/system", { cache: "no-store" });
+        if (r.ok && alive) setSys(await r.json());
+      } catch { /* telemetry is optional */ }
+    };
+    tick();
+    const id = setInterval(tick, 3000);
+    return () => { alive = false; clearInterval(id); };
+  }, []);
+
+  const revertTorch = async () => {
+    if (!confirm(
+      "Switch back to CPU-only PyTorch? This frees the CUDA runtime, but training returns to CPU speed — segmentation goes from minutes to over an hour. It downloads a smaller CPU wheel, so it is not instant, and you can reinstall the GPU build later.",
+    )) return;
+    setReverting(true);
+    try {
+      const r = await fetch("/api/storage", { method: "DELETE" });
+      const j = await r.json();
+      alert(j.note ?? j.error ?? "started");
+    } finally { setReverting(false); }
+  };
 
   useEffect(() => { load(); }, [load]);
 
@@ -113,6 +152,51 @@ export default function StoragePage() {
         </div>
       </div>
 
+      {sys && (
+        <div className="grid gap-3 sm:grid-cols-2">
+          <div className="rounded-lg border border-border bg-card p-4">
+            <div className="mb-2 flex items-center justify-between">
+              <span className="inline-flex items-center gap-2 text-sm font-semibold">
+                <Cpu className="h-4 w-4 text-muted-foreground" /> CPU
+              </span>
+              <span className="text-sm tabular-nums">
+                {sys.cpu.loadPercent != null ? `${sys.cpu.loadPercent}%` : "—"}
+              </span>
+            </div>
+            <div className="h-1.5 overflow-hidden rounded-full bg-muted">
+              <div className="h-full rounded-full bg-violet-500 transition-all duration-700"
+                style={{ width: `${sys.cpu.loadPercent ?? 0}%` }} />
+            </div>
+            <p className="mt-2 text-xs text-muted-foreground">
+              {sys.cpu.cores} threads &middot; RAM {(sys.memory.totalGB - sys.memory.freeGB).toFixed(1)}
+              /{sys.memory.totalGB} GB
+            </p>
+            <p className="mt-1 text-[11px] text-muted-foreground/70">{sys.cpu.tempNote}</p>
+          </div>
+
+          <div className="rounded-lg border border-border bg-card p-4">
+            <div className="mb-2 flex items-center justify-between">
+              <span className="inline-flex items-center gap-2 text-sm font-semibold">
+                <Zap className="h-4 w-4 text-muted-foreground" /> GPU
+              </span>
+              <span className="text-sm tabular-nums">
+                {sys.gpu ? `${sys.gpu.utilPercent}% · ${sys.gpu.tempC}°C` : "none"}
+              </span>
+            </div>
+            <div className="h-1.5 overflow-hidden rounded-full bg-muted">
+              <div className="h-full rounded-full bg-teal-500 transition-all duration-700"
+                style={{ width: `${sys.gpu?.utilPercent ?? 0}%` }} />
+            </div>
+            <p className="mt-2 text-xs text-muted-foreground">
+              {sys.gpu
+                ? `${sys.gpu.name} · VRAM ${(sys.gpu.memUsedMB / 1024).toFixed(1)}/${(sys.gpu.memTotalMB / 1024).toFixed(1)} GB`
+                : "No NVIDIA GPU detected."}
+            </p>
+            <p className="mt-1 text-[11px] text-muted-foreground/70">{sys.note}</p>
+          </div>
+        </div>
+      )}
+
       <div className="space-y-4">
         {data.groups.map((g) => (
           <div key={g.name} className="rounded-lg border border-border bg-card p-4">
@@ -125,12 +209,29 @@ export default function StoragePage() {
                 {human(g.bytes)} &middot; {g.files.toLocaleString()} files
               </span>
             </div>
+            {g.name === "GPU support" && (
+              <div className="mb-3 flex flex-wrap items-center justify-between gap-2 rounded-md bg-muted/50 p-2.5">
+                <p className="max-w-xl text-xs text-muted-foreground">
+                  Installed on purpose so training can use the GPU. Safe to remove at any time —
+                  the project keeps working, it just trains on the CPU again.
+                </p>
+                <button onClick={revertTorch} disabled={reverting}
+                  className="rounded-md border border-border px-2.5 py-1 text-xs text-muted-foreground hover:border-destructive hover:text-destructive disabled:opacity-40">
+                  {reverting ? "Starting…" : "Switch back to CPU-only"}
+                </button>
+              </div>
+            )}
             <div className="space-y-1.5">
               {g.items.map((i) => (
-                <div key={i.path} className="flex items-center gap-3 text-sm">
+                <div key={i.path} className="flex items-start gap-3 text-sm">
                   <span className={`flex-1 ${i.exists ? "" : "text-muted-foreground/50"}`}>
                     {i.label}
-                    {!i.exists && <span className="ml-2 text-xs">(not created yet)</span>}
+                    {!i.exists && <span className="ml-2 text-xs">(not installed)</span>}
+                    {i.reason && (
+                      <span className="mt-0.5 block text-[11px] leading-snug text-muted-foreground/70">
+                        {i.reason}
+                      </span>
+                    )}
                   </span>
                   <div className="hidden h-1.5 w-32 overflow-hidden rounded-full bg-muted sm:block">
                     <div className={`h-full ${HUES[g.name] ?? "bg-neutral-400"}`}
