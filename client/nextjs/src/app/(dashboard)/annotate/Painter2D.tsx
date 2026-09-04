@@ -52,6 +52,7 @@ export default function Painter2D() {
   const undoStackRef = useRef<Uint8Array[]>([]);
   const isDrawingRef = useRef(false);
   const lastPosRef = useRef<{ x: number; y: number } | null>(null);
+  const lastLoadedStemRef = useRef<string>("");
 
   // Load slices once on mount
   useEffect(() => {
@@ -153,6 +154,12 @@ export default function Painter2D() {
   useEffect(() => {
     if (!selectedRelPath || !selectedCaseId || !selectedStem) return;
 
+    const sliceKey = `${selectedCaseId}/${selectedStem}`;
+    if (lastLoadedStemRef.current === sliceKey) {
+      return;
+    }
+    lastLoadedStemRef.current = sliceKey;
+
     let cancelled = false;
     const img = new Image();
     img.crossOrigin = "anonymous";
@@ -197,8 +204,10 @@ export default function Painter2D() {
           const blob = await maskRes.blob();
           if (cancelled) return;
           const maskImg = new Image();
-          maskImg.src = URL.createObjectURL(blob);
+          const blobUrl = URL.createObjectURL(blob);
+          maskImg.src = blobUrl;
           maskImg.onload = () => {
+            URL.revokeObjectURL(blobUrl);
             if (cancelled) return;
             const off = document.createElement("canvas");
             off.width = w;
