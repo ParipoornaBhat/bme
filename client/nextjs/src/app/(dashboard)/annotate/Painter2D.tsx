@@ -48,38 +48,43 @@ export default function Painter2D() {
   const bgCanvasRef = useRef<HTMLCanvasElement>(null);
   const maskCanvasRef = useRef<HTMLCanvasElement>(null);
   const maskDataRef = useRef<Uint8Array | null>(null);
+  const imgDimRef = useRef<{ w: number; h: number }>({ w: 0, h: 0 });
   const undoStackRef = useRef<Uint8Array[]>([]);
   const isDrawingRef = useRef(false);
   const lastPosRef = useRef<{ x: number; y: number } | null>(null);
 
-  const loadSlices = useCallback(async () => {
-    try {
-      setLoading(true);
-      const res = await fetch("/api/cases2d", { cache: "no-store" });
-      if (!res.ok) return;
-      const data = await res.json();
-      setSlices(data.slices || []);
-      if (!selected && data.slices?.length > 0) {
-        setSelected(data.slices[0]);
-      }
-    } finally {
-      setLoading(false);
-    }
-  }, [selected]);
-
+  // Load slices once on mount
   useEffect(() => {
-    loadSlices();
-  }, [loadSlices]);
+    let mounted = true;
+    (async () => {
+      try {
+        setLoading(true);
+        const res = await fetch("/api/cases2d", { cache: "no-store" });
+        if (!res.ok) return;
+        const data = await res.json();
+        if (!mounted) return;
+        const list: Case2DSlice[] = data.slices || [];
+        setSlices(list);
+        setSelected((prev) => prev ?? (list.length > 0 ? list[0] : null));
+      } finally {
+        if (mounted) setLoading(false);
+      }
+    })();
+    return () => {
+      mounted = false;
+    };
+  }, []);
 
   const renderMaskToCanvas = useCallback(() => {
     const canvas = maskCanvasRef.current;
     const mask = maskDataRef.current;
-    if (!canvas || !mask || imgDim.w === 0 || imgDim.h === 0) return;
+    const { w, h } = imgDimRef.current;
+    if (!canvas || !mask || w === 0 || h === 0) return;
 
     const ctx = canvas.getContext("2d");
     if (!ctx) return;
 
-    const imgData = ctx.createImageData(imgDim.w, imgDim.h);
+    const imgData = ctx.createImageData(w, h);
     const data = imgData.data;
 
     let bCount = 0, lCount = 0, uCount = 0;
@@ -115,7 +120,7 @@ export default function Painter2D() {
 
     ctx.putImageData(imgData, 0, 0);
     setCounts({ bone: bCount, bme: lCount, uncertain: uCount });
-  }, [imgDim]);
+  }, []);
 
   const pushUndo = () => {
     if (!maskDataRef.current) return;
@@ -140,17 +145,24 @@ export default function Painter2D() {
     renderMaskToCanvas();
   };
 
+  const selectedRelPath = selected?.relPath;
+  const selectedCaseId = selected?.caseId;
+  const selectedStem = selected?.stem;
+
   // Load image and existing mask on slice change
   useEffect(() => {
-    if (!selected) return;
+    if (!selectedRelPath || !selectedCaseId || !selectedStem) return;
 
+    let cancelled = false;
     const img = new Image();
     img.crossOrigin = "anonymous";
-    img.src = `/api/cases2d?image=${encodeURIComponent(selected.relPath)}`;
+    img.src = `/api/cases2d?image=${encodeURIComponent(selectedRelPath)}`;
 
     img.onload = async () => {
+      if (cancelled) return;
       const w = img.naturalWidth;
       const h = img.naturalHeight;
+      imgDimRef.current = { w, h };
       setImgDim({ w, h });
 
       // Draw background scan
@@ -178,13 +190,16 @@ export default function Painter2D() {
       // Try to load existing mask
       try {
         const maskRes = await fetch(
-          `/api/annotation2d/${selected.caseId}?stem=${encodeURIComponent(selected.stem)}&raw=true`,
+          `/api/annotation2d/${selectedCaseId}?stem=${encodeURIComponent(selectedStem)}&raw=true`,
         );
+        if (cancelled) return;
         if (maskRes.ok && maskRes.headers.get("content-type")?.includes("image")) {
           const blob = await maskRes.blob();
+          if (cancelled) return;
           const maskImg = new Image();
           maskImg.src = URL.createObjectURL(blob);
           maskImg.onload = () => {
+            if (cancelled) return;
             const off = document.createElement("canvas");
             off.width = w;
             off.height = h;
@@ -202,10 +217,14 @@ export default function Painter2D() {
           renderMaskToCanvas();
         }
       } catch {
-        renderMaskToCanvas();
+        if (!cancelled) renderMaskToCanvas();
       }
     };
-  }, [selected, renderMaskToCanvas]);
+
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedRelPath, selectedCaseId, selectedStem, renderMaskToCanvas]);
 
   // Painting drawing logic
   const paintAt = (cx: number, cy: number) => {
