@@ -2,24 +2,31 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
+  AlertTriangle,
   Check,
   CheckCircle2,
   Eraser,
+  Flag,
   Hand,
   Info,
   Lasso,
   Layers,
   Loader2,
   Maximize2,
+  MessageSquare,
   Move,
   Paintbrush,
   RotateCcw,
+  RotateCw,
   Save,
   Search,
   Trash2,
+  X,
+  XCircle,
   ZoomIn,
   ZoomOut,
 } from "lucide-react";
+import { toast } from "sonner";
 
 export type Case2DSlice = {
   caseId: string;
@@ -28,6 +35,10 @@ export type Case2DSlice = {
   stem: string;
   hasMask: boolean;
   maskSavedAt: string | null;
+  flagged?: boolean;
+  flagReason?: string;
+  flagNote?: string;
+  flaggedAt?: string;
 };
 
 const LABELS = [
@@ -40,7 +51,7 @@ export default function Painter2D() {
   const [slices, setSlices] = useState<Case2DSlice[]>([]);
   const [loading, setLoading] = useState(true);
   const [selected, setSelected] = useState<Case2DSlice | null>(null);
-  const [filter, setFilter] = useState<"all" | "bme" | "non_bme" | "annotated" | "unannotated">("all");
+  const [filter, setFilter] = useState<"all" | "bme" | "non_bme" | "annotated" | "unannotated" | "flagged">("all");
   const [query, setQuery] = useState("");
   const [tool, setTool] = useState<"brush" | "pencil" | "pan">("brush");
   const [maskInside, setMaskInside] = useState(false);
@@ -50,8 +61,22 @@ export default function Painter2D() {
   const [saving, setSaving] = useState(false);
   const [savedSuccess, setSavedSuccess] = useState(false);
 
+  // Auto Save & History states
+  const [autoSave, setAutoSave] = useState(false);
+  const [autoSaveStatus, setAutoSaveStatus] = useState<string>("");
+  const autoSaveTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+  const isDirtyRef = useRef(false);
+
+  // Flagging states
+  const [flagModalOpen, setFlagModalOpen] = useState(false);
+  const [flagReason, setFlagReason] = useState("Not Sure");
+  const [flagNote, setFlagNote] = useState("");
+  const [flagSaving, setFlagSaving] = useState(false);
+  const [deletingMask, setDeletingMask] = useState(false);
+
   const [imgDim, setImgDim] = useState<{ w: number; h: number }>({ w: 0, h: 0 });
   const [counts, setCounts] = useState<{ bone: number; bme: number; uncertain: number }>({ bone: 0, bme: 0, uncertain: 0 });
+  const countsRef = useRef<{ bone: number; bme: number; uncertain: number }>({ bone: 0, bme: 0, uncertain: 0 });
 
   const [zoom, setZoom] = useState<number>(1);
   const [pan, setPan] = useState<{ x: number; y: number }>({ x: 0, y: 0 });
@@ -67,6 +92,7 @@ export default function Painter2D() {
   const maskDataRef = useRef<Uint8Array | null>(null);
   const imgDimRef = useRef<{ w: number; h: number }>({ w: 0, h: 0 });
   const undoStackRef = useRef<Uint8Array[]>([]);
+  const redoStackRef = useRef<Uint8Array[]>([]);
   const isDrawingRef = useRef(false);
   const lastPosRef = useRef<{ x: number; y: number } | null>(null);
   const outlineRef = useRef<Array<[number, number]>>([]);
@@ -77,7 +103,29 @@ export default function Painter2D() {
     setPan({ x: 0, y: 0 });
   }, []);
 
-  // Load slices once on mount (supporting ?case=...&stem=... deep linking)
+  // Hydrate preferences from localStorage
+  useEffect(() => {
+    try {
+      const savedFilter = localStorage.getItem("bme_painter2d_filter") as any;
+      if (savedFilter && ["all", "bme", "non_bme", "annotated", "unannotated", "flagged"].includes(savedFilter)) {
+        setFilter(savedFilter);
+      }
+      const savedQuery = localStorage.getItem("bme_painter2d_query");
+      if (savedQuery) setQuery(savedQuery);
+      const savedTool = localStorage.getItem("bme_painter2d_tool") as any;
+      if (savedTool === "brush" || savedTool === "pencil" || savedTool === "pan") setTool(savedTool);
+      const savedBrushSize = localStorage.getItem("bme_painter2d_brush_size");
+      if (savedBrushSize) setBrushSize(Number(savedBrushSize));
+      const savedLabel = localStorage.getItem("bme_painter2d_active_label");
+      if (savedLabel) setActiveLabel(Number(savedLabel));
+      const savedMaskInside = localStorage.getItem("bme_painter2d_mask_inside");
+      if (savedMaskInside !== null) setMaskInside(savedMaskInside === "true");
+      const savedAutoSave = localStorage.getItem("bme_painter2d_autosave");
+      if (savedAutoSave !== null) setAutoSave(savedAutoSave === "true");
+    } catch { /* ignore */ }
+  }, []);
+
+  // Load slices once on mount (supporting ?case=...&stem=... deep linking with localStorage fallback)
   useEffect(() => {
     let mounted = true;
     (async () => {
@@ -96,7 +144,20 @@ export default function Painter2D() {
         const matched = list.find(
           (s) => (targetStem && s.stem === targetStem) || (targetCase && s.caseId === targetCase)
         );
-        setSelected((prev) => prev ?? matched ?? (list.length > 0 ? list[0] : null));
+        if (matched) {
+          setSelected(matched);
+          return;
+        }
+
+        const savedSliceKey = localStorage.getItem("bme_painter2d_selected");
+        if (savedSliceKey) {
+          const found = list.find((s) => `${s.caseId}/${s.stem}` === savedSliceKey);
+          if (found) {
+            setSelected(found);
+            return;
+          }
+        }
+        setSelected((prev) => prev ?? (list.length > 0 ? list[0] : null));
       } finally {
         if (mounted) setLoading(false);
       }
@@ -105,6 +166,7 @@ export default function Painter2D() {
       mounted = false;
     };
   }, []);
+
 
   const renderMaskToCanvas = useCallback(() => {
     const canvas = maskCanvasRef.current;
@@ -149,23 +211,42 @@ export default function Painter2D() {
       }
     }
 
-    ctx.putImageData(imgData, 0, 0);
-    setCounts({ bone: bCount, bme: lCount, uncertain: uCount });
+    const newCounts = { bone: bCount, bme: lCount, uncertain: uCount };
+    setCounts(newCounts);
+    countsRef.current = newCounts;
   }, []);
 
   const pushUndo = () => {
     if (!maskDataRef.current) return;
     undoStackRef.current.push(new Uint8Array(maskDataRef.current));
-    if (undoStackRef.current.length > 20) {
+    if (undoStackRef.current.length > 30) {
       undoStackRef.current.shift();
     }
+    redoStackRef.current = []; // New drawing stroke clears redo stack
+    isDirtyRef.current = true;
   };
 
   const undo = () => {
+    if (!maskDataRef.current || undoStackRef.current.length === 0) return;
     const prev = undoStackRef.current.pop();
-    if (prev && maskDataRef.current) {
+    if (prev) {
+      redoStackRef.current.push(new Uint8Array(maskDataRef.current));
       maskDataRef.current.set(prev);
       renderMaskToCanvas();
+      isDirtyRef.current = true;
+      triggerAutoSaveIfNeeded();
+    }
+  };
+
+  const redo = () => {
+    if (!maskDataRef.current || redoStackRef.current.length === 0) return;
+    const next = redoStackRef.current.pop();
+    if (next) {
+      undoStackRef.current.push(new Uint8Array(maskDataRef.current));
+      maskDataRef.current.set(next);
+      renderMaskToCanvas();
+      isDirtyRef.current = true;
+      triggerAutoSaveIfNeeded();
     }
   };
 
@@ -174,7 +255,9 @@ export default function Painter2D() {
     pushUndo();
     maskDataRef.current.fill(0);
     renderMaskToCanvas();
+    if (autoSaveTimeoutRef.current) clearTimeout(autoSaveTimeoutRef.current);
   };
+
 
   const selectedRelPath = selected?.relPath;
   const selectedCaseId = selected?.caseId;
@@ -229,6 +312,10 @@ export default function Painter2D() {
       const maskArr = new Uint8Array(w * h);
       maskDataRef.current = maskArr;
       undoStackRef.current = [];
+      redoStackRef.current = [];
+      isDirtyRef.current = false;
+      if (autoSaveTimeoutRef.current) clearTimeout(autoSaveTimeoutRef.current);
+
 
       // Try to load existing mask
       try {
@@ -417,7 +504,28 @@ export default function Painter2D() {
     }
 
     renderMaskToCanvas();
-  }, [clearOverlay, isErasing, activeLabel, maskInside, renderMaskToCanvas]);
+    if (autoSave && isDirtyRef.current) {
+      if (autoSaveTimeoutRef.current) clearTimeout(autoSaveTimeoutRef.current);
+      autoSaveTimeoutRef.current = setTimeout(() => {
+        const c = countsRef.current;
+        if (c.bone + c.bme + c.uncertain > 0) {
+          saveMaskInternal({ isAuto: true });
+        }
+      }, 1400);
+    }
+  }, [clearOverlay, isErasing, activeLabel, maskInside, renderMaskToCanvas, autoSave]);
+
+  const triggerAutoSaveIfNeeded = useCallback(() => {
+    if (!autoSave || !selected) return;
+    if (autoSaveTimeoutRef.current) clearTimeout(autoSaveTimeoutRef.current);
+    autoSaveTimeoutRef.current = setTimeout(() => {
+      const c = countsRef.current;
+      const total = c.bone + c.bme + c.uncertain;
+      if (total > 0 && isDirtyRef.current) {
+        saveMaskInternal({ isAuto: true });
+      }
+    }, 1400);
+  }, [autoSave, selected]);
 
   const getCanvasCoords = (e: React.MouseEvent<HTMLCanvasElement>) => {
     const canvas = maskCanvasRef.current;
@@ -504,13 +612,35 @@ export default function Painter2D() {
 
     if (tool === "pencil") {
       commitOutline();
+    } else {
+      triggerAutoSaveIfNeeded();
     }
   };
 
-  const saveMask = async () => {
+  const saveMaskInternal = async ({ isAuto = false } = {}) => {
     if (!selected || !maskDataRef.current || imgDim.w === 0 || imgDim.h === 0) return;
-    setSaving(true);
-    setSavedSuccess(false);
+    const totalPixels = counts.bone + counts.bme + counts.uncertain;
+
+    // Bug fix: if user didn't annotate (0 pixels), never mark as saved & annotated
+    if (totalPixels === 0) {
+      if (!isAuto) {
+        if (selected.hasMask) {
+          if (confirm("This annotation is currently blank. Would you like to delete the saved mask?")) {
+            await deleteMask();
+          }
+        } else {
+          toast.error("Cannot save empty annotation. Please paint bone marrow or edema first.");
+        }
+      }
+      return;
+    }
+
+    if (isAuto) {
+      setAutoSaveStatus("Auto-saving…");
+    } else {
+      setSaving(true);
+      setSavedSuccess(false);
+    }
 
     try {
       const res = await fetch(
@@ -527,28 +657,156 @@ export default function Painter2D() {
       );
 
       if (res.ok) {
-        setSavedSuccess(true);
-        setTimeout(() => setSavedSuccess(false), 2500);
+        const now = new Date();
+        const timeStr = now.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+        isDirtyRef.current = false;
+        if (isAuto) {
+          setAutoSaveStatus(`Auto-saved ${timeStr}`);
+        } else {
+          setSavedSuccess(true);
+          setTimeout(() => setSavedSuccess(false), 2500);
+          toast.success("Mask saved successfully");
+        }
+
         // Refresh local slice state
         setSlices((prev) =>
           prev.map((s) =>
             s.relPath === selected.relPath
-              ? { ...s, hasMask: true, maskSavedAt: new Date().toISOString() }
+              ? { ...s, hasMask: true, maskSavedAt: now.toISOString() }
               : s,
           ),
         );
+        setSelected((prev) =>
+          prev && prev.relPath === selected.relPath
+            ? { ...prev, hasMask: true, maskSavedAt: now.toISOString() }
+            : prev,
+        );
       } else {
-        alert("Failed to save mask");
+        const err = await res.json().catch(() => ({}));
+        if (isAuto) {
+          setAutoSaveStatus("Auto-save failed");
+        } else {
+          toast.error(err.error || "Failed to save mask");
+        }
       }
+    } catch (e) {
+      if (isAuto) setAutoSaveStatus("Auto-save failed");
+      else toast.error(String(e));
     } finally {
       setSaving(false);
     }
   };
 
-  // Keyboard shortcuts
+  const saveMask = async () => {
+    return saveMaskInternal({ isAuto: false });
+  };
+
+  const deleteMask = async () => {
+    if (!selected) return;
+    setDeletingMask(true);
+    try {
+      const res = await fetch(
+        `/api/annotation2d/${selected.caseId}?stem=${encodeURIComponent(selected.stem)}`,
+        { method: "DELETE" },
+      );
+      if (res.ok) {
+        setSlices((prev) =>
+          prev.map((s) =>
+            s.relPath === selected.relPath ? { ...s, hasMask: false, maskSavedAt: null } : s,
+          ),
+        );
+        setSelected((prev) => (prev ? { ...prev, hasMask: false, maskSavedAt: null } : null));
+        clearMask();
+        toast.success("Saved mask removed");
+      } else {
+        toast.error("Failed to delete mask");
+      }
+    } catch (e) {
+      toast.error(String(e));
+    } finally {
+      setDeletingMask(false);
+    }
+  };
+
+  const handleSaveFlag = async (reason: string, note: string) => {
+    if (!selected) return;
+    setFlagSaving(true);
+    try {
+      const res = await fetch("/api/annotation2d/flag", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          caseId: selected.caseId,
+          stem: selected.stem,
+          flagged: true,
+          reason,
+          note,
+        }),
+      });
+      if (res.ok) {
+        const now = new Date().toISOString();
+        setSlices((prev) =>
+          prev.map((s) =>
+            s.relPath === selected.relPath
+              ? { ...s, flagged: true, flagReason: reason, flagNote: note, flaggedAt: now }
+              : s,
+          ),
+        );
+        setSelected((prev) =>
+          prev
+            ? { ...prev, flagged: true, flagReason: reason, flagNote: note, flaggedAt: now }
+            : null,
+        );
+        setFlagModalOpen(false);
+        toast.success("Slice flagged for review");
+      } else {
+        toast.error("Failed to save flag");
+      }
+    } finally {
+      setFlagSaving(false);
+    }
+  };
+
+  const handleRemoveFlag = async () => {
+    if (!selected) return;
+    setFlagSaving(true);
+    try {
+      const res = await fetch("/api/annotation2d/flag", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          caseId: selected.caseId,
+          stem: selected.stem,
+          flagged: false,
+        }),
+      });
+      if (res.ok) {
+        setSlices((prev) =>
+          prev.map((s) =>
+            s.relPath === selected.relPath
+              ? { ...s, flagged: false, flagReason: undefined, flagNote: undefined, flaggedAt: undefined }
+              : s,
+          ),
+        );
+        setSelected((prev) =>
+          prev
+            ? { ...prev, flagged: false, flagReason: undefined, flagNote: undefined, flaggedAt: undefined }
+            : null,
+        );
+        setFlagModalOpen(false);
+        toast.success("Flag removed");
+      } else {
+        toast.error("Failed to remove flag");
+      }
+    } finally {
+      setFlagSaving(false);
+    }
+  };
+
+  // Keyboard shortcuts (including Ctrl+Z Undo, Ctrl+Shift+Z / Ctrl+Y Redo, and Ctrl+S Save)
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (e.target instanceof HTMLInputElement) return;
+      if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return;
       if (e.key === "1") { setActiveLabel(1); setIsErasing(false); }
       else if (e.key === "2") { setActiveLabel(2); setIsErasing(false); }
       else if (e.key === "3") { setActiveLabel(3); setIsErasing(false); }
@@ -556,23 +814,31 @@ export default function Painter2D() {
       else if (e.key.toLowerCase() === "p") { setTool((t) => (t === "brush" ? "pencil" : "brush")); }
       else if (e.key.toLowerCase() === "h") { setTool((t) => (t === "pan" ? "brush" : "pan")); }
       else if (e.key.toLowerCase() === "b") { setTool("brush"); }
-      else if (e.key === "z" && (e.ctrlKey || e.metaKey)) { e.preventDefault(); undo(); }
+      else if (e.key === "z" && (e.ctrlKey || e.metaKey) && !e.shiftKey) { e.preventDefault(); undo(); }
+      else if (((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "y") || ((e.ctrlKey || e.metaKey) && e.shiftKey && e.key.toLowerCase() === "z")) { e.preventDefault(); redo(); }
       else if (e.key === "s" && (e.ctrlKey || e.metaKey)) { e.preventDefault(); saveMask(); }
       else if (e.key === "[") { setBrushSize((b) => Math.max(2, b - 4)); }
       else if (e.key === "]") { setBrushSize((b) => Math.min(60, b + 4)); }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [undo, saveMask]);
+  }, [undo, redo, saveMask]);
+
 
   const filtered = slices.filter((s) => {
     if (filter === "bme" && s.label !== "bme") return false;
     if (filter === "non_bme" && s.label !== "non_bme") return false;
     if (filter === "annotated" && !s.hasMask) return false;
     if (filter === "unannotated" && s.hasMask) return false;
+    if (filter === "flagged" && !s.flagged) return false;
     if (query) {
       const q = query.toLowerCase();
-      return s.caseId.toLowerCase().includes(q) || s.stem.toLowerCase().includes(q);
+      return (
+        s.caseId.toLowerCase().includes(q) ||
+        s.stem.toLowerCase().includes(q) ||
+        (s.flagReason && s.flagReason.toLowerCase().includes(q)) ||
+        (s.flagNote && s.flagNote.toLowerCase().includes(q))
+      );
     }
     return true;
   });
@@ -585,31 +851,59 @@ export default function Painter2D() {
           <Search className="absolute left-2.5 top-2.5 h-4 w-4 text-muted-foreground" />
           <input
             value={query}
-            onChange={(e) => setQuery(e.target.value)}
+            onChange={(e) => {
+              setQuery(e.target.value);
+              try {
+                localStorage.setItem("bme_painter2d_query", e.target.value);
+              } catch { /* ignore */ }
+            }}
             placeholder="Search 2D slices..."
             className="w-full rounded-md border border-border bg-background py-1.5 pl-8 pr-2 text-sm"
           />
         </div>
 
         <div className="flex flex-wrap gap-1 text-xs">
-          {(["all", "bme", "non_bme", "annotated", "unannotated"] as const).map((f) => (
-            <button
-              key={f}
-              onClick={() => setFilter(f)}
-              className={`rounded px-2 py-1 transition ${
-                filter === f
-                  ? "bg-primary text-primary-foreground font-medium"
-                  : "bg-muted text-muted-foreground hover:text-foreground"
-              }`}
-            >
-              {f.replace("_", " ")}
-            </button>
-          ))}
+          {(["all", "bme", "non_bme", "annotated", "unannotated", "flagged"] as const).map((f) => {
+            const count =
+              f === "flagged"
+                ? slices.filter((s) => s.flagged).length
+                : f === "annotated"
+                ? slices.filter((s) => s.hasMask).length
+                : undefined;
+            return (
+              <button
+                key={f}
+                onClick={() => {
+                  setFilter(f);
+                  try {
+                    localStorage.setItem("bme_painter2d_filter", f);
+                  } catch { /* ignore */ }
+                }}
+                className={`inline-flex items-center gap-1 rounded px-2 py-1 transition ${
+                  filter === f
+                    ? f === "flagged"
+                      ? "bg-amber-500 text-white font-medium"
+                      : "bg-primary text-primary-foreground font-medium"
+                    : f === "flagged" && (count ?? 0) > 0
+                    ? "bg-amber-500/15 text-amber-500 hover:bg-amber-500/25"
+                    : "bg-muted text-muted-foreground hover:text-foreground"
+                }`}
+              >
+                {f === "flagged" && <Flag className="h-3 w-3 fill-current" />}
+                <span>{f.replace("_", " ")}</span>
+                {count !== undefined && <span className="opacity-70 text-[10px]">({count})</span>}
+              </button>
+            );
+          })}
         </div>
 
-        <div className="text-xs text-muted-foreground font-medium">
-          Showing {filtered.length} of {slices.length} slices
-          ({slices.filter((s) => s.hasMask).length} annotated)
+        <div className="text-xs text-muted-foreground font-medium flex items-center justify-between">
+          <span>
+            {filtered.length} of {slices.length} slices
+          </span>
+          <span className="text-[11px] opacity-75">
+            {slices.filter((s) => s.hasMask).length} annotated
+          </span>
         </div>
 
         <div className="flex-1 overflow-y-auto space-y-1 pr-1">
@@ -626,7 +920,12 @@ export default function Painter2D() {
               return (
                 <button
                   key={s.relPath}
-                  onClick={() => setSelected(s)}
+                  onClick={() => {
+                    setSelected(s);
+                    try {
+                      localStorage.setItem("bme_painter2d_selected", `${s.caseId}/${s.stem}`);
+                    } catch { /* ignore */ }
+                  }}
                   onMouseEnter={(e) => {
                     setHoveredSlice(s);
                     setHoverPos({ x: e.clientX, y: e.clientY });
@@ -650,6 +949,11 @@ export default function Painter2D() {
                     </div>
                   </div>
                   <div className="flex items-center gap-1.5 shrink-0">
+                    {s.flagged && (
+                      <span title={`Flagged: ${s.flagReason || "Not Sure"}`}>
+                        <Flag className="h-3.5 w-3.5 fill-amber-400 text-amber-400 shrink-0" />
+                      </span>
+                    )}
                     <span
                       className={`text-[9px] px-1.5 py-0.5 rounded font-medium ${
                         s.label === "bme" ? "bg-red-500/15 text-red-400" : "bg-blue-500/15 text-blue-400"
@@ -667,6 +971,7 @@ export default function Painter2D() {
           )}
         </div>
       </div>
+
 
       {/* Right side: 2D Canvas Editor */}
       <div className="flex flex-col gap-2 rounded-lg border border-border bg-card p-3 h-full overflow-hidden">
@@ -801,21 +1106,103 @@ export default function Painter2D() {
               </button>
             </div>
 
+            {/* Undo (Ctrl+Z) & Redo (Ctrl+Shift+Z / Ctrl+Y) */}
+            <div className="inline-flex overflow-hidden rounded-md border border-border">
+              <button
+                type="button"
+                onClick={undo}
+                title="Undo (Ctrl+Z)"
+                className="inline-flex items-center gap-1 bg-background px-2 py-1 text-xs text-muted-foreground hover:text-foreground hover:bg-muted transition"
+              >
+                <RotateCcw className="h-3 w-3" /> Undo
+              </button>
+              <button
+                type="button"
+                onClick={redo}
+                title="Redo (Ctrl+Shift+Z or Ctrl+Y)"
+                className="inline-flex items-center gap-1 border-l border-border bg-background px-2 py-1 text-xs text-muted-foreground hover:text-foreground hover:bg-muted transition"
+              >
+                <RotateCw className="h-3 w-3" /> Redo
+              </button>
+            </div>
+
+            {/* Flag Slice button */}
             <button
-              onClick={undo}
-              title="Undo (Ctrl+Z)"
-              className="inline-flex items-center gap-1 rounded border border-border bg-background px-2 py-1 text-xs text-muted-foreground hover:text-foreground"
+              type="button"
+              onClick={() => {
+                if (selected) {
+                  setFlagReason(selected.flagReason || "Not Sure");
+                  setFlagNote(selected.flagNote || "");
+                  setFlagModalOpen(true);
+                }
+              }}
+              title={
+                selected?.flagged
+                  ? `Flagged: ${selected.flagReason || "Not Sure"}`
+                  : "Flag this annotation for review (e.g. Not Sure)"
+              }
+              className={`inline-flex items-center gap-1.5 rounded-md px-2.5 py-1 text-xs font-medium border transition ${
+                selected?.flagged
+                  ? "border-amber-500/50 bg-amber-500/15 text-amber-500 hover:bg-amber-500/25 ring-1 ring-amber-500/30"
+                  : "border-border bg-background text-muted-foreground hover:text-foreground"
+              }`}
             >
-              <RotateCcw className="h-3 w-3" /> Undo
+              <Flag className={`h-3.5 w-3.5 ${selected?.flagged ? "fill-amber-500 text-amber-500" : ""}`} />
+              <span>{selected?.flagged ? "Flagged" : "Flag"}</span>
             </button>
+
+            {/* Auto Save Toggle & Status */}
+            <div className="flex items-center gap-1.5 border-l border-border pl-2">
+              <label
+                className="flex items-center gap-1.5 text-xs text-muted-foreground cursor-pointer select-none"
+                title="Auto-save annotation mask after each stroke/edit"
+              >
+                <input
+                  type="checkbox"
+                  checked={autoSave}
+                  onChange={(e) => {
+                    setAutoSave(e.target.checked);
+                    try {
+                      localStorage.setItem("bme_painter2d_autosave", e.target.checked ? "true" : "false");
+                    } catch { /* ignore */ }
+                    if (e.target.checked) toast.success("Auto Save enabled");
+                    else toast.info("Auto Save disabled");
+                  }}
+                  className="rounded border-border accent-primary h-3.5 w-3.5"
+                />
+                <span className="font-medium">Auto Save</span>
+              </label>
+              {autoSaveStatus && (
+                <span className="text-[10px] text-muted-foreground font-mono truncate max-w-[130px]">
+                  {autoSaveStatus}
+                </span>
+              )}
+            </div>
 
             <button
               onClick={clearMask}
-              title="Clear Mask"
+              title="Clear current canvas mask"
               className="inline-flex items-center gap-1 rounded border border-border bg-background px-2 py-1 text-xs text-muted-foreground hover:text-destructive"
             >
               <Trash2 className="h-3 w-3" />
             </button>
+
+            {selected?.hasMask && (
+              <button
+                type="button"
+                onClick={() => {
+                  if (confirm(`Delete saved mask for ${selected.caseId} (${selected.stem})?`)) {
+                    deleteMask();
+                  }
+                }}
+                disabled={deletingMask}
+                title="Delete saved mask permanently from server"
+                className="inline-flex items-center gap-1 rounded border border-destructive/40 bg-destructive/10 px-2 py-1 text-xs text-destructive hover:bg-destructive/20 transition"
+              >
+                <XCircle className="h-3 w-3" />
+                <span className="hidden sm:inline">Delete Mask</span>
+              </button>
+            )}
 
             <button
               onClick={saveMask}
@@ -837,6 +1224,30 @@ export default function Painter2D() {
             </button>
           </div>
         </div>
+
+        {/* Flagged Slice Banner */}
+        {selected?.flagged && (
+          <div className="flex items-center justify-between rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-1.5 text-xs text-amber-400">
+            <div className="flex items-center gap-2">
+              <Flag className="h-3.5 w-3.5 fill-amber-400 text-amber-400 shrink-0" />
+              <span>
+                <strong>Flagged for review:</strong> {selected.flagReason || "Not Sure"}
+                {selected.flagNote ? ` — "${selected.flagNote}"` : ""}
+              </span>
+            </div>
+            <button
+              type="button"
+              onClick={() => {
+                setFlagReason(selected.flagReason || "Not Sure");
+                setFlagNote(selected.flagNote || "");
+                setFlagModalOpen(true);
+              }}
+              className="rounded bg-amber-500/20 px-2 py-0.5 text-[11px] font-medium text-amber-300 hover:bg-amber-500/30 transition"
+            >
+              Edit Flag
+            </button>
+          </div>
+        )}
 
         {/* Info bar */}
         {selected && (
@@ -927,6 +1338,101 @@ export default function Painter2D() {
         </div>
       </div>
 
+      {/* Flag Modal Dialog */}
+      {flagModalOpen && selected && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-xs p-4">
+          <div className="w-full max-w-md rounded-xl border border-border bg-card p-5 shadow-2xl space-y-4">
+            <div className="flex items-center justify-between border-b border-border pb-3">
+              <div className="flex items-center gap-2">
+                <Flag className="h-4 w-4 text-amber-500 fill-amber-500" />
+                <h3 className="font-semibold text-sm">Flag Slice for Review</h3>
+              </div>
+              <button
+                type="button"
+                onClick={() => setFlagModalOpen(false)}
+                className="rounded p-1 text-muted-foreground hover:text-foreground"
+              >
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+
+            <div className="text-xs text-muted-foreground">
+              Slice: <strong className="font-mono text-foreground">{selected.caseId}</strong> / {selected.stem}.png
+            </div>
+
+            <div className="space-y-2">
+              <label className="block text-xs font-semibold text-muted-foreground">Reason for flagging:</label>
+              <div className="grid grid-cols-2 gap-2">
+                {[
+                  "Not Sure",
+                  "Questionable Edema",
+                  "Needs Expert Review",
+                  "Image Artifact / Quality",
+                ].map((r) => (
+                  <button
+                    key={r}
+                    type="button"
+                    onClick={() => setFlagReason(r)}
+                    className={`rounded-md border p-2 text-left text-xs transition ${
+                      flagReason === r
+                        ? "border-amber-500 bg-amber-500/15 text-amber-500 font-semibold"
+                        : "border-border hover:bg-muted text-muted-foreground"
+                    }`}
+                  >
+                    {r}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            <div className="space-y-2">
+              <label className="block text-xs font-semibold text-muted-foreground">Optional Note / Observation:</label>
+              <textarea
+                value={flagNote}
+                onChange={(e) => setFlagNote(e.target.value)}
+                placeholder="e.g. Unclear edema boundary along lateral condyle..."
+                rows={3}
+                className="w-full rounded-md border border-border bg-background p-2 text-xs focus:border-primary focus:outline-hidden"
+              />
+            </div>
+
+            <div className="flex items-center justify-between pt-2 border-t border-border">
+              {selected.flagged ? (
+                <button
+                  type="button"
+                  onClick={handleRemoveFlag}
+                  disabled={flagSaving}
+                  className="rounded-md border border-destructive/40 bg-destructive/10 px-3 py-1.5 text-xs font-medium text-destructive hover:bg-destructive/20 transition"
+                >
+                  Remove Flag
+                </button>
+              ) : (
+                <div />
+              )}
+
+              <div className="flex gap-2">
+                <button
+                  type="button"
+                  onClick={() => setFlagModalOpen(false)}
+                  className="rounded-md border border-border px-3 py-1.5 text-xs text-muted-foreground hover:bg-muted"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  onClick={() => handleSaveFlag(flagReason, flagNote)}
+                  disabled={flagSaving}
+                  className="inline-flex items-center gap-1.5 rounded-md bg-amber-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-amber-700 transition"
+                >
+                  {flagSaving ? <Loader2 className="h-3 w-3 animate-spin" /> : <Check className="h-3 w-3" />}
+                  Save Flag
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Floating Info Tooltip on Slice Hover */}
       {hoveredSlice && (
         <div
@@ -979,3 +1485,4 @@ export default function Painter2D() {
     </div>
   );
 }
+

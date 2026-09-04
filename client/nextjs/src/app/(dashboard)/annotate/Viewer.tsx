@@ -522,7 +522,13 @@ export default function Viewer({ caseId, onSaved }: { caseId: string; onSaved?: 
   // ---- save ------------------------------------------------------------
   const save = async () => {
     if (!labels) return;
+    const total = counts[0] + counts[1] + counts[2];
+    if (total === 0) {
+      setStatus("Cannot save empty annotation: No voxels annotated yet.");
+      return;
+    }
     setSaving(true);
+
     try {
       const me = session?.user?.name || session?.user?.email || "unknown";
       const res = await fetch(`/api/annotation/${caseId}?by=${encodeURIComponent(me)}`, {

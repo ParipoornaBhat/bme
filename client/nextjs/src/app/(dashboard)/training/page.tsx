@@ -101,6 +101,40 @@ export default function TrainingPage() {
   const [segBusy, setSegBusy] = useState(false);
   const logRef = useRef<HTMLPreElement>(null);
 
+  // Restore training tab and options from localStorage
+  useEffect(() => {
+    try {
+      const savedTab = localStorage.getItem("bme_training_tab") as "cls" | "seg" | null;
+      if (savedTab === "cls" || savedTab === "seg") setTab(savedTab);
+      const savedArch = localStorage.getItem("bme_training_arch");
+      if (savedArch) setArch(savedArch);
+      const savedFolds = localStorage.getItem("bme_training_folds");
+      if (savedFolds) setFolds(Number(savedFolds));
+      const savedEpochs = localStorage.getItem("bme_training_epochs");
+      if (savedEpochs) setEpochs(Number(savedEpochs));
+      const savedFreeze = localStorage.getItem("bme_training_freeze");
+      if (savedFreeze !== null) setFreeze(savedFreeze);
+      const savedPatience = localStorage.getItem("bme_training_patience");
+      if (savedPatience !== null) setPatience(savedPatience);
+      const savedHim = localStorage.getItem("bme_training_him");
+      if (savedHim !== null) setHim(savedHim === "true");
+      const savedTta = localStorage.getItem("bme_training_tta");
+      if (savedTta !== null) setTta(savedTta === "true");
+      const savedSegEpochs = localStorage.getItem("bme_training_seg_epochs");
+      if (savedSegEpochs) setSegEpochs(Number(savedSegEpochs));
+      const savedSegFolds = localStorage.getItem("bme_training_seg_folds");
+      if (savedSegFolds) setSegFolds(Number(savedSegFolds));
+      const savedSegBatch = localStorage.getItem("bme_training_seg_batch");
+      if (savedSegBatch) setSegBatch(Number(savedSegBatch));
+    } catch { /* ignore */ }
+  }, []);
+
+  const handleTabChange = (newTab: "cls" | "seg") => {
+    setTab(newTab);
+    try { localStorage.setItem("bme_training_tab", newTab); } catch { /* ignore */ }
+  };
+
+
   const load = useCallback(async () => {
     const res = await fetch("/api/training", { cache: "no-store" });
     if (!res.ok) return;
@@ -215,7 +249,7 @@ export default function TrainingPage() {
           ["cls", "1. Detection (BME Present / Absent)", Layers],
           ["seg", "2. Segmentation (2D U-Net Mark Edema)", Target],
         ] as const).map(([id, label, Icon]) => (
-          <button key={id} onClick={() => setTab(id)}
+          <button key={id} onClick={() => handleTabChange(id)}
             className={`-mb-px inline-flex items-center gap-2 border-b-2 px-4 py-2 text-sm font-medium transition ${
               tab === id ? "border-primary text-foreground"
                 : "border-transparent text-muted-foreground hover:text-foreground"}`}>

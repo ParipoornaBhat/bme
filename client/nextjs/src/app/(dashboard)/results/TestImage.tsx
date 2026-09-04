@@ -181,6 +181,31 @@ export default function TestImage() {
     }
   };
 
+  // Restore previous test image results from localStorage across tab switches
+  useEffect(() => {
+    try {
+      const saved = localStorage.getItem("bme_test_image_result");
+      if (saved) {
+        setResult(JSON.parse(saved));
+      }
+    } catch {
+      // Local storage unreadable or unavailable
+    }
+  }, []);
+
+  const updateResult = useCallback((newResult: Result | null) => {
+    setResult(newResult);
+    try {
+      if (newResult) {
+        localStorage.setItem("bme_test_image_result", JSON.stringify(newResult));
+      } else {
+        localStorage.removeItem("bme_test_image_result");
+      }
+    } catch (e) {
+      console.warn("Failed to persist test result to localStorage", e);
+    }
+  }, []);
+
   const loadStatus = useCallback(async () => {
     try {
       const r = await fetch("/api/predict", { cache: "no-store" });
@@ -191,21 +216,24 @@ export default function TestImage() {
   useEffect(() => { loadStatus(); }, [loadStatus]);
 
   const run = useCallback(async (file: File) => {
-    setBusy(true); setError(null); setResult(null);
+    setBusy(true); setError(null);
     try {
       const fd = new FormData();
       fd.append("image", file);
       const r = await fetch("/api/predict", { method: "POST", body: fd });
       const j = await r.json();
-      if (!r.ok || j.error) setError(j.detail ? `${j.error}\n\n${j.detail}` : (j.error ?? "inference failed"));
-      else setResult(j);
+      if (!r.ok || j.error) {
+        setError(j.detail ? `${j.error}\n\n${j.detail}` : (j.error ?? "inference failed"));
+      } else {
+        updateResult(j);
+      }
     } catch (e) {
       setError(String(e));
     } finally {
       setBusy(false);
       loadStatus();
     }
-  }, [loadStatus]);
+  }, [loadStatus, updateResult]);
 
   const det = result?.detection;
   const seg = result?.segmentation;
@@ -219,13 +247,14 @@ export default function TestImage() {
         </span>
         {result && (
           <button
-            onClick={() => { setResult(null); setError(null); }}
+            onClick={() => { updateResult(null); setError(null); }}
             className="inline-flex items-center gap-1.5 rounded-md border border-border px-3 py-1.5 text-xs hover:bg-accent"
           >
             <X className="h-3.5 w-3.5" /> Clear
           </button>
         )}
       </div>
+
 
       <p className="mb-3 text-xs text-muted-foreground">
         Runs the saved checkpoints. Nothing is trained by this button.

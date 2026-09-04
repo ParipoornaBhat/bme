@@ -119,6 +119,19 @@ export async function POST(
     if (body.width && body.height && body.pixels) {
       // Direct array of uint8 values (0, 1, 2, 3)
       const pixels = new Uint8Array(body.pixels);
+      let hasNonZero = false;
+      for (let i = 0; i < pixels.length; i++) {
+        if (pixels[i] !== 0) {
+          hasNonZero = true;
+          break;
+        }
+      }
+      if (!hasNonZero && req.nextUrl.searchParams.get("allowEmpty") !== "true") {
+        return NextResponse.json(
+          { error: "Cannot save empty annotation. Mask has no painted pixels." },
+          { status: 400 },
+        );
+      }
       const pngBuf = encodeGrayscalePng(body.width, body.height, pixels);
       fs.writeFileSync(maskPath, pngBuf);
     } else if (body.dataUrl) {
@@ -155,3 +168,29 @@ export async function POST(
     path: `data/annotations2d/${caseId}/${stem}.mask.png`,
   });
 }
+
+export async function DELETE(
+  req: NextRequest,
+  { params }: { params: Promise<{ caseId: string }> },
+) {
+  const { caseId } = await params;
+  const stem = req.nextUrl.searchParams.get("stem");
+
+  if (!stem) {
+    return NextResponse.json({ error: "missing stem query param" }, { status: 400 });
+  }
+
+  const root = projectRoot();
+  const maskPath = path.join(root, "data", "annotations2d", caseId, `${stem}.mask.png`);
+
+  if (fs.existsSync(maskPath)) {
+    try {
+      fs.unlinkSync(maskPath);
+    } catch (e) {
+      return NextResponse.json({ error: `failed to delete mask: ${e}` }, { status: 500 });
+    }
+  }
+
+  return NextResponse.json({ ok: true, deleted: true });
+}
+

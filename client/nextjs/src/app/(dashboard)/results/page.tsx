@@ -85,6 +85,24 @@ export default function ResultsPage() {
   const [camBusy, setCamBusy] = useState(false);
   const [camError, setCamError] = useState<string | null>(null);
 
+  // Hydrate results tab from localStorage
+  useEffect(() => {
+    try {
+      const savedTab = localStorage.getItem("bme_results_tab") as "2d" | "3d" | null;
+      if (savedTab === "2d" || savedTab === "3d") {
+        setTab(savedTab);
+      }
+    } catch { /* ignore */ }
+  }, []);
+
+  const handleTabChange = (newTab: "2d" | "3d") => {
+    setTab(newTab);
+    try {
+      localStorage.setItem("bme_results_tab", newTab);
+    } catch { /* ignore */ }
+  };
+
+
   const load = async () => {
     setLoading(true);
     try {
@@ -152,7 +170,7 @@ export default function ResultsPage() {
         ] as const).map(([id, label, Icon]) => (
           <button
             key={id}
-            onClick={() => setTab(id)}
+            onClick={() => handleTabChange(id)}
             className={`-mb-px inline-flex items-center gap-2 border-b-2 px-4 py-2.5 text-sm font-medium transition ${
               tab === id
                 ? "border-primary text-foreground"

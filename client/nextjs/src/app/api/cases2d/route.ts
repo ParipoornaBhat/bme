@@ -15,6 +15,10 @@ export type Case2DSlice = {
   stem: string;
   hasMask: boolean;
   maskSavedAt: string | null;
+  flagged?: boolean;
+  flagReason?: string;
+  flagNote?: string;
+  flaggedAt?: string;
 };
 
 export async function GET(req: NextRequest) {
@@ -49,6 +53,16 @@ export async function GET(req: NextRequest) {
   }
 
   const ann2dDir = path.join(root, "data", "annotations2d");
+  const flagsPath = path.join(root, "data", "annotations2d_flags.json");
+  let flagsMap: Record<string, { flagged: boolean; reason?: string; note?: string; flaggedAt?: string }> = {};
+  if (fs.existsSync(flagsPath)) {
+    try {
+      flagsMap = JSON.parse(fs.readFileSync(flagsPath, "utf8"));
+    } catch {
+      flagsMap = {};
+    }
+  }
+
   const slices: Case2DSlice[] = [];
 
   for (let i = 1; i < lines.length; i++) {
@@ -67,6 +81,9 @@ export async function GET(req: NextRequest) {
       }
     }
 
+    const flagKey = `${caseId}/${stem}`;
+    const flagData = flagsMap[flagKey];
+
     slices.push({
       caseId,
       label: label as "bme" | "non_bme",
@@ -74,6 +91,10 @@ export async function GET(req: NextRequest) {
       stem,
       hasMask,
       maskSavedAt,
+      flagged: Boolean(flagData?.flagged),
+      flagReason: flagData?.reason,
+      flagNote: flagData?.note,
+      flaggedAt: flagData?.flaggedAt,
     });
   }
 
@@ -81,6 +102,7 @@ export async function GET(req: NextRequest) {
     slices,
     total: slices.length,
     annotated: slices.filter((s) => s.hasMask).length,
+    flagged: slices.filter((s) => s.flagged).length,
   });
 }
 

@@ -31,6 +31,49 @@ export default function AnnotatePage() {
   const [ledger, setLedger] = useState<Record<string, { annotator: string | null; at: string; localFile: boolean }>>({});
   const [needFrom, setNeedFrom] = useState<string[]>([]);
 
+  // Restore tab and filters from localStorage
+  useEffect(() => {
+    try {
+      const savedTab = localStorage.getItem("bme_annotate_tab") as "2d" | "3d" | null;
+      if (savedTab === "2d" || savedTab === "3d") setTab(savedTab);
+      const savedSelected = localStorage.getItem("bme_annotate_3d_selected");
+      if (savedSelected) setSelected(savedSelected);
+      const savedWho = localStorage.getItem("bme_annotate_3d_who");
+      if (savedWho) setWho(savedWho);
+      const savedQ = localStorage.getItem("bme_annotate_3d_q");
+      if (savedQ) setQ(savedQ);
+    } catch { /* ignore */ }
+  }, []);
+
+  const handleTabChange = (newTab: "2d" | "3d") => {
+    setTab(newTab);
+    try {
+      localStorage.setItem("bme_annotate_tab", newTab);
+    } catch { /* ignore */ }
+  };
+
+  const handleSelectCase = (caseId: string) => {
+    setSelected(caseId);
+    try {
+      localStorage.setItem("bme_annotate_3d_selected", caseId);
+    } catch { /* ignore */ }
+  };
+
+  const handleWhoChange = (val: string) => {
+    setWho(val);
+    try {
+      localStorage.setItem("bme_annotate_3d_who", val);
+    } catch { /* ignore */ }
+  };
+
+  const handleQChange = (val: string) => {
+    setQ(val);
+    try {
+      localStorage.setItem("bme_annotate_3d_q", val);
+    } catch { /* ignore */ }
+  };
+
+
   const load = async () => {
     const res = await fetch("/api/cases", { cache: "no-store" });
     if (!res.ok) return;
@@ -80,7 +123,7 @@ export default function AnnotatePage() {
             ] as const).map(([id, label, Icon]) => (
               <button
                 key={id}
-                onClick={() => setTab(id)}
+                onClick={() => handleTabChange(id)}
                 className={`inline-flex items-center gap-1.5 rounded-md px-3 py-1 text-xs font-medium transition ${
                   tab === id
                     ? "bg-primary text-primary-foreground font-semibold"
@@ -121,7 +164,7 @@ export default function AnnotatePage() {
                 <Search className="absolute left-2.5 top-2.5 h-4 w-4 text-muted-foreground" />
                 <input
                   value={q}
-                  onChange={(e) => setQ(e.target.value)}
+                  onChange={(e) => handleQChange(e.target.value)}
                   placeholder="Find case"
                   className="w-full rounded-md border border-border bg-background py-2 pl-8 pr-2 text-sm"
                 />
@@ -132,7 +175,7 @@ export default function AnnotatePage() {
               <Users className="absolute left-2.5 top-2.5 h-4 w-4 text-muted-foreground" />
               <select
                 value={who}
-                onChange={(e) => setWho(e.target.value)}
+                onChange={(e) => handleWhoChange(e.target.value)}
                 className="w-full rounded-md border border-border bg-background py-2 pl-8 pr-2 text-sm"
               >
                 <option value="">Everyone&apos;s cases</option>
@@ -147,7 +190,7 @@ export default function AnnotatePage() {
               {visible.map((c) => (
                 <button
                   key={c.id}
-                  onClick={() => setSelected(c.id)}
+                  onClick={() => handleSelectCase(c.id)}
                   title={c.sourceName ?? undefined}
                   className={`flex w-full items-center gap-2 rounded-md px-2.5 py-2 text-left text-sm transition ${
                     selected === c.id ? "bg-accent" : "hover:bg-accent/50"
