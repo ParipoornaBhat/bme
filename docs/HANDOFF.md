@@ -1,292 +1,172 @@
-# HANDOFF — importing the outside 2D set
+# HANDOFF — the 2D track
 
-Written 2026-09-04. Read [STATUS.md](STATUS.md) first; this file covers one
-thing only: the 2D image set that came from a teammate, and what is still open
-on it.
+Rewritten 2026-09-04. The earlier version of this file described an import that
+has since been undone; ignore anything you remember from it.
 
----
-
-## What arrived
-
-`D:\Final yr Prj\Annotated\labled_data_bme` — **outside the repo, and it stays
-outside.** Three folders, 381 image files, 120 MB:
-
-| folder | files | what it is |
-|---|---|---|
-| `annotated/` | 156 png | BME slices, marked |
-| `non-annotated/` | 156 png (2 jpeg) | BME slices, not marked |
-| `non BME/` | 69 (50 png, 17 jpeg, 2 jpg) | healthy slices |
-
-Strictly 2D. Nothing here feeds the 3D pipeline.
+Read [STATUS.md](STATUS.md) first. This file covers the 2D track only. The plan
+for the missing piece is [PLAN_2D_ANNOTATION.md](PLAN_2D_ANNOTATION.md).
 
 ---
 
-## The two questions you asked, answered
+## The decision that shapes everything here
 
-### 1. "The filenames can be different from mine"
+**2D uses only the curated 2D images. Nothing derived from the 3D volumes.**
 
-They are, and it does not matter — nothing matches on filename. Matching is by
-**pixel fingerprint**: a 64-bit gradient hash of the grayscale image, which
-survives re-encoding, rescaling, and renaming.
+Slices cut from a DICOM series are a different distribution — one patient across
+twenty near-identical slices, a different exporter, a different window. Mixing
+them in inflated the training set with correlated copies while the case count
+barely moved. They are out of the 2D dataset and do not come back.
 
-### 2. "Not sure if I have the same images — it could duplicate, even in non BME"
-
-**It would not have.** Measured against all 1,936 images already in
-`data/slices2d`:
-
-| | exact match | within 8 bits of 64 | median distance |
-|---|---|---|---|
-| incoming BME (156) | 0 | 0 | 14 / 64 |
-| incoming non-BME (69) | 0 | 0 | 15 / 64 |
-
-Zero overlap, and not marginally — the nearest existing image is ~14 bits away,
-which is nowhere near a duplicate. There are also **no duplicates inside the
-batch itself**. So the whole set is new material.
-
-That is a useful answer but not a load-bearing one: the check runs on every
-import regardless, so a future batch that *does* overlap gets caught the same
-way.
+The 3D track is untouched: `data/nifti/` (107 cases), `data/raw/`,
+`data/annotations/`.
 
 ---
 
-## What I got wrong first, and the correction
+## What the 2D dataset is now
 
-My first pass looked for **red pen circles**, because that is how the earlier
-`BME_ALL_IMAGES` set was marked. It reported 1 of 134 pairs as marked, which
-did not match "some are annotated".
+Source of truth is the hand-curated root folders:
 
-The reason: **every file in both folders has ~34,300 red pixels** — a near
-constant. That is a burned-in overlay from the viewer these were exported from,
-not an annotation. My detector was measuring the watermark.
+```
+BME/2d/                25 images, 18 patients
+BME/2d_annotated/      EMPTY
+Non BME/2d/            69 images, 69 patients
+Non BME/2d_annotated/  EMPTY
+```
 
-The actual signal is **green**:
-
-| | total green px | total red px |
-|---|---|---|
-| `annotated/` | 109,394 | 3,669,720 |
-| `non-annotated/` | 217 | 3,566,716 |
-
-Red is identical across both folders. Green is ~500x higher in `annotated/`.
-**The marks are green, not red.**
-
-**Confirmed on the real run.** Testing green selected **134 of 156** files as
-marked — exactly the 134 that have a matching partner in `non-annotated/`, which
-is an independent check falling out of a different code path. Red selected 1.
-
----
-
-## The blocker you need to look at first
-
-**These PNGs appear to have a burned-in coloured overlay from the source
-viewer.** Roughly 34,300 coloured pixels in a fixed position in every file.
-
-I did not get to check **what that overlay says.** Viewer exports commonly burn
-in a patient name, MRN, date, and institution along an edge. If it does:
-
-- storing them under `data/` is fine — `data/` is gitignored, nothing leaves the
-  machine;
-- **putting any of these images in a report, a slide, an Artifact, or a commit
-  is a PHI disclosure.** The existing de-identification work covered DICOM
-  headers and filenames. It did **not** touch pixels.
-
-**Do this before any of these images appear in the presentation:** open three or
-four of them and look at the edges. If there is text, they need a crop or mask
-step, and the same question applies to whatever is already in
-`data/slices2d/bme` from `BME_ALL_IMAGES`.
-
-I am flagging this rather than deciding it. Where the crop boundary goes is a
-call about patient data, and per the project rules that is not mine to make
-alone.
-
----
-
-## What was built
-
-### `ml/scripts/import_2d.py`
+[build_2d.py](../ml/scripts/build_2d.py) turns those into `data/slices2d/`.
+`data/` is disposable — delete it and re-run:
 
 ```bash
-python ml/scripts/import_2d.py "D:/Final yr Prj/Annotated/labled_data_bme"
+python ml/scripts/build_2d.py "D:/Final yr Prj/bme" --apply
 ```
 
-**Dry run by default** — prints every copy it would make and writes nothing.
-Add `--apply` to actually copy. The source folder is only ever read; nothing is
-moved, renamed, or deleted there.
+**94 images, 87 patients, 18 BME vs 69 non-BME (3.8:1).**
 
-Three gates, each of which drops a file rather than guessing:
+### Two things done to `BME/2d` on 2026-09-04
 
-1. **Not already here** — pixel fingerprint, checked against `data/slices2d`
-   *and* against files already accepted earlier in the same run.
-2. **Has a patient** — grouping is by the leading number where the filename has
-   one, and by the name itself where it does not. This matters: without a case
-   id, slices from one patient would straddle a train/val split and every metric
-   would be inflated. It also matters that the fallback exists — 51 of the 225
-   files are named by person alone, and an earlier version that required a
-   leading number silently dropped every one of them.
-3. **Filename does not travel** — originals carry patient names, so copies are
-   renamed to a pseudonymous id and the mapping goes to
-   `data/import_map_2d.csv`. **That file is PHI.** Gitignored, never committed,
-   never pasted, never off this machine.
+**Renamed.** The filenames were patient names, which is PHI exactly as much as
+the pixels are. Now `BME-2D-<case>_s<k>`. The id -> name map went to
+`Annotated/deid_map_2d.csv` — **outside the repo**, and it stays there.
+`Non BME/2d` was already pseudonymous and was left alone.
 
-Imported ids are prefixed `E` (external) — `EBME-###`, `ENBME-###` — so they
-cannot collide with locally converted cases and a bad batch can be withdrawn by
-prefix alone.
+**Deduplicated.** 52 files were 25 unique images; the rest were pixel-identical
+copies, now in `BME/2d/_duplicates/`, moved rather than deleted. Left in, the
+same image would have landed in both train and val.
 
-### Where things land
-
-```
-data/slices2d/bme/EBME-###_s###.png       from non-annotated/
-data/slices2d/non_bme/ENBME-###_s###.png  from non BME/
-data/refmarks2d/EBME-###_mark.png         from annotated/
-data/slices2d/index.csv                   appended
-data/import_map_2d.csv                    id -> original name  [PHI]
-```
-
-**`data/refmarks2d/` is reference, not labels.** A circle drawn over a region is
-not a voxel-accurate mask; training a segmenter on one teaches it to predict
-circles. Those images are there so you can see what the marker saw while you
-annotate properly in the annotate page, on the clean image. Nothing in the
-pipeline reads that folder.
+A related bug is worth knowing because it is easy to reintroduce: `case_id()`
+stripped `_001` but not `_s000`, so every file counted as its own patient — 25
+instead of 18. Patient grouping quietly degrading into per-file grouping is the
+single easiest way to publish a meaningless number.
 
 ---
 
-## Status of the import: DONE
+## What was deleted, and why it is safe
 
-Ran with `--apply`. Nothing was skipped and nothing was lost.
-
-```
-non-annotated -> bme       156 new, 132 cases
-non BME       -> non_bme    69 new,  69 cases
-annotated     -> refmarks  134 of 156 carry a mark
-
-skipped: 0 already in repo, 0 duplicated inside the batch, 0 unreadable
-copied 225 images and 134 reference marks
-```
-
-| | before | after |
+| removed | was | why safe |
 |---|---|---|
-| `data/slices2d/bme` | 864 | **1,020** |
-| `data/slices2d/non_bme` | 1,111 | **1,180** |
-| `data/refmarks2d` | — | **134** |
-| `index.csv` rows | 1,975 | **2,200** |
+| `data/slices2d_him` | 1,976 files, HIM experiment | built from 3D slices; regenerable via `make_2d.py --him`; its result is already recorded — HIM made AUC **worse**, 0.604 vs 0.658 |
+| `data/results2d` | metrics from the old 1,975-slice set | measured a dataset that no longer exists |
+| `data/seg2d_ext`, old `data/slices2d` | intermediate imports | rebuilt by `build_2d.py` |
 
-The source folder was not modified. Re-running is safe: every imported image is
-now fingerprinted on the next pass and skipped as a duplicate.
+Kept: `nifti`, `raw`, `annotations`. All 3D.
 
-### One thing that was in the repo root
+---
 
-`labled_data_bme/` — a 120 MB, 381-file copy of the whole batch — was sitting
-**untracked in the repo root**, not covered by any ignore rule. I did not create
-it; the importer only ever writes under `data/`.
+## Sharing with the team — do NOT send the whole `data/` folder
 
-It is one `git add .` away from committing patient images. I have added
-`/labled_data_bme/` and `/Annotated/` to `.gitignore` so that cannot happen, and
-left the files alone. **Delete it yourself once you are satisfied it is a
-duplicate of `D:\Final yr Prj\Annotated\labled_data_bme` — it is redundant now
-that the import is done, but erasing data is your call, not mine.**
+`data/` contains three files that map pseudonymous ids back to patient names:
+
+```
+data/deid_map.csv          source_archive  = patient-named zip
+data/rename_map.csv        old_name
+data/image_rename_map.csv  old_name
+```
+
+Sending `data/` wholesale hands over the de-identification key. That defeats
+every renaming step in this project in one action.
+
+**Send `data/slices2d/` only** — images plus `index.csv`, all pseudonymous. That
+is enough to train the classifier and is all a teammate needs for 2D. It is also
+about 30 MB rather than the 1.1 GB `data/nifti/` adds.
+
+Two further points:
+
+- `data/` is build output, not source. A teammate who has the repo and the root
+  `BME/` and `Non BME/` folders can regenerate `data/slices2d` themselves with
+  `build_2d.py`, which is better than shipping images around.
+- **It is still patient imaging.** Pseudonymous is not anonymous. It goes to
+  teammates on this project, on local machines — not to a cloud drive, not to a
+  chat app, not into the report without checking the images for burned-in text
+  first. `data/deid_map.csv` records `burned_in=NO` for 74 of 107 3D cases and
+  **blank for 34**, meaning nobody checked those. The 2D exports have not been
+  checked at all.
+
+---
+
+## Where the two tracks stand
+
+### Classifier — runs today
+
+`/training` -> "Detection (BME Present / Absent)". Everything is wired:
+`--arch`, `--freeze`, `--patience` reach `train_2d.py` correctly.
+
+**But 18 BME patients is very few.** At 5 folds that is 3-4 positives per
+validation fold. Run it to establish the pipeline; expect fold-to-fold spread
+wider than any effect being measured, and report it with the n stated rather
+than as a headline number.
+
+The old figure, for reference and no longer comparable because the dataset
+changed entirely: case-level AUC 0.658, F1 0.589.
+
+### Segmenter — blocked, and not on annotation effort
+
+There is **no 2D annotation tool.** The "2D slices" tab in `/annotate` is a text
+panel saying the 2D model needs no drawing — true for the classifier, false
+since the segmenter arrived. Every painting path in the app works on a 3D volume
+and saves `.seg.nrrd`; nothing can open a PNG.
+
+So train -> annotate -> retrain cannot complete. Building that tool is the next
+piece of work: [PLAN_2D_ANNOTATION.md](PLAN_2D_ANNOTATION.md). The plan's first
+step is deliberately not the UI — it is proving the data contract with one
+hand-made mask, because that is where a mismatch would otherwise surface after
+fifty cases had been painted.
 
 ---
 
 ## The freeze-depth sweep
 
-`train_2d.py` already supports both halves of this:
+Never completed. It was relaunched, ran about an hour on CPU, and was stopped on
+2026-09-04 before the first arm printed a single fold. `data/results2d/` holds
+no sweep output, so there is nothing to quote.
 
-- `--freeze N` freezes the first N top-level backbone blocks
-- `--patience N` early-stops after N epochs with no validation AUC gain, and
-  restores the best weights rather than keeping the last ones
+Stopping it cost nothing — it was reading a file list that has since been
+replaced entirely.
 
-**The sweep has never completed.** It was relaunched and ran for about an hour on
-CPU, then was stopped on 2026-09-04 before the first arm (`--freeze 0`) printed a
-single fold. `data/results2d/` holds no sweep output, so there is no result to
-report and nothing to quote in the write-up.
-
-Stopping it lost nothing: it started at 04:01 and the import landed at 04:58, so
-it was reading the pre-import file list. Any freeze depth it chose would have
-been chosen on half the data.
-
-Re-run it after the import, not before -- the batch roughly doubles the data and
-adds genuinely independent patients, so any freeze depth chosen on the old set
-would be chosen on the wrong distribution.
+When it is re-run, shrink it. Four arms x 5 folds x 12 epochs on CPU was going
+to take most of a day:
 
 ```bash
-for f in 0 4 6 8; do python ml/scripts/train_2d.py --freeze $f --patience 5 --epochs 30; done
+for f in 0 4 6 8; do python ml/scripts/train_2d.py "D:/Final yr Prj/bme" --arch resnet18 --folds 3 --epochs 8 --patience 3 --freeze $f; done
 ```
 
-Early stopping is what makes this affordable on CPU: without it every arm pays
-for 30 epochs whether or not it stopped improving at 8. Expect the shallow-freeze
-arms to stop earliest.
+Then re-run only the winning depth at `--folds 5` for the number that goes in
+the report. Mean +/- std across folds, never the best fold. If the spread
+between arms is smaller than the std within an arm, the honest conclusion is
+that freeze depth did not matter — a real finding, and easier to defend than a
+fragile one.
 
-Two things to hold on to when reading the result:
-
-- Report **mean +/- std across the folds**, not the best fold. A sweep is exactly
-  the situation where quoting the best number is most tempting and most wrong.
-- Four arms on one validation set is four chances to get lucky. If the spread
-  between arms is smaller than the std within an arm, the honest conclusion is
-  that freeze depth did not matter -- which is a real finding, and cheaper to
-  defend than a fragile one.
-
-Previous negative results already recorded, for consistency of tone: HIM made
-AUC worse (0.604 vs 0.658), and 6 epochs matched 3 epochs.
+Negative results already on record, for consistency of tone: HIM made AUC worse
+(0.604 vs 0.658), and 6 epochs matched 3.
 
 ---
 
-## After the import
+## Uncommitted
 
-Once the images are in, the counts roughly double: 864 -> ~1,020 BME and
-1,111 -> ~1,180 non-BME. Then:
+- `ml/scripts/build_2d.py` — new
+- `ml/scripts/import_2d.py` — modified, and **now unused**. It imports from a
+  folder layout that no longer feeds anything; `build_2d.py` replaced it.
+- `docs/PLAN_2D_ANNOTATION.md` — new
+- `docs/HANDOFF.md` — this file
+- `docs/STATUS.md`
 
-1. **Retrain the classifier** — Training page, "Detect (yes / no)" tab. More
-   data, and this time genuinely independent patients rather than more slices
-   from the same knees. If AUC does not move off ~0.66, the ceiling is the
-   method, not the data volume, and that is worth knowing before the report.
-2. **The segmenter still has 0 annotations.** This import does not change that.
-   Reference marks are not labels. The "Mark the edema" tab stays blocked until
-   you annotate real cases in the annotate page — that remains the single
-   blocker on both project objectives.
-
----
-
-## Reproducing the analysis
-
-The two probe scripts lived in the session scratchpad and are gone. Neither is
-needed to run the import — they only produced the numbers quoted above. If you
-want to re-derive them, both are short: fingerprint every image with the
-`fingerprint()` function in `import_2d.py`, then compare Hamming distances
-across sets; and count green pixels per file with the mask above.
-
----
-
-## Session Update (2026-09-04) — 2D Focus, Literature Analysis & Training UI Overhaul
-
-### 1. Verification & Git Sync
-- Ran `python -m py_compile ml/scripts/import_2d.py` and `pnpm typecheck` — all clean with 0 errors.
-- Staged clean non-data files and pushed all 9 pending commits to `origin/main` (`da0cec3..7c1f521`).
-- Working tree was synced clean with remote.
-
-### 2. External Data Redundancy Checked
-- Confirmed that `D:\Final yr Prj\Annotated\labled_data_bme` (outside repo) contains all 384 items (381 image files, 120 MB).
-- Confirmed that the `labled_data_bme/` folder at repo root was an exact duplicate and is safe to delete.
-
-### 3. Literature Analysis: Why Detection + 2D U-Net Is the Superior Approach
-User requested to focus strictly on 2D and asked if pairing a Detection Model (BME presence/absence) with a 2D U-Net is a better approach based on the papers in `RP/`:
-- **Paper 02 & Paper 03:** A standalone U-Net segmenter produces false-positive lesion islands on healthy scans because edema is <1% of voxels. Pairing an upfront Detection (Classification) model as a screening filter with a 2D U-Net segmenter solves this problem and reflects clinical triage.
-- **Paper 04:** 2D CNN classifiers on fat-suppressed knee MRI achieve high detection performance (up to 0.964 AUC with High-Intensity Masking).
-- **Paper 10 & Paper 09:** 2D U-Net **beat 3D U-Net** on bone marrow (89–90% vs 86–88% F1) because knee MRI scans have high slice-thickness anisotropy (~10:1 ratio, 0.35 mm in-plane vs 3–4 mm slice gap). 2D operates on native in-plane resolution without slice-gap blur.
-- **Paper 01:** Dual-channel U-Net predicting bone marrow and lesion simultaneously outperforms lesion-only segmentation and clips false positives outside the bone.
-
-### 4. Training UI & API Updates
-Updated the web app (`/training`) and backend routes to fully reflect the two-stage 2D pipeline:
-- **`client/nextjs/src/app/(dashboard)/training/page.tsx`**:
-  - Re-titled header to **2D Deep Learning Training**, detailing both Detection (Screening) and 2D U-Net (Segmentation).
-  - Renamed tabs:
-    - `1. Detection (BME Present / Absent)`: ResNet-18/34/50, ConvNeXt, EfficientNet-B0, DenseNet-121. Added **Freeze Blocks** (0, 4, 6, 8) and **Patience** (Early Stopping).
-    - `2. Segmentation (2D U-Net Mark Edema)`: Prominently displayed **2D Dual-Channel U-Net**, **Dice + Focal Loss**, and outputs (`Bone + BME`). Added **Folds (2-10)** and **Batch Size (4, 8, 16, 32)** controls.
-- **`client/nextjs/src/app/api/training/route.ts`**:
-  - Added support for `--freeze` and `--patience` parameters passed to `ml/scripts/train_2d.py`.
-- **`client/nextjs/src/app/api/training-seg/route.ts`**:
-  - Added support for `--batch` parameter passed to `ml/scripts/pipeline_seg.py` and `ml/scripts/train_2d_seg.py`.
-- **Typecheck Verified**: `pnpm typecheck` passed with 0 errors across `@bme/shared`, `@bme/db`, and `nextjs`.
-
-### 5. Next Steps
-1. Optionally delete the redundant `labled_data_bme` folder from the repo root.
-2. Launch the 2D Detection freeze sweep or 2D U-Net directly from the `/training` web UI or CLI.
-3. Keep focus strictly on the 2D pipeline.
+`git status` is clean of data.

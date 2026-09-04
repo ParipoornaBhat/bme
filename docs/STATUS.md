@@ -54,10 +54,17 @@ Phases are defined in [PRD.md](PRD.md) §8.
 
 In order. Each step's output is the next step's input.
 
-0. **2D import completed (225 images, 134 marks).** See [HANDOFF.md](HANDOFF.md).
-   Spot-check 3-4 images for burned-in viewer text before using in presentations/reports.
-   Optional: run the freeze-depth sweep on the expanded dataset
-   (`for f in 0 4 6 8; do python ml/scripts/train_2d.py --freeze $f --patience 5 --epochs 30; done`).
+0. **2D track was rebuilt from scratch on 2026-09-04.** Read
+   [HANDOFF.md](HANDOFF.md) before touching anything 2D. In short: 2D now uses
+   only the curated `BME/2d` and `Non BME/2d` folders -- 94 images, 87 patients,
+   18 BME vs 69 non-BME. Everything derived from the 3D volumes was removed from
+   the 2D dataset. `data/slices2d` is build output: `python ml/scripts/build_2d.py
+   "D:/Final yr Prj/bme" --apply` regenerates it.
+
+0b. **The 2D segmenter is blocked on a missing tool, not on annotation effort.**
+   There is no way to paint a PNG in the app. Plan to build it:
+   [PLAN_2D_ANNOTATION.md](PLAN_2D_ANNOTATION.md). Build the data contract and
+   the converter first, the UI last.
 
 1. **Annotate in the browser: `/annotate` → 3D volume tab.** Pick a case, paint, save.
    No file dragging, no folder picking, and the segments are named correctly for you.
@@ -179,6 +186,20 @@ Carried from [PRD.md](PRD.md) §10, updated with what the data answered.
 | 3 scanners, 2 vendors | Raw intensities not comparable | Normalization in PRD §4.1 is mandatory. |
 
 ---
+
+- **`BME/2d` filenames were patient names until 2026-09-04.** Renamed to
+  `BME-2D-<case>_s<k>`; the map is at `Annotated/deid_map_2d.csv`, outside the
+  repo. Anything derived from those files before that date carries the old names.
+- **Never share the whole `data/` folder with teammates.** It contains
+  `deid_map.csv`, `rename_map.csv` and `image_rename_map.csv` -- the id-to-name
+  keys. Share `data/slices2d/` only, or let them rebuild it with `build_2d.py`.
+- **18 BME patients is the entire 2D positive pool.** At 5 folds that is 3-4 per
+  validation fold. Any 2D classifier number must be reported as mean +/- std with
+  the n stated, never as a single headline figure.
+- **Burned-in pixel text has not been checked on the 2D exports.**
+  `deid_map.csv` records `burned_in=NO` for 74 of 107 3D cases and blank for 34.
+  De-identification covered DICOM headers and filenames, never pixels. Check
+  before any image goes in a slide or report.
 
 ## Repo map
 
