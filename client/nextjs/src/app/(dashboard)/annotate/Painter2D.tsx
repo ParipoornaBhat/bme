@@ -174,6 +174,9 @@ export default function Painter2D() {
     const { w, h } = imgDimRef.current;
     if (!canvas || !mask || w === 0 || h === 0) return;
 
+    if (canvas.width !== w) canvas.width = w;
+    if (canvas.height !== h) canvas.height = h;
+
     const ctx = canvas.getContext("2d");
     if (!ctx) return;
 
@@ -190,27 +193,28 @@ export default function Painter2D() {
         data[p] = 16;
         data[p + 1] = 185;
         data[p + 2] = 129;
-        data[p + 3] = 115;
+        data[p + 3] = 165;
         bCount++;
       } else if (v === 2) {
         // BME: Red
         data[p] = 239;
         data[p + 1] = 68;
         data[p + 2] = 68;
-        data[p + 3] = 140;
+        data[p + 3] = 185;
         lCount++;
       } else if (v === 3) {
         // Uncertain: Amber
         data[p] = 245;
         data[p + 1] = 158;
         data[p + 2] = 11;
-        data[p + 3] = 128;
+        data[p + 3] = 175;
         uCount++;
       } else {
         data[p + 3] = 0;
       }
     }
 
+    ctx.putImageData(imgData, 0, 0);
     const newCounts = { bone: bCount, bme: lCount, uncertain: uCount };
     setCounts(newCounts);
     countsRef.current = newCounts;
@@ -258,6 +262,12 @@ export default function Painter2D() {
     if (autoSaveTimeoutRef.current) clearTimeout(autoSaveTimeoutRef.current);
   };
 
+  // Ensure mask is drawn immediately whenever canvas dimensions are set or update
+  useEffect(() => {
+    if (imgDim.w > 0 && imgDim.h > 0 && maskDataRef.current) {
+      renderMaskToCanvas();
+    }
+  }, [imgDim.w, imgDim.h, renderMaskToCanvas]);
 
   const selectedRelPath = selected?.relPath;
   const selectedCaseId = selected?.caseId;
@@ -425,25 +435,27 @@ export default function Painter2D() {
   // Painting drawing logic
   const paintAt = (cx: number, cy: number) => {
     const mask = maskDataRef.current;
-    if (!mask || imgDim.w === 0 || imgDim.h === 0) return;
+    const { w, h } = imgDimRef.current;
+    if (!mask || w === 0 || h === 0) return;
 
     const val = isErasing ? 0 : activeLabel;
     const r = Math.max(1, Math.round(brushSize / 2));
     const r2 = r * r;
 
     const minX = Math.max(0, cx - r);
-    const maxX = Math.min(imgDim.w - 1, cx + r);
+    const maxX = Math.min(w - 1, cx + r);
     const minY = Math.max(0, cy - r);
-    const maxY = Math.min(imgDim.h - 1, cy + r);
+    const maxY = Math.min(h - 1, cy + r);
+    const hasBone = countsRef.current.bone > 0;
 
     for (let y = minY; y <= maxY; y++) {
       const dy2 = (y - cy) * (y - cy);
-      const rowOffset = y * imgDim.w;
+      const rowOffset = y * w;
       for (let x = minX; x <= maxX; x++) {
         if ((x - cx) * (x - cx) + dy2 <= r2) {
           const idx = rowOffset + x;
-          // Only inside bone guard: prevents accidental painting outside bone marrow
-          if (maskInside && !isErasing && activeLabel !== 1 && mask[idx] !== 1 && mask[idx] !== activeLabel) {
+          // Only inside bone guard: active only when bone marrow actually exists
+          if (maskInside && hasBone && !isErasing && activeLabel !== 1 && mask[idx] !== 1 && mask[idx] !== activeLabel) {
             continue;
           }
           mask[idx] = val;
@@ -478,6 +490,7 @@ export default function Painter2D() {
     maxB = Math.min(h - 1, Math.ceil(maxB));
 
     const val = isErasing ? 0 : activeLabel;
+    const hasBone = countsRef.current.bone > 0;
 
     for (let b = minB; b <= maxB; b++) {
       const xs: number[] = [];
@@ -495,7 +508,7 @@ export default function Painter2D() {
         const rowOffset = b * w;
         for (let a = from; a <= to; a++) {
           const idx = rowOffset + a;
-          if (maskInside && !isErasing && activeLabel !== 1 && mask[idx] !== 1 && mask[idx] !== activeLabel) {
+          if (maskInside && hasBone && !isErasing && activeLabel !== 1 && mask[idx] !== 1 && mask[idx] !== activeLabel) {
             continue;
           }
           mask[idx] = val;
@@ -534,8 +547,8 @@ export default function Painter2D() {
     const scaleX = canvas.width / rect.width;
     const scaleY = canvas.height / rect.height;
     return {
-      x: Math.round((e.clientX - rect.left) * scaleX),
-      y: Math.round((e.clientY - rect.top) * scaleY),
+      x: Math.max(0, Math.min(canvas.width - 1, Math.round((e.clientX - rect.left) * scaleX))),
+      y: Math.max(0, Math.min(canvas.height - 1, Math.round((e.clientY - rect.top) * scaleY))),
     };
   };
 
@@ -618,8 +631,10 @@ export default function Painter2D() {
   };
 
   const saveMaskInternal = async ({ isAuto = false } = {}) => {
-    if (!selected || !maskDataRef.current || imgDim.w === 0 || imgDim.h === 0) return;
-    const totalPixels = counts.bone + counts.bme + counts.uncertain;
+    const { w, h } = imgDimRef.current;
+    if (!selected || !maskDataRef.current || w === 0 || h === 0) return;
+    const c = countsRef.current;
+    const totalPixels = c.bone + c.bme + c.uncertain;
 
     // Bug fix: if user didn't annotate (0 pixels), never mark as saved & annotated
     if (totalPixels === 0) {
@@ -649,8 +664,8 @@ export default function Painter2D() {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
-            width: imgDim.w,
-            height: imgDim.h,
+            width: w,
+            height: h,
             pixels: Array.from(maskDataRef.current),
           }),
         },
@@ -810,10 +825,10 @@ export default function Painter2D() {
       if (e.key === "1") { setActiveLabel(1); setIsErasing(false); }
       else if (e.key === "2") { setActiveLabel(2); setIsErasing(false); }
       else if (e.key === "3") { setActiveLabel(3); setIsErasing(false); }
+      else if (e.key === "4" || e.key.toLowerCase() === "b") { setTool("brush"); }
+      else if (e.key === "5" || e.key.toLowerCase() === "p") { setTool("pencil"); }
+      else if (e.key === "6" || e.key.toLowerCase() === "h") { setTool("pan"); }
       else if (e.key === "0" || e.key.toLowerCase() === "e") { setIsErasing((prev) => !prev); }
-      else if (e.key.toLowerCase() === "p") { setTool((t) => (t === "brush" ? "pencil" : "brush")); }
-      else if (e.key.toLowerCase() === "h") { setTool((t) => (t === "pan" ? "brush" : "pan")); }
-      else if (e.key.toLowerCase() === "b") { setTool("brush"); }
       else if (e.key === "z" && (e.ctrlKey || e.metaKey) && !e.shiftKey) { e.preventDefault(); undo(); }
       else if (((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "y") || ((e.ctrlKey || e.metaKey) && e.shiftKey && e.key.toLowerCase() === "z")) { e.preventDefault(); redo(); }
       else if (e.key === "s" && (e.ctrlKey || e.metaKey)) { e.preventDefault(); saveMask(); }
@@ -934,7 +949,6 @@ export default function Painter2D() {
                     setHoverPos({ x: e.clientX, y: e.clientY });
                   }}
                   onMouseLeave={() => setHoveredSlice(null)}
-                  title={`Case ID: ${s.caseId}\nSlice Stem: ${s.stem}\nPath: ${s.relPath}\nClass: ${s.label === "bme" ? "BME Positive" : "Non-BME"}\nStatus: ${s.hasMask ? "Annotated" : "Unannotated"}${s.maskSavedAt ? " (" + new Date(s.maskSavedAt).toLocaleString() + ")" : ""}`}
                   className={`w-full group flex items-center justify-between rounded px-2.5 py-2 text-left text-xs transition border ${
                     active
                       ? "border-primary bg-primary/10 text-foreground font-medium"
@@ -998,49 +1012,50 @@ export default function Painter2D() {
 
             <div className="mx-1 h-5 w-px bg-border" />
 
-            {/* Tool Mode: Brush vs Pencil (Lasso Outline) vs Hand (Pan Canvas) */}
+            {/* Tool Mode: Brush (4) vs Pencil (5) vs Hand (6) */}
             <div className="inline-flex overflow-hidden rounded-md border border-border">
               <button
                 type="button"
                 onClick={() => setTool("brush")}
-                title="Brush mode (P toggles, B selects)"
-                className={`inline-flex items-center gap-1 px-2 py-1 text-xs transition ${
+                title="Brush mode (Key 4 or B)"
+                className={`inline-flex items-center gap-1.5 px-2.5 py-1 text-xs transition ${
                   tool === "brush" ? "bg-primary text-primary-foreground font-medium" : "bg-background text-muted-foreground hover:text-foreground"
                 }`}
               >
-                <Paintbrush className="h-3 w-3" /> Brush
+                <Paintbrush className="h-3 w-3" /> Brush <span className="text-[10px] opacity-60">(4)</span>
               </button>
               <button
                 type="button"
                 onClick={() => setTool("pencil")}
-                title="Pencil mode — trace an outline, the inside auto-fills (P toggles)"
-                className={`inline-flex items-center gap-1 border-l border-border px-2 py-1 text-xs transition ${
+                title="Pencil mode — trace an outline, the inside auto-fills (Key 5 or P)"
+                className={`inline-flex items-center gap-1.5 border-l border-border px-2.5 py-1 text-xs transition ${
                   tool === "pencil" ? "bg-primary text-primary-foreground font-medium" : "bg-background text-muted-foreground hover:text-foreground"
                 }`}
               >
-                <Lasso className="h-3 w-3" /> Pencil
+                <Lasso className="h-3 w-3" /> Pencil <span className="text-[10px] opacity-60">(5)</span>
               </button>
               <button
                 type="button"
                 onClick={() => setTool("pan")}
-                title="Hand mode — click & drag to pan canvas (H toggles)"
-                className={`inline-flex items-center gap-1 border-l border-border px-2 py-1 text-xs transition ${
+                title="Hand mode — click & drag to pan canvas (Key 6 or H)"
+                className={`inline-flex items-center gap-1.5 border-l border-border px-2.5 py-1 text-xs transition ${
                   tool === "pan" ? "bg-primary text-primary-foreground font-medium" : "bg-background text-muted-foreground hover:text-foreground"
                 }`}
               >
-                <Hand className="h-3 w-3" /> Hand
+                <Hand className="h-3 w-3" /> Hand <span className="text-[10px] opacity-60">(6)</span>
               </button>
             </div>
 
             <button
               onClick={() => setIsErasing((e) => !e)}
+              title="Toggle eraser mode (Key 0 or E)"
               className={`inline-flex items-center gap-1.5 rounded-md px-2.5 py-1 text-xs font-medium border transition ${
                 isErasing
                   ? "border-destructive bg-destructive/10 text-destructive ring-1 ring-destructive"
                   : "border-border bg-background text-muted-foreground hover:text-foreground"
               }`}
             >
-              <Eraser className="h-3.5 w-3.5" /> Eraser <span className="text-[10px] opacity-60">(E)</span>
+              <Eraser className="h-3.5 w-3.5" /> Eraser <span className="text-[10px] opacity-60">(0)</span>
             </button>
 
             <label className="flex items-center gap-1.5 text-xs text-muted-foreground cursor-pointer select-none ml-1">
