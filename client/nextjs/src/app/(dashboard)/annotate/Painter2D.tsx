@@ -84,6 +84,9 @@ export default function Painter2D() {
   const panStartRef = useRef<{ x: number; y: number }>({ x: 0, y: 0 });
   const [hoveredSlice, setHoveredSlice] = useState<Case2DSlice | null>(null);
   const [hoverPos, setHoverPos] = useState<{ x: number; y: number }>({ x: 0, y: 0 });
+  const [isLockedDraw, setIsLockedDraw] = useState(false);
+  const isLockedDrawRef = useRef(false);
+  const lastTapTimeRef = useRef<number>(0);
 
   const bgCanvasRef = useRef<HTMLCanvasElement>(null);
   const maskCanvasRef = useRef<HTMLCanvasElement>(null);
@@ -540,6 +543,40 @@ export default function Painter2D() {
     }, 1400);
   }, [autoSave, selected]);
 
+  const finishLockedDraw = useCallback(() => {
+    if (!isLockedDrawRef.current) return;
+    isLockedDrawRef.current = false;
+    setIsLockedDraw(false);
+    isDrawingRef.current = false;
+    lastPosRef.current = null;
+
+    if (tool === "pencil") {
+      commitOutline();
+    } else {
+      triggerAutoSaveIfNeeded();
+    }
+  }, [tool, commitOutline, triggerAutoSaveIfNeeded]);
+
+  const startLockedDraw = useCallback(
+    (pos: { x: number; y: number }) => {
+      if (tool === "pan") return;
+      isLockedDrawRef.current = true;
+      setIsLockedDraw(true);
+      isDrawingRef.current = true;
+
+      if (tool === "pencil") {
+        outlineRef.current = [[pos.x, pos.y]];
+        drawOutlineOverlay();
+      } else {
+        pushUndo();
+        lastPosRef.current = pos;
+        paintAt(pos.x, pos.y);
+        renderMaskToCanvas();
+      }
+    },
+    [tool, drawOutlineOverlay, renderMaskToCanvas],
+  );
+
   const getCanvasCoords = (e: React.MouseEvent<HTMLCanvasElement>) => {
     const canvas = maskCanvasRef.current;
     if (!canvas) return { x: 0, y: 0 };
@@ -552,6 +589,16 @@ export default function Painter2D() {
     };
   };
 
+  const handleDoubleClick = (e: React.MouseEvent<HTMLCanvasElement>) => {
+    if (e.button !== 0 || tool === "pan") return;
+    const pos = getCanvasCoords(e);
+    if (isLockedDrawRef.current) {
+      finishLockedDraw();
+    } else {
+      startLockedDraw(pos);
+    }
+  };
+
   const handleMouseDown = (e: React.MouseEvent<HTMLCanvasElement>) => {
     if (e.button !== 0) return;
 
@@ -562,6 +609,22 @@ export default function Painter2D() {
     }
 
     const pos = getCanvasCoords(e);
+
+    // If already in locked touchpad drawing mode, a single tap finishes the stroke!
+    if (isLockedDrawRef.current) {
+      finishLockedDraw();
+      lastTapTimeRef.current = 0;
+      return;
+    }
+
+    // Double tap detection for touchpads (tap-tap within 320ms)
+    const now = Date.now();
+    if (now - lastTapTimeRef.current < 320) {
+      lastTapTimeRef.current = 0;
+      startLockedDraw(pos);
+      return;
+    }
+    lastTapTimeRef.current = now;
 
     if (tool === "pencil") {
       isDrawingRef.current = true;
@@ -618,6 +681,10 @@ export default function Painter2D() {
   const handleMouseUp = () => {
     if (isPanning) {
       setIsPanning(false);
+    }
+    // If locked touchpad draw mode is active, lifting finger doesn't finish stroke
+    if (isLockedDrawRef.current) {
+      return;
     }
     if (!isDrawingRef.current) return;
     isDrawingRef.current = false;
@@ -822,6 +889,12 @@ export default function Painter2D() {
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return;
+      if (e.key === "Escape" || e.key === "Enter") {
+        if (isLockedDrawRef.current) {
+          finishLockedDraw();
+          return;
+        }
+      }
       if (e.key === "1") { setActiveLabel(1); setIsErasing(false); }
       else if (e.key === "2") { setActiveLabel(2); setIsErasing(false); }
       else if (e.key === "3") { setActiveLabel(3); setIsErasing(false); }
@@ -837,7 +910,7 @@ export default function Painter2D() {
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [undo, redo, saveMask]);
+  }, [undo, redo, saveMask, finishLockedDraw]);
 
 
   const filtered = slices.filter((s) => {
@@ -1337,6 +1410,7 @@ export default function Painter2D() {
               onMouseMove={handleMouseMove}
               onMouseUp={handleMouseUp}
               onMouseLeave={handleMouseUp}
+              onDoubleClick={handleDoubleClick}
               className={`absolute inset-0 block ${
                 tool === "pan" ? (isPanning ? "cursor-grabbing" : "cursor-grab") : "cursor-crosshair"
               }`}
@@ -1350,6 +1424,15 @@ export default function Painter2D() {
               className="absolute inset-0 block pointer-events-none"
             />
           </div>
+
+          {/* Touchpad Double-Tap Draw Active Indicator */}
+          {isLockedDraw && (
+            <div className="absolute top-3 left-1/2 -translate-x-1/2 z-20 flex items-center gap-2 rounded-full border border-sky-500/60 bg-sky-950/90 backdrop-blur-md px-4 py-1.5 text-xs text-sky-200 shadow-xl shadow-sky-950/50 animate-pulse">
+              <span className="h-2 w-2 rounded-full bg-sky-400 animate-ping" />
+              <span className="font-semibold tracking-wide">Touchpad Draw Active:</span>
+              <span className="text-sky-300">Glide finger to mark &bull; Single Tap or Esc to finish</span>
+            </div>
+          )}
         </div>
       </div>
 
