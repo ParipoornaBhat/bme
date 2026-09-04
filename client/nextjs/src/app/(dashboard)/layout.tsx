@@ -443,12 +443,18 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
           </aside>
 
           {/* Scrollable Main Content Area */}
-          <main className="flex-1 min-w-0 overflow-y-auto flex flex-col relative">
-            <div className="flex-1 px-4 py-8 sm:px-6 lg:px-8 max-w-7xl w-full mx-auto relative z-10 animate-in fade-in duration-500">
-              <Breadcrumbs />
+          <main className={`flex-1 min-w-0 flex flex-col relative ${pathname.startsWith("/annotate") ? "overflow-hidden" : "overflow-y-auto"}`}>
+            <div
+              className={`flex-1 w-full mx-auto relative z-10 animate-in fade-in duration-500 ${
+                pathname.startsWith("/annotate")
+                  ? "px-3 py-2 max-w-[1700px] flex flex-col h-full overflow-hidden"
+                  : "px-4 py-8 sm:px-6 lg:px-8 max-w-7xl"
+              }`}
+            >
+              {!pathname.startsWith("/annotate") && <Breadcrumbs />}
               {children}
             </div>
-            <SiteFooter />
+            {!pathname.startsWith("/annotate") && <SiteFooter />}
           </main>
         </div>
       </div>

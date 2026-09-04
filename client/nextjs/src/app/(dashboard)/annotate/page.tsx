@@ -69,80 +69,49 @@ export default function AnnotatePage() {
   const done = cases.filter((c) => c.annotated).length;
 
   return (
-    <div className="space-y-3">
-      <div className="flex flex-wrap items-end justify-between gap-4">
-        <div>
-          <h1 className="text-lg font-semibold tracking-tight">Annotate</h1>
-          <p className="text-xs text-muted-foreground">
-            {done} of {cases.length} cases annotated
-            {needFrom.length > 0 && (
-              <span className="ml-2 text-amber-600 dark:text-amber-400">
-                &middot; {needFrom.length} annotated by a teammate, file not on this machine
-              </span>
-            )}
-            {!showNames && (
-              <span className="ml-2 opacity-70">
-                &middot; real filenames hidden (set SHOW_SOURCE_NAMES=true in .env to reveal)
-              </span>
-            )}
-          </p>
+    <div className="flex flex-col gap-2 h-full">
+      <div className="flex flex-wrap items-center justify-between gap-3 border-b border-border pb-1">
+        <div className="flex items-center gap-3">
+          <h1 className="text-base font-bold tracking-tight">Annotate</h1>
+          <div className="flex gap-1">
+            {([
+              ["2d", "2D slices", Layers],
+              ["3d", "3D volume", Boxes],
+            ] as const).map(([id, label, Icon]) => (
+              <button
+                key={id}
+                onClick={() => setTab(id)}
+                className={`inline-flex items-center gap-1.5 rounded-md px-3 py-1 text-xs font-medium transition ${
+                  tab === id
+                    ? "bg-primary text-primary-foreground font-semibold"
+                    : "text-muted-foreground hover:text-foreground hover:bg-muted"
+                }`}
+              >
+                <Icon className="h-3.5 w-3.5" />
+                {label}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        <div className="text-xs text-muted-foreground flex items-center gap-2">
+          <span>{done} of {cases.length} annotated</span>
+          {needFrom.length > 0 && (
+            <span className="text-amber-500 font-medium">
+              &middot; {needFrom.length} on teammate machine
+            </span>
+          )}
         </div>
       </div>
 
       {needFrom.length > 0 && (
-        <div className="rounded-lg border border-amber-500/40 bg-amber-500/10 p-4">
-          <div className="flex items-start gap-3">
-            <AlertTriangle className="mt-0.5 h-5 w-5 shrink-0 text-amber-600 dark:text-amber-400" />
-            <div className="flex-1 text-sm">
-              <p className="font-semibold text-foreground">
-                Your local copy is behind — {needFrom.length} annotation
-                {needFrom.length === 1 ? "" : "s"} you do not have
-              </p>
-              <p className="mt-1 text-muted-foreground">
-                A teammate has saved these, but the files are not on this machine. The
-                imaging never moves automatically, so ask whoever is named to send you
-                the <code className="rounded bg-muted px-1">.seg.nrrd</code>, and drop it
-                in <code className="rounded bg-muted px-1">data/annotations/&lt;CASE&gt;/</code>.
-              </p>
-              <div className="mt-2 flex flex-wrap gap-1.5">
-                {needFrom.map((id) => (
-                  <span key={id}
-                    className="rounded border border-amber-500/40 bg-background px-2 py-0.5 font-mono text-xs">
-                    {id}
-                    {ledger[id]?.annotator && (
-                      <span className="ml-1.5 text-muted-foreground">
-                        &larr; {ledger[id].annotator}
-                      </span>
-                    )}
-                  </span>
-                ))}
-              </div>
-            </div>
-          </div>
+        <div className="rounded border border-amber-500/40 bg-amber-500/10 px-3 py-1.5 text-xs text-amber-400">
+          <strong>Note:</strong> {needFrom.length} annotation files are held by teammates.
         </div>
       )}
 
-      <div className="flex gap-1 border-b border-border">
-        {([
-          ["2d", "2D slices", Layers],
-          ["3d", "3D volume", Boxes],
-        ] as const).map(([id, label, Icon]) => (
-          <button
-            key={id}
-            onClick={() => setTab(id)}
-            className={`-mb-px inline-flex items-center gap-2 border-b-2 px-4 py-1.5 text-sm font-medium transition ${
-              tab === id
-                ? "border-primary text-foreground"
-                : "border-transparent text-muted-foreground hover:text-foreground"
-            }`}
-          >
-            <Icon className="h-4 w-4" />
-            {label}
-          </button>
-        ))}
-      </div>
-
-      {tab === "2d" && <Painter2D />}
+      <div className="flex-1 min-h-0">
+        {tab === "2d" && <Painter2D />}
 
       {tab === "3d" && (
         <div className="grid gap-3 lg:grid-cols-[230px_minmax(0,1fr)]">
@@ -241,6 +210,7 @@ export default function AnnotatePage() {
           </div>
         </div>
       )}
+      </div>
     </div>
   );
 }

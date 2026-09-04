@@ -8,11 +8,15 @@ import {
   Lasso,
   Layers,
   Loader2,
+  Maximize2,
+  Move,
   Paintbrush,
   RotateCcw,
   Save,
   Search,
   Trash2,
+  ZoomIn,
+  ZoomOut,
 } from "lucide-react";
 
 export type Case2DSlice = {
@@ -47,9 +51,15 @@ export default function Painter2D() {
   const [imgDim, setImgDim] = useState<{ w: number; h: number }>({ w: 0, h: 0 });
   const [counts, setCounts] = useState<{ bone: number; bme: number; uncertain: number }>({ bone: 0, bme: 0, uncertain: 0 });
 
+  const [zoom, setZoom] = useState<number>(1);
+  const [pan, setPan] = useState<{ x: number; y: number }>({ x: 0, y: 0 });
+  const [isPanning, setIsPanning] = useState(false);
+  const panStartRef = useRef<{ x: number; y: number }>({ x: 0, y: 0 });
+
   const bgCanvasRef = useRef<HTMLCanvasElement>(null);
   const maskCanvasRef = useRef<HTMLCanvasElement>(null);
   const overlayCanvasRef = useRef<HTMLCanvasElement>(null);
+  const viewportRef = useRef<HTMLDivElement>(null);
   const maskDataRef = useRef<Uint8Array | null>(null);
   const imgDimRef = useRef<{ w: number; h: number }>({ w: 0, h: 0 });
   const undoStackRef = useRef<Uint8Array[]>([]);
@@ -57,6 +67,11 @@ export default function Painter2D() {
   const lastPosRef = useRef<{ x: number; y: number } | null>(null);
   const outlineRef = useRef<Array<[number, number]>>([]);
   const lastLoadedStemRef = useRef<string>("");
+
+  const resetZoom = useCallback(() => {
+    setZoom(1);
+    setPan({ x: 0, y: 0 });
+  }, []);
 
   // Load slices once on mount
   useEffect(() => {
@@ -530,9 +545,9 @@ export default function Painter2D() {
   });
 
   return (
-    <div className="grid gap-4 lg:grid-cols-[280px_minmax(0,1fr)]">
+    <div className="grid gap-3 lg:grid-cols-[270px_minmax(0,1fr)] h-[calc(100vh-115px)]">
       {/* Left sidebar: Slice list */}
-      <div className="flex flex-col gap-3 rounded-lg border border-border bg-card p-3 h-[750px]">
+      <div className="flex flex-col gap-2 rounded-lg border border-border bg-card p-2.5 h-full overflow-hidden">
         <div className="relative">
           <Search className="absolute left-2.5 top-2.5 h-4 w-4 text-muted-foreground" />
           <input
@@ -609,7 +624,7 @@ export default function Painter2D() {
       </div>
 
       {/* Right side: 2D Canvas Editor */}
-      <div className="flex flex-col gap-3 rounded-lg border border-border bg-card p-4 h-[750px]">
+      <div className="flex flex-col gap-2 rounded-lg border border-border bg-card p-3 h-full overflow-hidden">
         {/* Editor Toolbar */}
         <div className="flex flex-wrap items-center justify-between gap-3 border-b border-border pb-3">
           <div className="flex flex-wrap items-center gap-2">
@@ -695,6 +710,42 @@ export default function Painter2D() {
               </div>
             )}
 
+            {/* Zoom Controls */}
+            <div className="flex items-center gap-1 border-l border-border pl-2">
+              <button
+                type="button"
+                onClick={() => setZoom((z) => Math.max(0.4, Number((z - 0.2).toFixed(1))))}
+                title="Zoom Out"
+                className="inline-flex items-center justify-center h-7 w-7 rounded border border-border bg-background text-muted-foreground hover:text-foreground transition"
+              >
+                <ZoomOut className="h-3.5 w-3.5" />
+              </button>
+              <button
+                type="button"
+                onClick={resetZoom}
+                title="Reset Zoom to 100%"
+                className="px-1.5 py-0.5 rounded text-xs font-mono font-medium text-muted-foreground hover:text-foreground hover:bg-muted"
+              >
+                {Math.round(zoom * 100)}%
+              </button>
+              <button
+                type="button"
+                onClick={() => setZoom((z) => Math.min(4, Number((z + 0.2).toFixed(1))))}
+                title="Zoom In"
+                className="inline-flex items-center justify-center h-7 w-7 rounded border border-border bg-background text-muted-foreground hover:text-foreground transition"
+              >
+                <ZoomIn className="h-3.5 w-3.5" />
+              </button>
+              <button
+                type="button"
+                onClick={resetZoom}
+                title="Fit / Reset"
+                className="inline-flex items-center justify-center h-7 w-7 rounded border border-border bg-background text-muted-foreground hover:text-foreground transition"
+              >
+                <Maximize2 className="h-3.5 w-3.5" />
+              </button>
+            </div>
+
             <button
               onClick={undo}
               title="Undo (Ctrl+Z)"
@@ -748,24 +799,40 @@ export default function Painter2D() {
           </div>
         )}
 
-        {/* Viewport Canvas Container */}
-        <div className="relative flex-1 overflow-auto rounded border border-border/80 bg-black/90 flex items-center justify-center select-none p-4">
+        {/* Viewport Canvas Container with Zoom and Pan */}
+        <div
+          ref={viewportRef}
+          className="relative flex-1 overflow-hidden rounded border border-border/80 bg-black/95 flex items-center justify-center select-none p-2 cursor-default"
+          onWheel={(e) => {
+            e.preventDefault();
+            const delta = e.deltaY < 0 ? 0.15 : -0.15;
+            setZoom((z) => Math.min(4, Math.max(0.4, Number((z + delta).toFixed(2)))));
+          }}
+        >
           <div
-            className="relative shadow-2xl inline-block"
-            style={{ width: imgDim.w || 512, height: imgDim.h || 512 }}
+            className="relative shadow-2xl inline-block transition-transform duration-75 origin-center"
+            style={{
+              width: imgDim.w || 512,
+              height: imgDim.h || 512,
+              transform: `scale(${zoom}) translate(${pan.x}px, ${pan.y}px)`,
+            }}
           >
-            {/* Base MRI image canvas */}
-            <canvas
-              ref={bgCanvasRef}
-              width={imgDim.w || 512}
-              height={imgDim.h || 512}
-              className="absolute inset-0 block pointer-events-none"
-            />
+            {/* Base MRI image as rock-solid <img> element (never blanks or wipes) */}
+            {selected && (
+              // eslint-disable-next-line @next/next/no-img-element
+              <img
+                src={`/api/cases2d?image=${encodeURIComponent(selected.relPath)}`}
+                alt={selected.stem}
+                className="absolute inset-0 block pointer-events-none select-none w-full h-full object-contain"
+                style={{ imageRendering: "pixelated" }}
+              />
+            )}
             {/* Drawing mask layer canvas */}
             <canvas
               ref={maskCanvasRef}
               width={imgDim.w || 512}
               height={imgDim.h || 512}
+              style={{ width: "100%", height: "100%" }}
               onMouseDown={handleMouseDown}
               onMouseMove={handleMouseMove}
               onMouseUp={handleMouseUp}
@@ -777,6 +844,7 @@ export default function Painter2D() {
               ref={overlayCanvasRef}
               width={imgDim.w || 512}
               height={imgDim.h || 512}
+              style={{ width: "100%", height: "100%" }}
               className="absolute inset-0 block pointer-events-none"
             />
           </div>
