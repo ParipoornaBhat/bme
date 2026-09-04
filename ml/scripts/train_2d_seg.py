@@ -31,6 +31,7 @@ import argparse
 import csv
 import json
 import random
+import shutil
 import sys
 from collections import defaultdict
 from datetime import datetime
@@ -48,6 +49,13 @@ except ImportError as e:
 
 SEED = 1337
 BONE, BME = 1, 2
+
+# Preprocessing contract, shared with infer_2d.py. Painted masks are saved at
+# the source slice's own resolution and the curated 2D set has 77 distinct
+# sizes, so a fixed canvas is required before anything can be batched. Masks
+# resample NEAREST — a bilinear mask invents label values that do not exist.
+IMG_SIZE = 256
+CHANNELS = ["bone", "bme"]  # channel 0 = bone incl. lesion, channel 1 = lesion
 
 
 # ---------------------------------------------------------------- model
@@ -112,8 +120,13 @@ class SegDS(Dataset):
         raw_im = Image.open(self.root / r["image"])
         if raw_im.mode != "L":
             raw_im = raw_im.convert("L")
+        raw_mk = Image.open(self.root / r["mask"])
+        if raw_mk.size != raw_im.size:
+            raw_mk = raw_mk.resize(raw_im.size, Image.NEAREST)
+        raw_im = raw_im.resize((IMG_SIZE, IMG_SIZE), Image.BILINEAR)
+        raw_mk = raw_mk.resize((IMG_SIZE, IMG_SIZE), Image.NEAREST)
         img = np.asarray(raw_im, dtype=np.float32) / 255.0
-        msk = np.asarray(Image.open(self.root / r["mask"]), dtype=np.uint8)
+        msk = np.asarray(raw_mk, dtype=np.uint8)
 
         if self.train:
             # Geometric only. Brightness jitter is risky here: edema IS
@@ -191,6 +204,14 @@ def main():
                  f"{args.folds}-fold. Annotate more, or pass --folds {max(2, n_cases)}.")
     print(f"{args.folds}-fold, patient-level (no case in both train and val)\n")
 
+    # One set of weights per fold; inference averages the probability maps over
+    # all of them. Wiped first so a shorter run cannot leave stale folds behind.
+    ckpt_dir = base / "data" / "results2dseg" / "checkpoints"
+    if ckpt_dir.exists():
+        shutil.rmtree(ckpt_dir)
+    ckpt_dir.mkdir(parents=True, exist_ok=True)
+    saved_folds: list[dict] = []
+
     per_fold = []
     for k in range(args.folds):
         va_cases = set(folds[k])
@@ -248,8 +269,22 @@ def main():
             "n_val_slices": len(va),
         }
         per_fold.append(m)
+        torch.save({
+            "channels": CHANNELS,
+            "fold": k,
+            "img_size": IMG_SIZE,
+            "lesion_dice": None if np.isnan(m["lesion_dice"]) else m["lesion_dice"],
+            "bone_dice": None if np.isnan(m["bone_dice"]) else m["bone_dice"],
+            "state_dict": {n: v.detach().cpu() for n, v in model.state_dict().items()},
+        }, ckpt_dir / f"fold{k}.pt")
+        saved_folds.append({
+            "fold": k, "file": f"fold{k}.pt",
+            "lesion_dice": None if np.isnan(m["lesion_dice"]) else m["lesion_dice"],
+            "bone_dice": None if np.isnan(m["bone_dice"]) else m["bone_dice"],
+        })
         print(f"      -> bone Dice={m['bone_dice']:.3f}  lesion Dice={m['lesion_dice']:.3f}  "
-              f"sens={m['lesion_sensitivity']:.3f}  FP slices={fp}\n")
+              f"sens={m['lesion_sensitivity']:.3f}  FP slices={fp}"
+              f"  (weights -> checkpoints/fold{k}.pt)\n")
 
     if not per_fold:
         sys.exit("no fold produced a result")
@@ -272,6 +307,24 @@ def main():
                  "including empty slices would inflate it towards 1. False positives are "
                  "counted on slices with no reference lesion."),
     }
+    metrics["checkpoints"] = {"dir": "data/results2dseg/checkpoints",
+                              "n_folds": len(saved_folds), "img_size": IMG_SIZE}
+    (ckpt_dir / "manifest.json").write_text(json.dumps({
+        "created_at": metrics["finished_at"],
+        "model": "unet2d",
+        "channels": CHANNELS,
+        "lesion_channel": 1,
+        "img_size": IMG_SIZE,
+        "seed": SEED,
+        "folds": saved_folds,
+        "n_slices": len(rows),
+        "n_cases": n_cases,
+        "summary": metrics["summary"],
+        "note": ("Sigmoid per channel, threshold 0.5. The lesion channel is "
+                 "multiplied by the bone channel at inference: edema outside bone "
+                 "is not edema. Inference averages the probability maps over all "
+                 "folds."),
+    }, indent=2), encoding="utf-8")
     (out / "metrics.json").write_text(json.dumps(metrics, indent=2), encoding="utf-8")
     run_dir = out / "runs" / metrics["run_id"]
     run_dir.mkdir(parents=True, exist_ok=True)

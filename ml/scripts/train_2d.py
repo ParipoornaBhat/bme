@@ -53,6 +53,23 @@ except ImportError as e:
 
 SEED = 1337
 
+# Preprocessing contract, shared with gradcam.py and infer_2d.py.
+#
+# IMG_SIZE is load-bearing, not cosmetic. The curated 2D set has 77 distinct
+# image sizes across 94 files, so without a fixed resize the default collate
+# cannot stack a batch and training dies on the first step. It also has to be
+# imported rather than retyped: an inference path that resizes or normalises
+# differently from training is silently wrong, and nothing in the metrics would
+# show it.
+#
+# Class index is likewise fixed here and read by everything downstream:
+#   0 = non_bme (NO)   1 = bme (YES)
+# The reported score is always softmax(logits)[:, 1] = P(BME).
+IMG_SIZE = 256
+NORM_MEAN = [0.485, 0.456, 0.406]
+NORM_STD = [0.229, 0.224, 0.225]
+CLASSES = ["non_bme", "bme"]
+
 # Architectures you can train without installing anything — every one of these
 # ships inside torchvision, which is already a dependency. `head` names the
 # attribute holding the final classifier layer, because torchvision is not
@@ -118,14 +135,27 @@ def set_seed(s=SEED):
     torch.cuda.manual_seed_all(s)
 
 
+def eval_transform():
+    """The exact preprocessing used at validation and at inference.
+
+    Anything predicting on a new image must call this rather than rebuild the
+    pipeline by hand — that is how train/serve skew gets in.
+    """
+    return T.Compose([T.Grayscale(3), T.Resize((IMG_SIZE, IMG_SIZE)), T.ToTensor(),
+                      T.Normalize(NORM_MEAN, NORM_STD)])
+
+
 class SliceDS(Dataset):
     def __init__(self, rows, root, train):
         self.rows, self.root = rows, root
         aug = [T.RandomHorizontalFlip(),
                T.RandomAffine(degrees=8, translate=(0.05, 0.05), scale=(0.92, 1.08)),
                T.ColorJitter(brightness=0.15, contrast=0.15)] if train else []
-        self.tf = T.Compose([T.Grayscale(3), *aug, T.ToTensor(),
-                             T.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])])
+        # Resize before augmenting: the affine and the crop-free jitter assume a
+        # fixed canvas, and doing it the other way round changes the effective
+        # translation magnitude per image.
+        self.tf = T.Compose([T.Grayscale(3), T.Resize((IMG_SIZE, IMG_SIZE)), *aug, T.ToTensor(),
+                             T.Normalize(NORM_MEAN, NORM_STD)])
 
     def __len__(self):
         return len(self.rows)
@@ -241,6 +271,22 @@ def run_fold(tr_rows, va_rows, root, epochs, device, arch="resnet18", bs=32, lr=
     return model, np.array(probs), np.array(trues), idxs
 
 
+def save_fold(path: Path, model, arch: str, fold: int, val_auc: float):
+    """One fold's weights plus everything an inference process needs to reproduce
+    the preprocessing and read the output. Self-describing on purpose — a bare
+    state_dict leaves the class order and input size to be guessed."""
+    torch.save({
+        "arch": arch,
+        "fold": fold,
+        "classes": CLASSES,          # index -> label; index 1 (bme) is the YES class
+        "img_size": IMG_SIZE,
+        "norm_mean": NORM_MEAN,
+        "norm_std": NORM_STD,
+        "val_auc": None if val_auc is None or np.isnan(val_auc) else float(val_auc),
+        "state_dict": {k: v.detach().cpu() for k, v in model.state_dict().items()},
+    }, path)
+
+
 def stats(y, p, thr=0.5):
     yh = (p >= thr).astype(int)
     pr, rc, f1, _ = precision_recall_fscore_support(y, yh, average="binary", zero_division=0)
@@ -293,6 +339,17 @@ def main():
     all_p, all_y, all_rows, all_fold = [], [], [], []
     per_fold = []
 
+    # Cross-validation produces one set of weights per fold, not one model. All
+    # of them are kept and inference averages over them; picking the best fold
+    # would be selecting on the same data that scored it. Wiped at the start of
+    # a run so a shorter run cannot leave stale folds behind to be ensembled
+    # with the new ones.
+    ckpt_dir = base / "data" / "results2d" / "checkpoints"
+    if ckpt_dir.exists():
+        shutil.rmtree(ckpt_dir)
+    ckpt_dir.mkdir(parents=True, exist_ok=True)
+    saved_folds: list[dict] = []
+
     for k in range(args.folds):
         va_cases = set(folds[k])
         tr_rows = [r for r in rows if r["case_id"] not in va_cases]
@@ -302,12 +359,16 @@ def main():
         print(f"  fold {k}: train={len(tr_rows)} slices / val={len(va_rows)} slices "
               f"({len(va_cases)} cases)")
 
-        _, p, y, order = run_fold(tr_rows, va_rows, root, args.epochs, device,
-                                 args.arch, args.batch, tta=args.tta,
-                                 freeze=args.freeze, patience=args.patience)
+        model, p, y, order = run_fold(tr_rows, va_rows, root, args.epochs, device,
+                                      args.arch, args.batch, tta=args.tta,
+                                      freeze=args.freeze, patience=args.patience)
         s = stats(y, p)
         per_fold.append(s)
-        print(f"      -> acc={s['accuracy']:.3f} f1={s['f1']:.3f} auc={s['auc']:.3f}\n")
+        save_fold(ckpt_dir / f"fold{k}.pt", model, args.arch, k, s["auc"])
+        saved_folds.append({"fold": k, "file": f"fold{k}.pt",
+                            "val_auc": None if np.isnan(s["auc"]) else s["auc"]})
+        print(f"      -> acc={s['accuracy']:.3f} f1={s['f1']:.3f} auc={s['auc']:.3f}"
+              f"  (weights -> checkpoints/fold{k}.pt)\n")
 
         for j, oi in enumerate(order):
             all_rows.append(va_rows[oi]); all_p.append(p[j]); all_y.append(y[j]); all_fold.append(k)
@@ -345,6 +406,31 @@ def main():
                    "noisy-label. Case-level is the honest headline. This is a "
                    "classifier baseline, not the segmentation system."),
     }
+    # What an inference process needs to find and use these weights. Written
+    # last so a half-finished run leaves no manifest and is therefore ignored
+    # rather than half-loaded.
+    manifest = {
+        "created_at": datetime.now().isoformat(timespec="seconds"),
+        "arch": args.arch,
+        "dataset": args.dataset,
+        "classes": CLASSES,
+        "positive_index": 1,
+        "img_size": IMG_SIZE,
+        "norm_mean": NORM_MEAN,
+        "norm_std": NORM_STD,
+        "seed": SEED,
+        "folds": saved_folds,
+        "n_slices": len(rows),
+        "n_cases": len(by_case),
+        "case_level_auc": case_m["auc"],
+        "note": ("One checkpoint per cross-validation fold. Inference averages the "
+                 "probability over all of them; no single fold is 'the' model, and "
+                 "the fold with the highest val AUC was selected on its own "
+                 "validation data."),
+    }
+    (ckpt_dir / "manifest.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+    metrics["checkpoints"] = {"dir": "data/results2d/checkpoints", "n_folds": len(saved_folds),
+                              "arch": args.arch, "img_size": IMG_SIZE}
     (out / "metrics.json").write_text(json.dumps(metrics, indent=2), encoding="utf-8")
 
     # Archive this run. data/results2d/ always holds the latest, and runs/ keeps

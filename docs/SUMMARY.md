@@ -1,14 +1,15 @@
 # BME Project — what exists, what is used, what is next
 
-Last updated: 2026-09-01 · 35 commits
+Last updated: 2026-09-04
 
 ---
 
 ## 1. Where the project stands in one line
 
-**Three** models are built. The 2D *classifier* works and has real numbers. The 2D *segmenter*
-and the 3D segmenter are written and smoke-tested but have never trained, because both need
-annotations that do not exist yet.
+**Three** models are built. The 2D *classifier* and the 2D *segmenter* both train, save
+per-fold checkpoints, and run on an uploaded image from `/results`. The 3D segmenter is
+written and smoke-tested but has never trained, because it needs 3D annotations that do not
+exist yet.
 
 ## 1b. The three models, and why there are three
 
@@ -77,7 +78,7 @@ Everything is a CNN. ResNet/MobileNet are **classifiers** ("is there edema?"); U
 |---|---|
 | `/annotate` | Slicer-style Four-Up: three planes plus a live 3D surface. Crosshair sync, brush **and pencil** (trace an outline, Enter fills it), eraser, three named segments, **"only inside bone"** masking, Ctrl+Z/Y, saves `.seg.nrrd` automatically |
 | `/training` | Pick a model, set folds/epochs, Start/Stop, live log, progress bar + ETA, run history, AUC chart |
-| `/results` | 2D and 3D tabs, case- and slice-level metrics, confusion matrix, per-fold table |
+| `/results` | 2D and 3D tabs, case- and slice-level metrics, confusion matrix, per-fold table, **upload a slice** → YES/NO + per-fold spread + Grad-CAM + edema mask and overlay |
 | `/storage` | Size breakdown by category, disk usage |
 
 ### Team collaboration
@@ -105,8 +106,10 @@ the ledger**: who annotated which case, when, and the segment sizes.
 | `make_2d.py` | Cuts volumes into 1,975 training images |
 | `train_2d.py` | 2D classifier (yes/no), patient-level cross-validation |
 | `make_2d_seg.py` | Slices the 3D annotations into 2D image/mask pairs |
+| `make_seg2d_from_masks.py` | Painted 2D masks → `data/seg2d/` image/mask pairs |
 | `train_2d_seg.py` | 2D U-Net that **marks** the edema — bone + lesion channels |
-| `gradcam.py` | Grad-CAM heatmaps on held-out folds |
+| `infer_2d.py` | One image → YES/NO, Grad-CAM and edema mask, as JSON. Loads checkpoints; never trains |
+| `gradcam.py` | Grad-CAM heatmaps from the saved checkpoints, on held-out folds |
 | `seg2nifti.py` | Slicer `.seg.nrrd` → training labels, **with validation** |
 | `build_dataset.py` | nnU-Net layout + patient-level splits |
 | `train.py` | nnU-Net wrapper |
@@ -135,15 +138,31 @@ model trained only on healthy marrow.
 
 ## 6. Results so far
 
-**2D classifier — ResNet-18, 5-fold, patient-level splits, 3 epochs:**
+**2D classifier — ResNet-18, 5-fold, patient-level splits, 8 epochs, curated 2D dataset
+(94 images, 87 patients, 18 BME):**
 
 | Metric | Case level |
 |---|---|
-| Accuracy | 63.6% |
-| F1 | 0.589 |
-| **ROC AUC** | **0.658** (across folds **0.670 ± 0.053**) |
+| Accuracy | 90.8% |
+| F1 | 0.789 |
+| **ROC AUC** | **0.961** (across folds **0.977 ± 0.032**) |
+| Confusion | `[[64, 5], [3, 15]]` — TN, FP / FN, TP |
 
-This is **weak** — 0.5 is random guessing. Two honest reasons:
+**Do not quote this.** It is measured, seeded and reproducible, and it is also almost
+certainly inflated. Two pixel-level leaks were found on 2026-09-04:
+
+- **A red ellipse drawn around the lesion** is burned into `BME-2D-005` and `BME-2D-008` —
+  a human annotation, present in 2/25 BME images and 0/69 non-BME.
+- **A burned-in yellow A/P orientation overlay** appears in 19/69 non-BME images (28%) but
+  1/25 BME (4%), and the two folders are framed and cropped differently. They came from
+  different exporters, and "which exporter" is trivially learnable.
+
+Neither explains 0.96 on its own, but a classifier does not have to find edema when the
+folder is written on the image. Retrain on a centre crop that excludes the borders, drop or
+repair the two annotated images, and report whatever survives.
+
+The number it replaced, on the old volume-derived 1,975-slice set, was **0.658** — and that
+one was weak for two honest reasons that still apply here:
 
 1. **Noisy labels.** The label is per *case*, applied to every slice. A BME patient's scan has many
    slices with no edema on them, all labelled BME. Part of the task is unlearnable.

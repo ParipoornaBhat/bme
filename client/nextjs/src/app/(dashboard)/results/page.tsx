@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { Activity, Boxes, Eye, Layers, Loader2, RefreshCw } from "lucide-react";
+import TestImage from "./TestImage";
 
 /**
  * Model results, split into two independent pipelines.
@@ -42,11 +43,11 @@ type Payload = {
   };
 };
 
-type CamEntry = { case_id: string; true: number; pred: number; prob: number; thumb: string };
+type CamEntry = { case_id: string; true: number; pred: number; prob: number; fold: number; thumb: string };
 type CamPayload = {
-  available: boolean; running: boolean; log: string;
-  data: null | { arch: string; device: string; n: number; held_out_fold: number;
-                 caveat: string; epochs: number; entries: CamEntry[] };
+  available: boolean; running: boolean; log: string; trained: boolean;
+  data: null | { arch: string; device: string; n: number; n_folds: number;
+                 trained_at: string | null; caveat: string; entries: CamEntry[] };
 };
 
 const pct = (v?: number) =>
@@ -82,6 +83,7 @@ export default function ResultsPage() {
   const [loading, setLoading] = useState(true);
   const [cam, setCam] = useState<CamPayload | null>(null);
   const [camBusy, setCamBusy] = useState(false);
+  const [camError, setCamError] = useState<string | null>(null);
 
   const load = async () => {
     setLoading(true);
@@ -103,13 +105,14 @@ export default function ResultsPage() {
   };
 
   const makeCam = async () => {
-    setCamBusy(true);
+    setCamBusy(true); setCamError(null);
     try {
-      await fetch("/api/gradcam", {
+      const r = await fetch("/api/gradcam", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ epochs: 3, n: 24 }),
+        body: JSON.stringify({ n: 24 }),
       });
+      if (!r.ok) setCamError((await r.json().catch(() => ({}))).error ?? "could not start");
     } finally { setCamBusy(false); setTimeout(loadCam, 1500); }
   };
 
@@ -177,6 +180,8 @@ export default function ResultsPage() {
             labelled BME. <span className="font-semibold text-foreground">Quote the
             case-level row</span>, not the slice-level one.
           </div>
+
+          <TestImage />
 
           {!data?.twoD.available ? (
             <div className="rounded-lg border border-dashed border-border p-10 text-center text-sm text-muted-foreground">
@@ -277,6 +282,12 @@ export default function ResultsPage() {
               </button>
             </div>
 
+            {camError && (
+              <p className="mb-3 rounded border border-amber-500/40 bg-amber-500/10 p-2 text-xs">
+                {camError}
+              </p>
+            )}
+
             {cam?.running && (
               <pre className="mb-3 max-h-28 overflow-auto rounded bg-muted p-2 font-mono text-[10px]">
                 {cam.log || "starting…"}
@@ -286,10 +297,11 @@ export default function ResultsPage() {
             {cam?.available && cam.data ? (
               <>
                 <p className="mb-3 text-xs text-muted-foreground">
-                  {cam.data.arch} on {cam.data.device}, {cam.data.epochs} epoch
-                  {cam.data.epochs === 1 ? "" : "s"}, explaining held-out fold{" "}
-                  {cam.data.held_out_fold} — <strong>these slices were never trained on</strong>.
-                  Red marks the regions that most raised the model&apos;s score.
+                  {cam.data.arch} on {cam.data.device}, from the {cam.data.n_folds} saved fold
+                  checkpoints — no training was done to produce these. Each slice is explained by
+                  the fold model that held its case out, so{" "}
+                  <strong>no model saw the patient it is explaining</strong>. Red marks the regions
+                  that most raised that model&apos;s score.
                 </p>
                 {(() => {
                   // A model that predicts one class for nearly everything has not
@@ -352,8 +364,9 @@ export default function ResultsPage() {
               </>
             ) : !cam?.running ? (
               <p className="py-6 text-center text-sm text-muted-foreground">
-                No heatmaps yet. Generating trains a model on four folds and explains the fifth —
-                a few minutes on CPU.
+                {cam?.trained
+                  ? "No heatmaps yet. Generating loads the saved fold checkpoints and explains held-out slices — seconds, not minutes."
+                  : "No trained classifier yet. Train one on the Training page; Grad-CAM explains those weights rather than training its own."}
               </p>
             ) : null}
           </div>

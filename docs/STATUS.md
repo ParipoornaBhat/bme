@@ -10,15 +10,20 @@ Last updated: **2026-09-04**
 
 ## One-paragraph state
 
-Two pipelines run side by side. **2D** is a working classifier baseline with real
-cross-validated numbers — case-level AUC **0.670 ± 0.053**, weak and honestly so, plus two
-controlled negative results (intensity masking did not transfer; extra epochs only overfit).
-**3D** is the segmentation system from the PRD and is still waiting on annotations.
+Two pipelines run side by side. **2D** now trains, saves weights, and predicts on a new
+image end to end: upload a slice on `/results` and it returns YES/NO, a Grad-CAM heatmap and
+an edema mask, all from saved checkpoints. **3D** is the segmentation system from the PRD and
+is still waiting on annotations.
 
-The web app now does the whole loop in the browser: annotate, train, inspect results,
-check storage. Every filename in the dataset is pseudonymous — no patient name survives
-anywhere on disk. The critical path is unchanged: annotate ~10 cases, measure inter-rater
-Dice, then train the bone/lesion model.
+The web app does the whole loop in the browser: annotate, train, test a slice, inspect
+results, check storage. Every filename in the dataset is pseudonymous — no patient name
+survives anywhere on disk. The critical path is unchanged: annotate more cases, measure
+inter-rater Dice, then train the bone/lesion model properly.
+
+**Read the numbers with the n in mind.** The 2D classifier's case-level AUC on the curated
+dataset is **0.961** (per-fold **0.977 ± 0.032**) — but that is 18 BME patients against 69
+non-BME, 3–4 positives per validation fold, and it is a different dataset from the one that
+produced the old 0.658. It is not yet a defensible headline; see Known problems.
 
 ---
 
@@ -35,7 +40,8 @@ Phases are defined in [PRD.md](PRD.md) §8.
 | — | Domain schema (+ pgvector 0.8.6) | ✅ **applied and verified** — 17 tables, HNSW indexes live |
 | **0** | **De-identification** | ✅ **done** — 107 cases, 13,818 images, PHI verified clean |
 | — | DICOM→NIfTI + primary-series picker | ✅ 107/107 converted, data/worklist.csv written |
-| — | 2D baseline (extract, train, review, Grad-CAM) | ✅ AUC 0.670 ± 0.053 — weak but honest |
+| — | 2D baseline (extract, train, review, Grad-CAM) | ✅ trains, saves checkpoints, predicts on upload |
+| — | 2D inference: upload → YES/NO + Grad-CAM + edema mask | ✅ `infer_2d.py`, `/api/predict`, `/results` |
 | — | Annotation viewer: Four-Up, crosshair sync, pencil fill, 3D surface | ✅ save round-trip verified |
 | — | Web app: annotate / training / results / storage | ✅ built and API-verified |
 | — | Full pseudonymisation of every filename | ✅ 108 archives + 121 images renamed |
@@ -66,6 +72,19 @@ In order. Each step's output is the next step's input.
    Masks save to `data/annotations2d/<case>/<stem>.mask.png` as exact uint8 PNGs (0=bg,
    1=bone, 2=bme, 3=uncertain). `ml/scripts/make_seg2d_from_masks.py` converts them into
    `data/seg2d/` for `train_2d_seg.py`.
+
+0c. **The 2D loop is closed as of 2026-09-04.** Both trainers now save one checkpoint per
+   fold (`data/results2d/checkpoints/`, `data/results2dseg/checkpoints/`) with a manifest
+   recording the preprocessing and the class order. `/results` has an upload panel that runs
+   those checkpoints on a new image; Grad-CAM loads them instead of training a throwaway
+   model. **Both trainers were broken before this** — the dataset rebuild left images at 77
+   different sizes with no `Resize` in the transform, so `DataLoader` could not collate a
+   batch and training died on the first step.
+
+0d. **Do not quote the 0.961 AUC.** Two pixel-level leaks are already confirmed — a red
+   lesion ellipse burned into two BME images, and a yellow orientation overlay that is 7x
+   commoner in the non-BME folder. See Known problems. Retrain on a centre crop and drop
+   the annotated images first; whatever survives that is the number.
 
 1. **Annotate in the browser: `/annotate` → 3D volume tab.** Pick a case, paint, save.
    No file dragging, no folder picking, and the segments are named correctly for you.
@@ -175,6 +194,8 @@ Carried from [PRD.md](PRD.md) §10, updated with what the data answered.
 
 | Problem | Impact | Action |
 |---|---|---|
+| **2D case-level AUC jumped 0.658 → 0.961 when the dataset was rebuilt** | A number that good on this task, from 18 positive patients, is more likely a dataset shortcut than a modelling win | Two leaks measured on 2026-09-04. **(a)** `BME-2D-005` and `BME-2D-008` carry a **red ellipse drawn around the lesion**, burned into the pixels — 2/25 BME files, 0/69 non-BME. **(b)** A burned-in yellow A/P orientation overlay appears in **19/69 non-BME (28%)** but **1/25 BME (4%)**, and the two folders are framed and cropped differently — different exporters. Neither alone explains 0.96, but together they make it indefensible. **Before quoting anything: retrain on a centre crop excluding the borders, and drop or repair the two ellipse images.** |
+| 18 BME patients is the whole 2D positive pool | 3–4 positives per validation fold; the per-fold spread is wider than most effects | Always report mean ± std with n stated. Never quote one fold. |
 | **Every case filename carries a patient name** | PHI exposure | Fixed by step 1. Data is gitignored, so nothing has leaked. |
 | 23 cases have full PHI in DICOM headers | PHI exposure | Fixed by step 1. |
 | Burned-in pixel text unchecked | Anonymisers do not touch pixels | `deid.py` reports the `BurnedInAnnotation` flag; still spot-check visually. |
@@ -210,6 +231,10 @@ docs/PRD.md             the plan: architecture, evaluation, phases
 docs/DATASET.md         what the 107 cases actually contain
 docs/ANNOTATION_SOP.md  how to annotate; read before touching Slicer
 CLAUDE.md               working rules, git conventions, PHI handling
+ml/scripts/train_2d.py  2D classifier; writes data/results2d/checkpoints/
+ml/scripts/train_2d_seg.py 2D U-Net; writes data/results2dseg/checkpoints/
+ml/scripts/infer_2d.py  one image -> YES/NO + Grad-CAM + mask, as JSON
+ml/scripts/gradcam.py   heatmaps from the saved checkpoints; never trains
 ml/scripts/inventory.py re-run the dataset inventory
 ml/scripts/deid.py      de-identification
 ml/scripts/convert.py   DICOM -> NIfTI + picks each case's primary series

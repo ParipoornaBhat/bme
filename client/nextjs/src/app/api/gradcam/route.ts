@@ -8,9 +8,11 @@ import { spawn } from "node:child_process";
  *
  * GET  returns the generated set (thumbnails inline, so the page needs no
  *      second round trip per image).
- * POST regenerates them: trains on four folds and explains the held-out one, so
- *      every heatmap comes from a slice the model has never seen. Explaining
- *      training slices would show memorisation, not reasoning.
+ * POST regenerates them from the checkpoints train_2d.py already saved. It does
+ *      not train. Each slice is explained by the fold model that held its case
+ *      out, so every heatmap still comes from a model that has never seen that
+ *      patient — explaining training slices would show memorisation, not
+ *      reasoning.
  */
 
 export const dynamic = "force-dynamic";
@@ -31,6 +33,8 @@ function python() {
 const JSON_PATH = () => path.join(root(), "data", "results2d", "gradcam.json");
 const PID = () => path.join(root(), "data", "results2d", "gradcam.pid");
 const LOG = () => path.join(root(), "data", "results2d", "gradcam.log");
+const MANIFEST = () =>
+  path.join(root(), "data", "results2d", "checkpoints", "manifest.json");
 
 function running() {
   const f = PID();
@@ -65,15 +69,33 @@ export async function GET() {
       .slice(-15)
       .join("\n");
   }
-  return NextResponse.json({ available: data !== null, data, running: running(), log });
+  return NextResponse.json({
+    available: data !== null,
+    data,
+    running: running(),
+    log,
+    trained: fs.existsSync(MANIFEST()),
+  });
 }
 
 export async function POST(req: Request) {
   if (running()) {
     return NextResponse.json({ error: "already generating" }, { status: 409 });
   }
+  // Fail here rather than spawning a process that will exit with the same
+  // message into a log file nobody is looking at yet.
+  if (!fs.existsSync(MANIFEST())) {
+    return NextResponse.json(
+      {
+        error:
+          "No trained classifier to explain. Train one on the Training page first — " +
+          "Grad-CAM reads the saved checkpoints, it does not train its own model.",
+      },
+      { status: 400 },
+    );
+  }
+
   const body = await req.json().catch(() => ({}));
-  const epochs = Math.min(Math.max(Number(body.epochs ?? 3), 1), 15);
   const n = Math.min(Math.max(Number(body.n ?? 24), 4), 60);
 
   const r = root();
@@ -82,12 +104,11 @@ export async function POST(req: Request) {
 
   const child = spawn(
     python(),
-    ["-u", path.join(r, "ml", "scripts", "gradcam.py"), r,
-     "--epochs", String(epochs), "--n", String(n)],
+    ["-u", path.join(r, "ml", "scripts", "gradcam.py"), r, "--n", String(n)],
     { cwd: r, detached: true, stdio: ["ignore", log, log] },
   );
   child.unref();
   if (child.pid) fs.writeFileSync(PID(), String(child.pid));
 
-  return NextResponse.json({ ok: true, pid: child.pid, epochs, n });
+  return NextResponse.json({ ok: true, pid: child.pid, n });
 }

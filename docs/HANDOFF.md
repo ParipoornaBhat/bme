@@ -105,6 +105,26 @@ Two further points:
 
 ## Where the two tracks stand
 
+### Both 2D models now save weights and run on new images
+
+Added 2026-09-04, after finding that neither trainer had ever kept a checkpoint and that
+both crashed on the rebuilt dataset:
+
+- `data/slices2d` has **77 distinct image sizes across 94 files**. Neither `SliceDS` nor
+  `SegDS` resized, so `DataLoader` could not stack a batch. The old `make_2d.py` resized to
+  256 and `build_2d.py` does not — that is where the regression came from. Both datasets now
+  resize to 256 (masks NEAREST), and `IMG_SIZE` is a module constant the inference path
+  imports rather than retypes.
+- Both trainers write `checkpoints/fold<k>.pt` plus a `manifest.json` recording arch, class
+  order, input size and normalisation. Cross-validation gives five sets of weights, not one;
+  inference averages over all of them and shows the per-fold spread. Picking the best fold
+  would be selecting on the data that scored it.
+- `gradcam.py` **loads** those checkpoints. It used to train a fresh 3-epoch model on every
+  Generate click, which is why the button appeared to do nothing useful. Each slice is now
+  explained by the fold model that held its case out.
+- `infer_2d.py` + `/api/predict` + the upload panel on `/results` do the full loop:
+  image → preprocess → detection YES/NO → Grad-CAM → edema mask and overlay.
+
 ### Classifier — runs today
 
 `/training` -> "Detection (BME Present / Absent)". Everything is wired:
