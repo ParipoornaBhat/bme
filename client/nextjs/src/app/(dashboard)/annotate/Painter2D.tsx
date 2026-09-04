@@ -266,17 +266,38 @@ export default function Painter2D() {
     if (pts.length < 2) return;
 
     ctx.save();
-    ctx.strokeStyle = isErasing
-      ? "rgba(239, 68, 68, 0.9)"
+    const strokeColor = isErasing
+      ? "#ef4444"
       : activeLabel === 1
-      ? "rgba(16, 185, 129, 0.95)"
+      ? "#10b981"
       : activeLabel === 2
-      ? "rgba(239, 68, 68, 0.95)"
-      : "rgba(245, 158, 11, 0.95)";
-    ctx.lineWidth = 2;
+      ? "#ef4444"
+      : "#f59e0b";
+
+    const fillColor = isErasing
+      ? "rgba(239, 68, 68, 0.15)"
+      : activeLabel === 1
+      ? "rgba(16, 185, 129, 0.18)"
+      : activeLabel === 2
+      ? "rgba(239, 68, 68, 0.22)"
+      : "rgba(245, 158, 11, 0.20)";
+
+    // Draw polygon fill preview
+    ctx.fillStyle = fillColor;
+    ctx.beginPath();
+    ctx.moveTo(pts[0][0], pts[0][1]);
+    for (let i = 1; i < pts.length; i++) {
+      ctx.lineTo(pts[i][0], pts[i][1]);
+    }
+    ctx.closePath();
+    ctx.fill();
+
+    // Draw clear, solid, non-dotted boundary line
+    ctx.strokeStyle = strokeColor;
+    ctx.lineWidth = 2.5;
     ctx.lineJoin = "round";
     ctx.lineCap = "round";
-    ctx.setLineDash([4, 4]);
+    ctx.setLineDash([]); // SOLID line, NOT dotted
 
     ctx.beginPath();
     ctx.moveTo(pts[0][0], pts[0][1]);
@@ -284,6 +305,7 @@ export default function Painter2D() {
       ctx.lineTo(pts[i][0], pts[i][1]);
     }
     ctx.stroke();
+
     ctx.restore();
   }, [isErasing, activeLabel]);
 
@@ -735,11 +757,15 @@ export default function Painter2D() {
             {/* Base MRI image canvas */}
             <canvas
               ref={bgCanvasRef}
+              width={imgDim.w || 512}
+              height={imgDim.h || 512}
               className="absolute inset-0 block pointer-events-none"
             />
             {/* Drawing mask layer canvas */}
             <canvas
               ref={maskCanvasRef}
+              width={imgDim.w || 512}
+              height={imgDim.h || 512}
               onMouseDown={handleMouseDown}
               onMouseMove={handleMouseMove}
               onMouseUp={handleMouseUp}
@@ -749,6 +775,8 @@ export default function Painter2D() {
             {/* Live pencil polygon overlay preview canvas */}
             <canvas
               ref={overlayCanvasRef}
+              width={imgDim.w || 512}
+              height={imgDim.h || 512}
               className="absolute inset-0 block pointer-events-none"
             />
           </div>
