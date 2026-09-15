@@ -21,12 +21,16 @@ import {
   Save,
   Search,
   Trash2,
+  Users,
   X,
   XCircle,
   ZoomIn,
   ZoomOut,
 } from "lucide-react";
 import { toast } from "sonner";
+import { useSession } from "~/lib/auth-client";
+import CollaborationMasterPanel from "~/components/collaborate/CollaborationMasterPanel";
+import { useCollaboration } from "~/lib/useCollaboration";
 
 export type Case2DSlice = {
   caseId: string;
@@ -80,6 +84,58 @@ export default function Painter2D() {
 
   const [zoom, setZoom] = useState<number>(1);
   const [pan, setPan] = useState<{ x: number; y: number }>({ x: 0, y: 0 });
+
+  // Collaboration States
+  const { data: session } = useSession();
+  const [collabToken, setCollabToken] = useState<string | null>(null);
+  const [shareUrl, setShareUrl] = useState<string>("");
+  const [showMasterPanel, setShowMasterPanel] = useState(false);
+  const [startingCollab, setStartingCollab] = useState(false);
+
+  const collab = useCollaboration({
+    token: collabToken || "",
+    userId: session?.user?.id || "master_user",
+    userName: session?.user?.name || "Dr. Master",
+  });
+
+  const startCollaboration = async () => {
+    if (collabToken) {
+      setShowMasterPanel(true);
+      return;
+    }
+    setStartingCollab(true);
+    try {
+      const res = await fetch("/api/collaborate/session", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          caseId: selected?.stem || "2d_slice",
+          userId: session?.user?.id || "master_user",
+          userName: session?.user?.name || "Dr. Master",
+        }),
+      });
+      const data = await res.json();
+      if (res.ok && data.token) {
+        setCollabToken(data.token);
+        setShareUrl(data.shareUrl);
+        setShowMasterPanel(true);
+      }
+    } catch (err) {
+      console.error("Failed to start 2D collaboration:", err);
+    } finally {
+      setStartingCollab(false);
+    }
+  };
+
+  useEffect(() => {
+    if (collabToken && collab.connected && collab.role === "MASTER" && selected) {
+      collab.updateViewpoint({
+        sliceIndex: slices.findIndex((s) => s.stem === selected.stem),
+        zoom,
+        pan,
+      });
+    }
+  }, [selected, zoom, pan, collabToken, collab.connected, collab.role, slices, collab.updateViewpoint]);
   const [isPanning, setIsPanning] = useState(false);
   const panStartRef = useRef<{ x: number; y: number }>({ x: 0, y: 0 });
   const [hoveredSlice, setHoveredSlice] = useState<Case2DSlice | null>(null);
@@ -1457,6 +1513,17 @@ export default function Painter2D() {
               )}
             </div>
 
+            {/* Collaboration Button */}
+            <button
+              type="button"
+              onClick={startCollaboration}
+              disabled={startingCollab}
+              className="inline-flex items-center gap-1.5 rounded-md border border-blue-500/40 bg-blue-500/10 px-2.5 py-1 text-xs font-semibold text-blue-400 hover:bg-blue-500/20 transition-all"
+            >
+              <Users className="h-3.5 w-3.5" />
+              <span>{collabToken ? "Collab Panel" : "Start Collaboration"}</span>
+            </button>
+
             <button
               onClick={clearMask}
               title="Clear current canvas mask"
@@ -1772,6 +1839,24 @@ export default function Painter2D() {
               </span>
             </div>
           </div>
+        </div>
+      )}
+
+      {showMasterPanel && collabToken && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4 backdrop-blur-sm">
+          <CollaborationMasterPanel
+            shareUrl={shareUrl}
+            participants={collab.participants}
+            currentUserId={collab.currentUserId}
+            onUpdatePermission={collab.updatePermission}
+            onRemoveUser={collab.removeUser}
+            onEndSession={() => {
+              collab.endSession();
+              setCollabToken(null);
+              setShowMasterPanel(false);
+            }}
+            onClose={() => setShowMasterPanel(false)}
+          />
         </div>
       )}
     </div>

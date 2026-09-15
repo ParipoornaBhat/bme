@@ -1,9 +1,11 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Eraser, Lasso, Link2, Link2Off, Loader2, Minus, Paintbrush, Plus, Redo2, RotateCcw, Save } from "lucide-react";
+import { Eraser, Lasso, Link2, Link2Off, Loader2, Minus, Paintbrush, Plus, Redo2, RotateCcw, Save, Users } from "lucide-react";
 import { useSession } from "~/lib/auth-client";
 import Render3D from "./Render3D";
+import CollaborationMasterPanel from "~/components/collaborate/CollaborationMasterPanel";
+import { useCollaboration } from "~/lib/useCollaboration";
 
 /**
  * Three-plane viewer with painting, modelled on 3D Slicer's Four-Up layout.
@@ -154,6 +156,58 @@ export default function Viewer({ caseId, onSaved }: { caseId: string; onSaved?: 
   const [dirty, setDirty] = useState(false);
   const [saving, setSaving] = useState(false);
   const [counts, setCounts] = useState<[number, number, number]>([0, 0, 0]);
+
+  // Collaboration States
+  const [collabToken, setCollabToken] = useState<string | null>(null);
+  const [shareUrl, setShareUrl] = useState<string>("");
+  const [showMasterPanel, setShowMasterPanel] = useState(false);
+  const [startingCollab, setStartingCollab] = useState(false);
+
+  const collab = useCollaboration({
+    token: collabToken || "",
+    userId: session?.user?.id || "master_user",
+    userName: session?.user?.name || "Dr. Master",
+  });
+
+  const startCollaboration = async () => {
+    if (collabToken) {
+      setShowMasterPanel(true);
+      return;
+    }
+    setStartingCollab(true);
+    try {
+      const res = await fetch("/api/collaborate/session", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          caseId,
+          userId: session?.user?.id || "master_user",
+          userName: session?.user?.name || "Dr. Master",
+        }),
+      });
+      const data = await res.json();
+      if (res.ok && data.token) {
+        setCollabToken(data.token);
+        setShareUrl(data.shareUrl);
+        setShowMasterPanel(true);
+      }
+    } catch (err) {
+      console.error("Failed to start collaboration:", err);
+    } finally {
+      setStartingCollab(false);
+    }
+  };
+
+  useEffect(() => {
+    if (collabToken && collab.connected && collab.role === "MASTER" && vol) {
+      const ax = vol.axes[activePlane].slice;
+      collab.updateViewpoint({
+        sliceIndex: axisVal(cursor, ax),
+        plane: activePlane,
+        zoom: zoom[activePlane] ?? 1.0,
+      });
+    }
+  }, [cursor, activePlane, zoom, collabToken, collab.connected, collab.role, vol, collab.updateViewpoint]);
 
   const canvases = useRef<Record<Plane, HTMLCanvasElement | null>>({
     axial: null, coronal: null, sagittal: null,
@@ -649,6 +703,14 @@ export default function Viewer({ caseId, onSaved }: { caseId: string; onSaved?: 
             className="inline-flex items-center gap-1.5 rounded-md border border-border px-2.5 py-1.5 text-sm">
             <Redo2 className="h-4 w-4" />
           </button>
+          <button
+            onClick={startCollaboration}
+            disabled={startingCollab}
+            className="inline-flex items-center gap-1.5 rounded-md border border-blue-500/40 bg-blue-500/10 px-3 py-1.5 text-sm font-semibold text-blue-400 hover:bg-blue-500/20 transition-all"
+          >
+            <Users className="h-4 w-4" />
+            {collabToken ? "Collaboration Panel" : "Start Collaboration"}
+          </button>
           <button onClick={save} disabled={saving || !dirty}
             className="inline-flex items-center gap-1.5 rounded-md bg-primary px-3 py-1.5 text-sm font-medium text-primary-foreground disabled:opacity-40">
             {saving ? <Loader2 className="h-4 w-4 animate-spin" /> : <Save className="h-4 w-4" />}
@@ -810,6 +872,24 @@ export default function Viewer({ caseId, onSaved }: { caseId: string; onSaved?: 
           </div>
         </div>
       </div>
+
+      {showMasterPanel && collabToken && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4 backdrop-blur-sm">
+          <CollaborationMasterPanel
+            shareUrl={shareUrl}
+            participants={collab.participants}
+            currentUserId={collab.currentUserId}
+            onUpdatePermission={collab.updatePermission}
+            onRemoveUser={collab.removeUser}
+            onEndSession={() => {
+              collab.endSession();
+              setCollabToken(null);
+              setShowMasterPanel(false);
+            }}
+            onClose={() => setShowMasterPanel(false)}
+          />
+        </div>
+      )}
     </div>
   );
 }

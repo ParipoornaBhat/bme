@@ -106,11 +106,14 @@ app.get("/api/auth/mobile-callback", (c) => {
   return c.redirect(`${redirectUri}${separator}token=${token}`);
 });
 
+import collaborateHandler from "./routes/collaborate.js";
+
 app.on(["GET", "POST"], "/api/auth/*", (c) => {
   return auth.handler(c.req.raw);
 });
 
 app.route("/api/users", usersHandler);
 app.route("/api/roles", rolesHandler);
+app.route("/api/collaborate", collaborateHandler);
 
 export default app;
