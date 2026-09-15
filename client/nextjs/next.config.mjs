@@ -24,6 +24,19 @@ const nextConfig = {
     };
     return config;
   },
+
+  async rewrites() {
+    const apiHost =
+      process.env.EXPO_PUBLIC_SERVER_URL ||
+      process.env.NEXT_PUBLIC_SERVER_URL ||
+      "http://localhost:4000";
+    return [
+      {
+        source: "/api/collaborate/:path*",
+        destination: `${apiHost}/api/collaborate/:path*`,
+      },
+    ];
+  },
 };
 
 export default nextConfig;

@@ -5,7 +5,7 @@ import { createSession, getSession, validatePermission } from "../lib/collab-ser
 
 const app = new Hono();
 
-const ID = /^(BME|NBME)-\d{3}$/;
+const ID = /^[a-zA-Z0-9_-]+$/;
 
 /**
  * POST /api/collaborate/session
