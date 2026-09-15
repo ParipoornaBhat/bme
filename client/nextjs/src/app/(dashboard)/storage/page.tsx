@@ -2,8 +2,12 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { HardDrive, Loader2, RefreshCw } from "lucide-react";
+import { SystemMonitor, useSystem } from "~/components/SystemMonitor";
 
-type Item = { label: string; group: string; path: string; exists: boolean; bytes: number; files: number };
+type Item = {
+  label: string; group: string; path: string; exists: boolean; bytes: number; files: number;
+  reason?: string; removable?: string;
+};
 type Group = { name: string; bytes: number; files: number; items: Item[] };
 type Payload = {
   groups: Group[]; total: number; totalFiles: number;
@@ -23,12 +27,15 @@ const HUES: Record<string, string> = {
   "Processed — 3D": "bg-sky-500",
   "Processed — 2D": "bg-emerald-500",
   "Models & results": "bg-amber-500",
+  "GPU support": "bg-teal-500",
   Code: "bg-violet-500",
 };
 
 export default function StoragePage() {
   const [data, setData] = useState<Payload | null>(null);
   const [loading, setLoading] = useState(true);
+  const sys = useSystem(4000);
+  const [reverting, setReverting] = useState(false);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -39,6 +46,18 @@ export default function StoragePage() {
       setLoading(false);
     }
   }, []);
+
+  const revertTorch = async () => {
+    if (!confirm(
+      "Switch back to CPU-only PyTorch? This frees the CUDA runtime, but training returns to CPU speed — segmentation goes from minutes to over an hour. It downloads a smaller CPU wheel, so it is not instant, and you can reinstall the GPU build later.",
+    )) return;
+    setReverting(true);
+    try {
+      const r = await fetch("/api/storage", { method: "DELETE" });
+      const j = await r.json();
+      alert(j.note ?? j.error ?? "started");
+    } finally { setReverting(false); }
+  };
 
   useEffect(() => { load(); }, [load]);
 
@@ -113,6 +132,8 @@ export default function StoragePage() {
         </div>
       </div>
 
+      <SystemMonitor sys={sys} variant="cards" />
+
       <div className="space-y-4">
         {data.groups.map((g) => (
           <div key={g.name} className="rounded-lg border border-border bg-card p-4">
@@ -125,12 +146,29 @@ export default function StoragePage() {
                 {human(g.bytes)} &middot; {g.files.toLocaleString()} files
               </span>
             </div>
+            {g.name === "GPU support" && (
+              <div className="mb-3 flex flex-wrap items-center justify-between gap-2 rounded-md bg-muted/50 p-2.5">
+                <p className="max-w-xl text-xs text-muted-foreground">
+                  Installed on purpose so training can use the GPU. Safe to remove at any time —
+                  the project keeps working, it just trains on the CPU again.
+                </p>
+                <button onClick={revertTorch} disabled={reverting}
+                  className="rounded-md border border-border px-2.5 py-1 text-xs text-muted-foreground hover:border-destructive hover:text-destructive disabled:opacity-40">
+                  {reverting ? "Starting…" : "Switch back to CPU-only"}
+                </button>
+              </div>
+            )}
             <div className="space-y-1.5">
               {g.items.map((i) => (
-                <div key={i.path} className="flex items-center gap-3 text-sm">
+                <div key={i.path} className="flex items-start gap-3 text-sm">
                   <span className={`flex-1 ${i.exists ? "" : "text-muted-foreground/50"}`}>
                     {i.label}
-                    {!i.exists && <span className="ml-2 text-xs">(not created yet)</span>}
+                    {!i.exists && <span className="ml-2 text-xs">(not installed)</span>}
+                    {i.reason && (
+                      <span className="mt-0.5 block text-[11px] leading-snug text-muted-foreground/70">
+                        {i.reason}
+                      </span>
+                    )}
                   </span>
                   <div className="hidden h-1.5 w-32 overflow-hidden rounded-full bg-muted sm:block">
                     <div className={`h-full ${HUES[g.name] ?? "bg-neutral-400"}`}

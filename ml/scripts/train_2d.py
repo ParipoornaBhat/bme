@@ -130,6 +130,32 @@ def build_model(arch: str, n_classes: int = 2):
     return model
 
 
+def resolve_device(choice: str) -> str:
+    """Turn --device into a torch device string.
+
+    'cuda' is honoured strictly: if the GPU is not usable the run stops rather
+    than quietly falling back. A segmentation run is 20-40x slower on CPU, and
+    silently taking that path turns a four-minute job into ninety minutes with
+    nothing on screen to say why.
+
+    'auto' prefers the GPU and says which it chose, so a CPU run is never a
+    surprise either.
+    """
+    if choice == "cpu":
+        return "cpu"
+    if torch.cuda.is_available():
+        return "cuda"
+    if choice == "cuda":
+        why = (
+            "this PyTorch is a CPU-only build (torch.version.cuda is None); "
+            "reinstall with a CUDA wheel"
+            if torch.version.cuda is None
+            else "no CUDA device is visible to PyTorch"
+        )
+        raise SystemExit(f"--device cuda requested but unavailable: {why}")
+    return "cpu"
+
+
 def set_seed(s=SEED):
     random.seed(s); np.random.seed(s); torch.manual_seed(s)
     torch.cuda.manual_seed_all(s)
@@ -248,10 +274,25 @@ def run_fold(tr_rows, va_rows, root, epochs, device, arch="resnet18", bs=32, lr=
     if patience and best_state is not None:
         model.load_state_dict(best_state)
 
+    probs, trues, idxs = predict(model, vl, device, tta)
+
+    # The same model scored on its own training fold. Only used to choose the
+    # decision threshold (see pick_threshold); never reported as a result.
+    # Evaluation transform, not the training augmentation, or the threshold
+    # would be picked on a distribution the validation set never sees.
+    trl = DataLoader(SliceDS(tr_rows, root, False), batch_size=bs, shuffle=False,
+                     num_workers=0)
+    tr_p, tr_y, _ = predict(model, trl, device, tta)
+
+    return model, probs, trues, idxs, tr_p, tr_y
+
+
+def predict(model, loader, device, tta=False):
+    """Probability of BME for every item in a loader."""
     model.eval()
     probs, trues, idxs = [], [], []
     with torch.no_grad():
-        for x, y, i in vl:
+        for x, y, i in loader:
             x = x.to(device)
             # Test-time augmentation: average the prediction over the image and
             # a few cheap transforms of it. A borderline slice that only trips
@@ -268,7 +309,56 @@ def run_fold(tr_rows, va_rows, root, epochs, device, arch="resnet18", bs=32, lr=
                 acc += torch.softmax(model(v), 1)[:, 1]
             p = acc / len(views)
             probs += p.cpu().tolist(); trues += y.tolist(); idxs += i.tolist()
-    return model, np.array(probs), np.array(trues), idxs
+    return np.array(probs), np.array(trues), idxs
+
+
+def pick_threshold(y, p):
+    """Decision threshold that maximises Youden's J on the given scores.
+
+    WHY THIS EXISTS
+        0.5 is not a decision boundary, it is a default. With 3.8 negatives per
+        positive and a class-weighted loss, the scores are not centred on 0.5 at
+        all. One fold of an earlier run scored AUC 1.00 with recall 0.00 — the
+        model had separated the classes perfectly and the 0.5 cut sat above
+        every positive, so it called everything negative and threw the fold away.
+
+        J = sensitivity + specificity - 1, maximised over the observed scores.
+        It weights a missed lesion the same as a false alarm, which is the
+        neutral choice; if the clinical cost is asymmetric, fix a target
+        sensitivity instead and take the best specificity available at it.
+
+    WHERE IT MAY BE CALLED FROM
+        Training-fold scores only. Choosing it on validation would tune the
+        thing being measured, and the reported number would stop meaning
+        anything. The caller is responsible for honouring that.
+
+    MEASURED RESULT — off by default, and why
+        On 3-fold / 6-epoch resnet18 (94 slices, 87 cases) this moved slice F1
+        from 0.741 to 0.763 but dropped recall from 0.789 to 0.678, and
+        case-level F1 from 0.700 to 0.667. It is a net loss on the metric that
+        matters, so --threshold defaults to 'fixed'.
+
+        The cause is visible in the chosen values: one fold picked 0.95, pinned
+        at the clamp. A trained model is overconfident on its own training
+        fold, so the scores there are pushed to the extremes and the J-optimal
+        cut sits somewhere validation never reproduces.
+
+        Fixing it properly needs an inner cross-validation inside each training
+        fold, which costs k times the training time. Kept here, off, because
+        the machinery is right even though this estimate of the threshold is
+        not — and because a later run on more patients may change the answer.
+    """
+    y = np.asarray(y)
+    if len(np.unique(y)) < 2:
+        return 0.5
+    fpr, tpr, thr = roc_curve(y, p)
+    j = tpr - fpr
+    best = float(thr[int(np.argmax(j))])
+    # roc_curve's first threshold is +inf by construction; it would reject
+    # everything, which is precisely the failure this function exists to stop.
+    if not np.isfinite(best):
+        return 0.5
+    return float(np.clip(best, 0.05, 0.95))
 
 
 def save_fold(path: Path, model, arch: str, fold: int, val_auc: float):
@@ -312,6 +402,14 @@ def main():
                          "(ResNet-18 has 10; published work found ~6 best)")
     ap.add_argument("--patience", type=int, default=0, metavar="N",
                     help="early-stop after N epochs without a validation AUC gain")
+    ap.add_argument("--device", choices=("auto", "cuda", "cpu"), default="auto",
+                    help="where to train. 'auto' uses the GPU when one is "
+                         "usable and falls back to CPU; 'cuda' fails loudly "
+                         "rather than training slowly by accident")
+    ap.add_argument("--threshold", choices=("auto", "fixed"), default="fixed",
+                    help="'fixed' uses 0.5 (default, and measured better here); "
+                         "'auto' picks it per fold on the TRAINING fold by "
+                         "Youden's J. Metrics at 0.5 are recorded either way.")
     ap.add_argument("--tta", action="store_true",
                     help="test-time augmentation — averages over flips/shifts at "
                          "inference. No retraining; reduces false positives.")
@@ -330,7 +428,7 @@ def main():
 
     rows = list(csv.DictReader(open(idx, encoding="utf-8")))
     by_case, folds = patient_folds(rows, args.folds)
-    device = "cuda" if torch.cuda.is_available() else "cpu"
+    device = resolve_device(args.device)
 
     print(f"slices {len(rows)}   cases {len(by_case)}   device {device}   "
           f"arch {args.arch}   dataset {args.dataset}")
@@ -338,6 +436,7 @@ def main():
 
     all_p, all_y, all_rows, all_fold = [], [], [], []
     per_fold = []
+    thresholds = []
 
     # Cross-validation produces one set of weights per fold, not one model. All
     # of them are kept and inference averages over them; picking the best fold
@@ -359,22 +458,36 @@ def main():
         print(f"  fold {k}: train={len(tr_rows)} slices / val={len(va_rows)} slices "
               f"({len(va_cases)} cases)")
 
-        model, p, y, order = run_fold(tr_rows, va_rows, root, args.epochs, device,
-                                      args.arch, args.batch, tta=args.tta,
-                                      freeze=args.freeze, patience=args.patience)
-        s = stats(y, p)
+        model, p, y, order, tr_p, tr_y = run_fold(
+            tr_rows, va_rows, root, args.epochs, device,
+            args.arch, args.batch, tta=args.tta,
+            freeze=args.freeze, patience=args.patience)
+
+        # Chosen on the training fold, applied to validation. Never the reverse.
+        thr = 0.5 if args.threshold == "fixed" else pick_threshold(tr_y, tr_p)
+        thresholds.append(thr)
+        s = stats(y, p, thr)
+        s["threshold"] = thr
+        # Kept so the tuning can never quietly flatter the result: both numbers
+        # are in metrics.json and the difference between them is visible.
+        s["at_0.5"] = {k: v for k, v in stats(y, p, 0.5).items()
+                       if k in ("accuracy", "precision", "recall", "f1")}
         per_fold.append(s)
         save_fold(ckpt_dir / f"fold{k}.pt", model, args.arch, k, s["auc"])
         saved_folds.append({"fold": k, "file": f"fold{k}.pt",
                             "val_auc": None if np.isnan(s["auc"]) else s["auc"]})
         print(f"      -> acc={s['accuracy']:.3f} f1={s['f1']:.3f} auc={s['auc']:.3f}"
+              f"  thr={thr:.2f} (f1@0.5={s['at_0.5']['f1']:.3f})"
               f"  (weights -> checkpoints/fold{k}.pt)\n")
 
         for j, oi in enumerate(order):
             all_rows.append(va_rows[oi]); all_p.append(p[j]); all_y.append(y[j]); all_fold.append(k)
 
     all_p, all_y = np.array(all_p), np.array(all_y)
-    slice_m = stats(all_y, all_p)
+    # Pooled metrics need one threshold, and each fold chose its own. The mean
+    # is the honest summary: taking the best fold's would be picking a winner.
+    pooled_thr = float(np.mean(thresholds)) if thresholds else 0.5
+    slice_m = stats(all_y, all_p, pooled_thr)
 
     # case level: mean probability over the case's slices
     case_p, case_y, case_ids = defaultdict(list), {}, []
@@ -383,7 +496,9 @@ def main():
     case_ids = sorted(case_p)
     cp = np.array([np.mean(case_p[c]) for c in case_ids])
     cy = np.array([case_y[c] for c in case_ids])
-    case_m = stats(cy, cp)
+    case_m = stats(cy, cp, pooled_thr)
+    case_m["at_0.5"] = {k: v for k, v in stats(cy, cp, 0.5).items()
+                        if k in ("accuracy", "precision", "recall", "f1")}
 
     out = base / "data" / "results2d"
     out.mkdir(parents=True, exist_ok=True)
@@ -397,6 +512,9 @@ def main():
         "model": f"{args.arch} (ImageNet pretrained)", "arch": args.arch,
         "dataset": args.dataset, "tta": args.tta, "freeze": args.freeze,
         "patience": args.patience, "device": device,
+        "threshold_policy": args.threshold,
+        "threshold_per_fold": [round(t, 4) for t in thresholds],
+        "threshold_pooled": round(pooled_thr, 4),
         "n_slices": len(rows), "n_cases": len(by_case),
         "slice_level": slice_m,
         "case_level": case_m,

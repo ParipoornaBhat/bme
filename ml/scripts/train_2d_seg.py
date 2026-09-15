@@ -146,6 +146,34 @@ class SegDS(Dataset):
         return x, y
 
 
+
+
+def resolve_device(choice: str) -> str:
+    """Turn --device into a torch device string.
+
+    'cuda' is honoured strictly: if the GPU is not usable the run stops rather
+    than quietly falling back. A segmentation run is 20-40x slower on CPU, and
+    silently taking that path turns a four-minute job into ninety minutes with
+    nothing on screen to say why.
+
+    'auto' prefers the GPU and says which it chose, so a CPU run is never a
+    surprise either.
+    """
+    if choice == "cpu":
+        return "cpu"
+    if torch.cuda.is_available():
+        return "cuda"
+    if choice == "cuda":
+        why = (
+            "this PyTorch is a CPU-only build (torch.version.cuda is None); "
+            "reinstall with a CUDA wheel"
+            if torch.version.cuda is None
+            else "no CUDA device is visible to PyTorch"
+        )
+        raise SystemExit(f"--device cuda requested but unavailable: {why}")
+    return "cpu"
+
+
 def dice_focal(logits, target, eps=1.0):
     p = torch.sigmoid(logits)
     num = 2 * (p * target).sum((0, 2, 3)) + eps
@@ -183,6 +211,10 @@ def main():
     ap.add_argument("--epochs", type=int, default=40)
     ap.add_argument("--batch", type=int, default=8)
     ap.add_argument("--lr", type=float, default=1e-3)
+    ap.add_argument("--device", choices=("auto", "cuda", "cpu"), default="auto",
+                    help="where to train. 'auto' uses the GPU when one is "
+                         "usable and falls back to CPU; 'cuda' fails loudly "
+                         "rather than training slowly by accident")
     args = ap.parse_args()
 
     random.seed(SEED); np.random.seed(SEED); torch.manual_seed(SEED)
@@ -195,7 +227,7 @@ def main():
 
     rows = list(csv.DictReader(open(idx, encoding="utf-8")))
     by_case, folds = patient_folds(rows, args.folds)
-    device = "cuda" if torch.cuda.is_available() else "cpu"
+    device = resolve_device(args.device)
 
     n_cases = len(by_case)
     print(f"slices {len(rows)}   cases {n_cases}   device {device}")

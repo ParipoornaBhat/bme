@@ -1,6 +1,9 @@
 import { NextRequest, NextResponse } from "next/server";
 import fs from "node:fs";
 import path from "node:path";
+import { readSelected } from "~/lib/selectedModel";
+import { torchDevice } from "~/lib/torchDevice";
+import { conflictingJob } from "~/lib/jobs";
 import { spawn } from "node:child_process";
 
 /**
@@ -147,6 +150,8 @@ export async function GET() {
   return NextResponse.json({
     archs: ARCHS,
     runs: listRuns(),
+    selected: readSelected(),
+    torch: torchDevice(),
     running: isRunning,
     log: tail,
     job: isRunning ? job : null,
@@ -157,6 +162,10 @@ export async function GET() {
 }
 
 export async function POST(req: NextRequest) {
+  const clash = conflictingJob("classifier");
+  if (clash) {
+    return NextResponse.json({ error: clash.message }, { status: 409 });
+  }
   if (running() !== null) {
     return NextResponse.json({ error: "a training run is already in progress" }, { status: 409 });
   }
@@ -169,6 +178,7 @@ export async function POST(req: NextRequest) {
   const tta = Boolean(body.tta);
 
   const freeze = body.freeze !== undefined && body.freeze !== null && body.freeze !== "" ? Math.max(0, Number(body.freeze)) : null;
+  const device = ["auto", "cuda", "cpu"].includes(body.device) ? body.device : "auto";
   const patience = body.patience !== undefined && body.patience !== null && body.patience !== "" ? Math.max(1, Number(body.patience)) : null;
 
   if (!ARCHS.includes(arch as (typeof ARCHS)[number])) {
@@ -189,6 +199,7 @@ export async function POST(req: NextRequest) {
      "--arch", arch, "--folds", String(folds), "--epochs", String(epochs),
      ...(freeze !== null ? ["--freeze", String(freeze)] : []),
      ...(patience !== null ? ["--patience", String(patience)] : []),
+     "--device", device,
      ...(him ? ["--dataset", "slices2d_him"] : []),
      ...(tta ? ["--tta"] : [])],
     { cwd: r, detached: true, stdio: ["ignore", log, log] },
@@ -197,10 +208,10 @@ export async function POST(req: NextRequest) {
   if (child.pid) fs.writeFileSync(PID(), String(child.pid));
   fs.writeFileSync(
     JOB(),
-    JSON.stringify({ arch, folds, epochs, him, tta, freeze, patience, startedAt: Date.now(), pid: child.pid }),
+    JSON.stringify({ arch, folds, epochs, him, tta, freeze, patience, device, startedAt: Date.now(), pid: child.pid }),
   );
 
-  return NextResponse.json({ ok: true, pid: child.pid, arch, folds, epochs, him, tta, freeze, patience });
+  return NextResponse.json({ ok: true, pid: child.pid, arch, folds, epochs, him, tta, freeze, patience, device });
 }
 
 /**
