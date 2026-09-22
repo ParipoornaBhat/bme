@@ -55,16 +55,24 @@ app.use(
   "*",
   cors({
     origin: (origin) => {
+      if (!origin) return "*";
       if (process.env.NODE_ENV !== "production") {
-        return origin || "*";
+        return origin;
       }
       const allowedOrigins = [
         process.env.CLIENT_URL || "http://localhost:3000",
         process.env.EXPO_PUBLIC_SERVER_URL || "http://localhost:4000",
       ];
-      return allowedOrigins.includes(origin) ? origin : allowedOrigins[0];
+      if (
+        allowedOrigins.includes(origin) ||
+        origin.endsWith(".trycloudflare.com") ||
+        origin.includes("ngrok")
+      ) {
+        return origin;
+      }
+      return origin;
     },
-    allowHeaders: ["Content-Type", "Authorization", "Cookie"],
+    allowHeaders: ["Content-Type", "Authorization", "Cookie", "ngrok-skip-browser-warning", "x-requested-with"],
     allowMethods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     credentials: true,
     exposeHeaders: ["Set-Cookie"],
@@ -95,7 +103,10 @@ app.get("/api/auth/mobile-callback", (c) => {
     return c.json({ error: "Invalid redirect URI" }, 400);
   }
 
-  const token = getCookie(c, "better-auth.session_token") || getCookie(c, "__secure-better-auth.session_token");
+  const token =
+    getCookie(c, "better-auth.session_token") ||
+    getCookie(c, "__secure-better-auth.session_token") ||
+    getCookie(c, "__Secure-better-auth.session_token");
 
   if (!token) {
     const separator = redirectUri.includes("?") ? "&" : "?";

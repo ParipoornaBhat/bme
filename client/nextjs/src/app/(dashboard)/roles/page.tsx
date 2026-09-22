@@ -40,12 +40,11 @@ export default function RolesPage() {
 
   const fetchRoles = async (selectId?: string) => {
     try {
-      const serverUrl = process.env.NEXT_PUBLIC_SERVER_URL || "http://localhost:4000";
       const headers: Record<string, string> = {};
       if (session?.session?.token) {
         headers["Authorization"] = `Bearer ${session.session.token}`;
       }
-      const res = await fetch(`${serverUrl}/api/roles`, {
+      const res = await fetch("/api/roles", {
         credentials: "include",
         headers,
       });
@@ -72,12 +71,11 @@ export default function RolesPage() {
 
   const fetchPermissions = async () => {
     try {
-      const serverUrl = process.env.NEXT_PUBLIC_SERVER_URL || "http://localhost:4000";
       const headers: Record<string, string> = {};
       if (session?.session?.token) {
         headers["Authorization"] = `Bearer ${session.session.token}`;
       }
-      const res = await fetch(`${serverUrl}/api/roles/permissions`, {
+      const res = await fetch("/api/roles/permissions", {
         credentials: "include",
         headers,
       });
@@ -106,14 +104,13 @@ export default function RolesPage() {
 
     setCreating(true);
     try {
-      const serverUrl = process.env.NEXT_PUBLIC_SERVER_URL || "http://localhost:4000";
       const headers: Record<string, string> = {
         "Content-Type": "application/json",
       };
       if (session?.session?.token) {
         headers["Authorization"] = `Bearer ${session.session.token}`;
       }
-      const res = await fetch(`${serverUrl}/api/roles`, {
+      const res = await fetch("/api/roles", {
         method: "POST",
         credentials: "include",
         headers,
@@ -150,12 +147,11 @@ export default function RolesPage() {
 
     setDeletingId(roleId);
     try {
-      const serverUrl = process.env.NEXT_PUBLIC_SERVER_URL || "http://localhost:4000";
       const headers: Record<string, string> = {};
       if (session?.session?.token) {
         headers["Authorization"] = `Bearer ${session.session.token}`;
       }
-      const res = await fetch(`${serverUrl}/api/roles/${roleId}`, {
+      const res = await fetch(`/api/roles/${roleId}`, {
         method: "DELETE",
         credentials: "include",
         headers,
@@ -180,14 +176,13 @@ export default function RolesPage() {
     setTogglingPermissionId(permissionId);
 
     try {
-      const serverUrl = process.env.NEXT_PUBLIC_SERVER_URL || "http://localhost:4000";
       const headers: Record<string, string> = {
         "Content-Type": "application/json",
       };
       if (session?.session?.token) {
         headers["Authorization"] = `Bearer ${session.session.token}`;
       }
-      const res = await fetch(`${serverUrl}/api/roles/${selectedRole.id}/permissions`, {
+      const res = await fetch(`/api/roles/${selectedRole.id}/permissions`, {
         method: "POST",
         credentials: "include",
         headers,

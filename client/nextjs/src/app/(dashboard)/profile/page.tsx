@@ -24,8 +24,7 @@ export default function ProfilePage() {
 
     setUpdatingPassword(true);
     try {
-      const serverUrl = process.env.NEXT_PUBLIC_SERVER_URL || "http://localhost:4000";
-      const res = await fetch(`${serverUrl}/api/users/forgot-password`, {
+      const res = await fetch("/api/users/forgot-password", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -68,8 +67,7 @@ export default function ProfilePage() {
 
     setUpdatingPassword(true);
     try {
-      const serverUrl = process.env.NEXT_PUBLIC_SERVER_URL || "http://localhost:4000";
-      const res = await fetch(`${serverUrl}/api/users/reset-password-otp`, {
+      const res = await fetch("/api/users/reset-password-otp", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",

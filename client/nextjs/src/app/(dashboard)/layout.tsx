@@ -44,12 +44,11 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
 
   const fetchProfile = async () => {
     try {
-      const serverUrl = process.env.NEXT_PUBLIC_SERVER_URL || "http://localhost:4000";
       const headers: Record<string, string> = {};
       if (session?.session?.token) {
         headers["Authorization"] = `Bearer ${session.session.token}`;
       }
-      const res = await fetch(`${serverUrl}/api/users/profile`, {
+      const res = await fetch("/api/users/profile", {
         credentials: "include",
         headers,
       });
@@ -136,14 +135,13 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
 
   const handleRoleSwitch = async (roleId: string) => {
     try {
-      const serverUrl = process.env.NEXT_PUBLIC_SERVER_URL || "http://localhost:4000";
       const headers: Record<string, string> = {
         "Content-Type": "application/json",
       };
       if (session?.session?.token) {
         headers["Authorization"] = `Bearer ${session.session.token}`;
       }
-      const res = await fetch(`${serverUrl}/api/users/switch-role`, {
+      const res = await fetch("/api/users/switch-role", {
         method: "POST",
         credentials: "include",
         headers,

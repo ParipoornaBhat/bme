@@ -30,7 +30,8 @@ import {
 import { toast } from "sonner";
 import { useSession } from "~/lib/auth-client";
 import CollaborationMasterPanel from "~/components/collaborate/CollaborationMasterPanel";
-import { useCollaboration } from "~/lib/useCollaboration";
+import LiveCursorsOverlay from "~/components/collaborate/LiveCursorsOverlay";
+import { useCollaboration, type Participant } from "~/lib/useCollaboration";
 
 export type Case2DSlice = {
   caseId: string;
@@ -92,10 +93,29 @@ export default function Painter2D() {
   const [showMasterPanel, setShowMasterPanel] = useState(false);
   const [startingCollab, setStartingCollab] = useState(false);
 
+  // Stable Master User ID for collaboration session and WebSocket
+  const [masterUserId, setMasterUserId] = useState<string>("master_host");
+  const [masterUserName, setMasterUserName] = useState<string>("Dr. Master");
+
+  useEffect(() => {
+    if (typeof window !== "undefined") {
+      let uid = session?.user?.id;
+      if (!uid) {
+        uid = localStorage.getItem("bme_master_uid") || "";
+        if (!uid) {
+          uid = `master_${Math.random().toString(36).substring(2, 9)}`;
+          localStorage.setItem("bme_master_uid", uid);
+        }
+      }
+      setMasterUserId(uid);
+      setMasterUserName(session?.user?.name || "Dr. Master");
+    }
+  }, [session?.user?.id, session?.user?.name]);
+
   const collab = useCollaboration({
     token: collabToken || "",
-    userId: session?.user?.id || "master_user",
-    userName: session?.user?.name || "Dr. Master",
+    userId: masterUserId,
+    userName: masterUserName,
   });
 
   const startCollaboration = async () => {
@@ -110,14 +130,30 @@ export default function Painter2D() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           caseId: selected?.stem || "2d_slice",
-          userId: session?.user?.id || "master_user",
-          userName: session?.user?.name || "Dr. Master",
+          userId: masterUserId,
+          userName: masterUserName,
         }),
       });
+      if (!res.ok) {
+        let errorMsg = `Server error (${res.status})`;
+        try {
+          const contentType = res.headers.get("content-type") || "";
+          if (contentType.includes("application/json")) {
+            const data = await res.json();
+            errorMsg = data.error || errorMsg;
+          }
+        } catch { /* fallback */ }
+        if (res.status === 502 || res.status === 504) {
+          errorMsg = "Backend API server (port 4000) is unreachable. Please make sure the backend server is running via 'pnpm dev'.";
+        }
+        console.error("Failed to start 2D collaboration:", errorMsg);
+        return;
+      }
       const data = await res.json();
-      if (res.ok && data.token) {
+      if (data.token) {
+        const shareUrl = `${window.location.origin}/collaborate/${data.token}`;
         setCollabToken(data.token);
-        setShareUrl(data.shareUrl);
+        setShareUrl(shareUrl);
         setShowMasterPanel(true);
       }
     } catch (err) {
@@ -128,14 +164,56 @@ export default function Painter2D() {
   };
 
   useEffect(() => {
-    if (collabToken && collab.connected && collab.role === "MASTER" && selected) {
-      collab.updateViewpoint({
-        sliceIndex: slices.findIndex((s) => s.stem === selected.stem),
-        zoom,
-        pan,
-      });
+    if (collabToken && collab.connected && selected) {
+      collab.updateViewpoint(
+        {
+          sliceIndex: Math.max(0, slices.findIndex((s) => s.stem === selected.stem)),
+          maxSlices: slices.length,
+          zoom,
+          pan,
+          selectedCaseId: selected.caseId,
+          selectedStem: selected.stem,
+          selectedRelPath: selected.relPath,
+        },
+        true,
+      );
     }
-  }, [selected, zoom, pan, collabToken, collab.connected, collab.role, slices, collab.updateViewpoint]);
+  }, [selected, zoom, pan, collabToken, collab.connected, slices, collab.updateViewpoint]);
+
+  // Toast notifications when participants join or disconnect from Master session (keyed by boolean connected state)
+  const prevConnectedMapRef = useRef<Map<string, boolean>>(new Map());
+  useEffect(() => {
+    if (!collabToken || !collab.connected) return;
+    const curr = collab.participants;
+    const prevMap = prevConnectedMapRef.current;
+    const newMap = new Map<string, boolean>();
+
+    curr.forEach((p) => newMap.set(p.id, p.connected));
+
+    // Notify for new connected participants
+    curr.forEach((p) => {
+      if (p.id !== collab.currentUserId && p.connected) {
+        const wasConn = prevMap.get(p.id);
+        if (wasConn === false || (wasConn === undefined && prevMap.size > 0)) {
+          toast.info(`🩺 ${p.name} joined the review session`);
+        }
+      }
+    });
+
+    // Notify for disconnected participants
+    prevMap.forEach((wasConn, uid) => {
+      if (uid !== collab.currentUserId && wasConn) {
+        const target = curr.find((p) => p.id === uid);
+        if (!target || !target.connected) {
+          const name = target?.name || `Participant`;
+          toast.warning(`🩺 ${name} left the review session`);
+        }
+      }
+    });
+
+    prevConnectedMapRef.current = newMap;
+  }, [collab.participants, collabToken, collab.connected, collab.currentUserId]);
+
   const [isPanning, setIsPanning] = useState(false);
   const panStartRef = useRef<{ x: number; y: number }>({ x: 0, y: 0 });
   const [hoveredSlice, setHoveredSlice] = useState<Case2DSlice | null>(null);
@@ -279,7 +357,40 @@ export default function Painter2D() {
     const newCounts = { bone: bCount, bme: lCount, uncertain: uCount };
     setCounts(newCounts);
     countsRef.current = newCounts;
-  }, []);
+
+    // Broadcast live mask to active collaboration session
+    if (collabToken && collab.connected && selected) {
+      try {
+        const dataUrl = canvas.toDataURL("image/png");
+        collab.updateMask({
+          stem: selected.stem,
+          caseId: selected.caseId,
+          maskDataUrl: dataUrl,
+          width: w,
+          height: h,
+        });
+      } catch { /* ignore */ }
+    }
+  }, [collabToken, collab.connected, selected, collab.updateMask]);
+
+  // Re-broadcast viewpoint and mask whenever participants join or reconnect
+  useEffect(() => {
+    if (collabToken && collab.connected && collab.role === "MASTER" && selected) {
+      collab.updateViewpoint(
+        {
+          sliceIndex: Math.max(0, slices.findIndex((s) => s.stem === selected.stem)),
+          maxSlices: slices.length,
+          zoom,
+          pan,
+          selectedCaseId: selected.caseId,
+          selectedStem: selected.stem,
+          selectedRelPath: selected.relPath,
+        },
+        true,
+      );
+      renderMaskToCanvas();
+    }
+  }, [collab.participants.length]);
 
   const pushUndo = () => {
     if (!maskDataRef.current) return;
@@ -855,6 +966,13 @@ export default function Painter2D() {
   };
 
   const handleMouseMove = (e: React.MouseEvent<HTMLCanvasElement>) => {
+    if (collabToken && collab.connected) {
+      const pos = getCanvasCoords(e);
+      const w = imgDim.w || 512;
+      const h = imgDim.h || 512;
+      collab.updateCursor({ x: pos.x / w, y: pos.y / h, plane: "axial" });
+    }
+
     if (tool === "pan") {
       if (isPanning) {
         setPan({
@@ -1684,6 +1802,16 @@ export default function Painter2D() {
               style={{ width: "100%", height: "100%", touchAction: "none" }}
               className="absolute inset-0 block pointer-events-none"
             />
+            {/* Live participant cursors overlay for Master */}
+            {collabToken && collab.connected && (
+              <LiveCursorsOverlay
+                participants={collab.participants}
+                currentUserId={collab.currentUserId}
+                activePlane="axial"
+                containerWidth={imgDim.w || 512}
+                containerHeight={imgDim.h || 512}
+              />
+            )}
           </div>
 
           {/* Touch / Touchpad Double-Tap Draw Active Indicator */}
@@ -1843,20 +1971,25 @@ export default function Painter2D() {
       )}
 
       {showMasterPanel && collabToken && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4 backdrop-blur-sm">
-          <CollaborationMasterPanel
-            shareUrl={shareUrl}
-            participants={collab.participants}
-            currentUserId={collab.currentUserId}
-            onUpdatePermission={collab.updatePermission}
-            onRemoveUser={collab.removeUser}
-            onEndSession={() => {
-              collab.endSession();
-              setCollabToken(null);
-              setShowMasterPanel(false);
-            }}
-            onClose={() => setShowMasterPanel(false)}
-          />
+        <div
+          onClick={() => setShowMasterPanel(false)}
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 p-4 backdrop-blur-sm cursor-pointer animate-in fade-in duration-150"
+        >
+          <div onClick={(e) => e.stopPropagation()} className="cursor-default">
+            <CollaborationMasterPanel
+              shareUrl={shareUrl}
+              participants={collab.participants}
+              currentUserId={collab.currentUserId}
+              onUpdatePermission={collab.updatePermission}
+              onRemoveUser={collab.removeUser}
+              onEndSession={() => {
+                collab.endSession();
+                setCollabToken(null);
+                setShowMasterPanel(false);
+              }}
+              onClose={() => setShowMasterPanel(false)}
+            />
+          </div>
         </div>
       )}
     </div>

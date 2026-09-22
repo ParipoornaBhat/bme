@@ -33,12 +33,11 @@ export default function UsersPage() {
 
   const fetchUsers = async () => {
     try {
-      const serverUrl = process.env.NEXT_PUBLIC_SERVER_URL || "http://localhost:4000";
       const headers: Record<string, string> = {};
       if (session?.session?.token) {
         headers["Authorization"] = `Bearer ${session.session.token}`;
       }
-      const res = await fetch(`${serverUrl}/api/users?search=${search}&page=${page}`, {
+      const res = await fetch(`/api/users?search=${search}&page=${page}`, {
         credentials: "include",
         headers,
       });
@@ -58,12 +57,11 @@ export default function UsersPage() {
 
   const fetchRoles = async () => {
     try {
-      const serverUrl = process.env.NEXT_PUBLIC_SERVER_URL || "http://localhost:4000";
       const headers: Record<string, string> = {};
       if (session?.session?.token) {
         headers["Authorization"] = `Bearer ${session.session.token}`;
       }
-      const res = await fetch(`${serverUrl}/api/roles`, {
+      const res = await fetch("/api/roles", {
         credentials: "include",
         headers,
       });
@@ -91,14 +89,13 @@ export default function UsersPage() {
     const assign = !hasRole;
 
     try {
-      const serverUrl = process.env.NEXT_PUBLIC_SERVER_URL || "http://localhost:4000";
       const headers: Record<string, string> = {
         "Content-Type": "application/json",
       };
       if (session?.session?.token) {
         headers["Authorization"] = `Bearer ${session.session.token}`;
       }
-      const res = await fetch(`${serverUrl}/api/users/${userId}/role`, {
+      const res = await fetch(`/api/users/${userId}/role`, {
         method: "POST",
         credentials: "include",
         headers,

@@ -185,10 +185,26 @@ export default function Viewer({ caseId, onSaved }: { caseId: string; onSaved?: 
           userName: session?.user?.name || "Dr. Master",
         }),
       });
+      if (!res.ok) {
+        let errorMsg = `Server error (${res.status})`;
+        try {
+          const contentType = res.headers.get("content-type") || "";
+          if (contentType.includes("application/json")) {
+            const data = await res.json();
+            errorMsg = data.error || errorMsg;
+          }
+        } catch { /* fallback */ }
+        if (res.status === 502 || res.status === 504) {
+          errorMsg = "Backend API server (port 4000) is unreachable. Please make sure the backend server is running via 'pnpm dev'.";
+        }
+        console.error("Failed to start collaboration:", errorMsg);
+        return;
+      }
       const data = await res.json();
-      if (res.ok && data.token) {
+      if (data.token) {
+        const shareUrl = `${window.location.origin}/collaborate/${data.token}`;
         setCollabToken(data.token);
-        setShareUrl(data.shareUrl);
+        setShareUrl(shareUrl);
         setShowMasterPanel(true);
       }
     } catch (err) {

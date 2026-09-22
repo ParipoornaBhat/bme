@@ -16,17 +16,20 @@ export type ParticipantPermission = {
 
 export type ViewpointState = {
   sliceIndex: number;
-  maxSlices: number;
-  plane: "axial" | "coronal" | "sagittal";
+  maxSlices?: number;
+  plane?: "axial" | "coronal" | "sagittal";
   zoom: number;
   pan: { x: number; y: number };
-  windowLevel: { lo: number; hi: number };
-  overlayVisibility: {
+  windowLevel?: { lo: number; hi: number };
+  overlayVisibility?: {
     showBone: boolean;
     showBme: boolean;
     showGradcam: boolean;
     maskOpacity: number;
   };
+  selectedCaseId?: string;
+  selectedStem?: string;
+  selectedRelPath?: string;
 };
 
 export type Participant = {
@@ -45,6 +48,7 @@ export type UseCollaborationOptions = {
   userId?: string;
   userName?: string;
   onViewpointUpdated?: (viewpoint: ViewpointState) => void;
+  onMaskUpdated?: (data: { stem?: string; caseId?: string; maskDataUrl?: string; maskPixels?: number[]; width?: number; height?: number }) => void;
   onSessionEnded?: () => void;
   onUserRemoved?: () => void;
 };
@@ -54,6 +58,7 @@ export function useCollaboration({
   userId,
   userName,
   onViewpointUpdated,
+  onMaskUpdated,
   onSessionEnded,
   onUserRemoved,
 }: UseCollaborationOptions) {
@@ -80,20 +85,51 @@ export function useCollaboration({
   const socketRef = useRef<WebSocket | null>(null);
   const lastCursorEmitRef = useRef<number>(0);
   const lastViewpointEmitRef = useRef<number>(0);
+  const lastMaskEmitRef = useRef<number>(0);
+
+  // Stabilize callbacks in refs so they never trigger WebSocket reconnects
+  const callbacksRef = useRef({
+    onViewpointUpdated,
+    onMaskUpdated,
+    onSessionEnded,
+    onUserRemoved,
+  });
+  useEffect(() => {
+    callbacksRef.current = {
+      onViewpointUpdated,
+      onMaskUpdated,
+      onSessionEnded,
+      onUserRemoved,
+    };
+  }, [onViewpointUpdated, onMaskUpdated, onSessionEnded, onUserRemoved]);
 
   const getWsUrl = useCallback(() => {
     let host = "localhost:4000";
-    if (process.env.NEXT_PUBLIC_SERVER_URL) {
-      try {
-        const u = new URL(process.env.NEXT_PUBLIC_SERVER_URL);
-        host = u.host;
-      } catch { /* fallback */ }
-    } else if (typeof window !== "undefined") {
-      host = window.location.hostname + ":4000";
+    if (typeof window !== "undefined") {
+      if (!window.location.hostname.includes("localhost") && !window.location.hostname.includes("127.0.0.1")) {
+        host = window.location.host;
+      } else if (process.env.NEXT_PUBLIC_SERVER_URL) {
+        try {
+          const u = new URL(process.env.NEXT_PUBLIC_SERVER_URL);
+          host = u.host;
+        } catch { /* fallback */ }
+      } else {
+        host = window.location.hostname + ":4000";
+      }
     }
 
     const protocol = typeof window !== "undefined" && window.location.protocol === "https:" ? "wss:" : "ws:";
-    const uid = userId || `user_${Math.random().toString(36).substring(2, 9)}`;
+    let defaultUid = "";
+    if (typeof window !== "undefined") {
+      try {
+        defaultUid = sessionStorage.getItem("bme_collab_uid") || "";
+        if (!defaultUid) {
+          defaultUid = `user_${Math.random().toString(36).substring(2, 9)}`;
+          sessionStorage.setItem("bme_collab_uid", defaultUid);
+        }
+      } catch { /* fallback */ }
+    }
+    const uid = userId || defaultUid || `user_${Math.random().toString(36).substring(2, 9)}`;
     const uname = userName || `Dr. ${uid.slice(-4)}`;
 
     return `${protocol}//${host}/ws/collaborate?token=${encodeURIComponent(token)}&userId=${encodeURIComponent(uid)}&userName=${encodeURIComponent(uname)}`;
@@ -126,7 +162,9 @@ export function useCollaboration({
         } else if (data.type === "VIEWPOINT_UPDATED") {
           if (data.viewpoint) {
             setViewpoint(data.viewpoint);
-            if (onViewpointUpdated) onViewpointUpdated(data.viewpoint);
+            if (callbacksRef.current.onViewpointUpdated) {
+              callbacksRef.current.onViewpointUpdated(data.viewpoint);
+            }
           }
         } else if (data.type === "CURSOR_UPDATED") {
           setParticipants((prev) =>
@@ -145,12 +183,20 @@ export function useCollaboration({
           if (data.participants) {
             setParticipants(data.participants);
           }
+        } else if (data.type === "MASK_UPDATED") {
+          if (callbacksRef.current.onMaskUpdated) {
+            callbacksRef.current.onMaskUpdated(data);
+          }
         } else if (data.type === "USER_REMOVED") {
           setRemoved(true);
-          if (onUserRemoved) onUserRemoved();
+          if (callbacksRef.current.onUserRemoved) {
+            callbacksRef.current.onUserRemoved();
+          }
         } else if (data.type === "SESSION_ENDED") {
           setSessionEnded(true);
-          if (onSessionEnded) onSessionEnded();
+          if (callbacksRef.current.onSessionEnded) {
+            callbacksRef.current.onSessionEnded();
+          }
         }
       } catch (err) {
         console.error("Error parsing WS message:", err);
@@ -162,7 +208,7 @@ export function useCollaboration({
     };
 
     ws.onerror = (err) => {
-      console.error("WS error:", err);
+      console.warn("WS error:", err);
       setConnected(false);
     };
 
@@ -171,19 +217,41 @@ export function useCollaboration({
         ws.close();
       }
     };
-  }, [token, getWsUrl, currentUserId, onViewpointUpdated, onSessionEnded, onUserRemoved]);
+  }, [token, getWsUrl]);
 
-  // Throttled Viewpoint Update emitter (max 1 update per 50ms)
-  const updateViewpoint = useCallback((newVp: Partial<ViewpointState>) => {
+  // Viewpoint Update emitter (throttling only continuous pan updates)
+  const updateViewpoint = useCallback((newVp: Partial<ViewpointState>, force = false) => {
     if (!socketRef.current || socketRef.current.readyState !== WebSocket.OPEN) return;
     const now = Date.now();
-    if (now - lastViewpointEmitRef.current < 50) return;
+    const isDiscrete = Boolean(
+      force ||
+      newVp.selectedRelPath ||
+      newVp.selectedStem ||
+      newVp.selectedCaseId ||
+      newVp.sliceIndex !== undefined
+    );
+    if (!isDiscrete && now - lastViewpointEmitRef.current < 50) return;
     lastViewpointEmitRef.current = now;
 
     socketRef.current.send(
       JSON.stringify({
         type: "VIEWPOINT_UPDATE",
         viewpoint: newVp,
+      })
+    );
+  }, []);
+
+  // Live Mask Update emitter
+  const updateMask = useCallback((maskPayload: { stem: string; caseId: string; maskDataUrl?: string; maskPixels?: number[]; width?: number; height?: number }) => {
+    if (!socketRef.current || socketRef.current.readyState !== WebSocket.OPEN) return;
+    const now = Date.now();
+    if (now - lastMaskEmitRef.current < 80) return;
+    lastMaskEmitRef.current = now;
+
+    socketRef.current.send(
+      JSON.stringify({
+        type: "MASK_UPDATE",
+        ...maskPayload,
       })
     );
   }, []);
@@ -248,6 +316,7 @@ export function useCollaboration({
     removed,
     updateViewpoint,
     updateCursor,
+    updateMask,
     updatePermission,
     removeUser,
     endSession,

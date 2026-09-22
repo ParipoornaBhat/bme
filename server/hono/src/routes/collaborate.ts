@@ -10,7 +10,7 @@ const ID = /^[a-zA-Z0-9_-]+$/;
 /**
  * POST /api/collaborate/session
  * Body: { caseId: string, userId?: string, userName?: string }
- * Creates a new secure collaboration session.
+ * Creates a new secure collaboration session and returns session token.
  */
 app.post("/session", async (c) => {
   try {
@@ -22,13 +22,10 @@ app.post("/session", async (c) => {
     }
 
     const session = createSession(caseId, userId, userName);
-    const origin = process.env.CLIENT_URL || "http://localhost:3000";
-    const shareUrl = `${origin}/collaborate/${session.token}`;
 
     return c.json({
       success: true,
       token: session.token,
-      shareUrl,
       caseId: session.caseId,
       createdAt: session.createdAt,
     });

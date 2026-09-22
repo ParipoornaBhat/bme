@@ -22,12 +22,11 @@ export default function DashboardPage() {
   useEffect(() => {
     const fetchStats = async () => {
       try {
-        const serverUrl = process.env.NEXT_PUBLIC_SERVER_URL || "http://localhost:4000";
         const headers: Record<string, string> = {};
         if (session?.session?.token) {
           headers["Authorization"] = `Bearer ${session.session.token}`;
         }
-        const res = await fetch(`${serverUrl}/api/users/dashboard-stats`, {
+        const res = await fetch("/api/users/dashboard-stats", {
           credentials: "include",
           headers,
         });

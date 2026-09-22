@@ -3,12 +3,13 @@
   "version": "1.0.0",
   "private": true,
   "scripts": {
-    "dev": "next dev --port 3000",
+    "predev": "node -e \"try { fs.rmSync('.next', { recursive: true, force: true }); } catch (e) {}\"",
+    "dev": "next dev -H 0.0.0.0 --port 3000",
     "build": "next build",
     "build:cf": "opennextjs-cloudflare",
     "deploy:cf": "wrangler pages deploy .open-next/.deploy",
     "deploy:vercel": "vercel",
-    "start": "next start --port 3000",
+    "start": "next start -H 0.0.0.0 --port 3000",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {

@@ -6,6 +6,16 @@ import zlib from "node:zlib";
 export const dynamic = "force-dynamic";
 
 function projectRoot() {
+  let curr = process.cwd();
+  if (fs.existsSync(path.join(curr, "data", "slices2d")) || fs.existsSync(path.join(curr, "pnpm-workspace.yaml"))) {
+    return curr;
+  }
+  while (curr !== path.dirname(curr)) {
+    if (fs.existsSync(path.join(curr, "data", "slices2d")) || fs.existsSync(path.join(curr, "pnpm-workspace.yaml"))) {
+      return curr;
+    }
+    curr = path.dirname(curr);
+  }
   return path.resolve(process.cwd(), "..", "..");
 }
 

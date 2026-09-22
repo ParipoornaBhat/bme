@@ -12,6 +12,7 @@
     "db:status": "node scripts/dev-db.js status",
     "prepare": "node scripts/setup-env.js",
     "dev": "turbo run dev",
+    "tunnel": "node scripts/tunnel.js",
     "build": "turbo run build",
     "build:web:cf": "pnpm --filter nextjs build:cf",
     "deploy:server": "pnpm --filter server deploy",

@@ -17,7 +17,7 @@ const { default: app } = await import("./index.js");
 
 const port = Number(process.env.API_PORT ?? 4000);
 
-const server = serve({ fetch: app.fetch, port }, (info) => {
+const server = serve({ fetch: app.fetch, hostname: "0.0.0.0", port }, (info) => {
   const url = `http://localhost:${info.port}`;
   console.log(`API ready on ${url}  (Node runtime with WebSockets)`);
   if (!process.env.DATABASE_URL) {

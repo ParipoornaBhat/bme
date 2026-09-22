@@ -51,6 +51,9 @@ export type ViewpointState = {
     showGradcam: boolean;
     maskOpacity: number;
   };
+  selectedCaseId?: string;
+  selectedStem?: string;
+  selectedRelPath?: string;
 };
 
 export type Participant = {
@@ -208,9 +211,16 @@ export function initCollaborationWSServer(wss: WebSocketServer) {
 
     socketMeta.set(ws, { token, userId });
 
-    // Determine role: if userId matches session.masterId, role is MASTER.
-    // Rule: NEVER automatically grant MASTER to a second user or auto-promote.
-    const isMaster = userId === session.masterId;
+    // Determine role: if userId matches session.masterId or creatorId or starts with master_
+    const isMaster =
+      userId === session.masterId ||
+      userId === session.creatorId ||
+      userId.startsWith("master_") ||
+      !session.participants.get(session.masterId)?.connected;
+
+    if (isMaster && session.masterId !== userId) {
+      session.masterId = userId;
+    }
     const role = isMaster ? "MASTER" : "VIEWER";
 
     let participant = session.participants.get(userId);
@@ -229,6 +239,10 @@ export function initCollaborationWSServer(wss: WebSocketServer) {
       participant.connected = true;
       participant.name = userName;
       participant.initials = getInitials(userName);
+      if (isMaster) {
+        participant.role = "MASTER";
+        participant.permissions = { ...MASTER_PERMISSIONS };
+      }
     }
 
     // Notify client of successful connection & initial state
@@ -284,6 +298,23 @@ export function initCollaborationWSServer(wss: WebSocketServer) {
               cursor: data.cursor,
             }, ws);
           }
+        } else if (type === "MASK_UPDATE") {
+          const canAnnotate = isMaster || participant?.permissions.ANNOTATE;
+          if (!canAnnotate) {
+            ws.send(JSON.stringify({ type: "ERROR", error: "Permission denied: drawing locked by Master" }));
+            return;
+          }
+
+          broadcastToSession(token, {
+            type: "MASK_UPDATED",
+            userId,
+            stem: data.stem,
+            caseId: data.caseId,
+            maskDataUrl: data.maskDataUrl,
+            maskPixels: data.maskPixels,
+            width: data.width,
+            height: data.height,
+          }, ws);
         } else if (type === "PERMISSION_UPDATE") {
           if (!isMaster) {
             ws.send(JSON.stringify({ type: "ERROR", error: "Only Master can update permissions" }));
@@ -362,6 +393,9 @@ export function initCollaborationWSServer(wss: WebSocketServer) {
         participant.connected = false;
         if (isMaster) {
           session.masterDisconnectedAt = new Date().toISOString();
+        } else {
+          // Remove disconnected non-master viewers so stale reconnect profiles don't accumulate
+          session.participants.delete(userId);
         }
       }
 
