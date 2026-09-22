@@ -12,6 +12,7 @@ import {
   Lasso,
   Layers,
   Loader2,
+  Lock,
   Maximize2,
   MessageSquare,
   Move,
@@ -29,9 +30,10 @@ import {
 } from "lucide-react";
 import { toast } from "sonner";
 import { useSession } from "~/lib/auth-client";
+import CollaborationViewerHeader from "~/components/collaborate/CollaborationViewerHeader";
 import CollaborationMasterPanel from "~/components/collaborate/CollaborationMasterPanel";
 import LiveCursorsOverlay from "~/components/collaborate/LiveCursorsOverlay";
-import { useCollaboration, type Participant } from "~/lib/useCollaboration";
+import { useCollaboration, type Participant, type ParticipantPermission } from "~/lib/useCollaboration";
 
 export type Case2DSlice = {
   caseId: string;
@@ -46,19 +48,31 @@ export type Case2DSlice = {
   flaggedAt?: string;
 };
 
+export type Painter2DProps = {
+  collabToken?: string;
+  isCollaborator?: boolean;
+  collaboratorUserName?: string;
+  collaboratorUserId?: string;
+};
+
 const LABELS = [
   { id: 1, name: "Bone Marrow", color: "rgba(16, 185, 129, 0.45)", stroke: "#10b981", badge: "bg-emerald-500/20 text-emerald-400 border-emerald-500/40" },
   { id: 2, name: "BME Lesion", color: "rgba(239, 68, 68, 0.55)", stroke: "#ef4444", badge: "bg-red-500/20 text-red-400 border-red-500/40" },
   { id: 3, name: "Uncertain", color: "rgba(245, 158, 11, 0.50)", stroke: "#f59e0b", badge: "bg-amber-500/20 text-amber-400 border-amber-500/40" },
 ] as const;
 
-export default function Painter2D() {
+export default function Painter2D({
+  collabToken: externalCollabToken,
+  isCollaborator = false,
+  collaboratorUserName,
+  collaboratorUserId,
+}: Painter2DProps = {}) {
   const [slices, setSlices] = useState<Case2DSlice[]>([]);
   const [loading, setLoading] = useState(true);
   const [selected, setSelected] = useState<Case2DSlice | null>(null);
   const [filter, setFilter] = useState<"all" | "bme" | "non_bme" | "annotated" | "unannotated" | "flagged">("all");
   const [query, setQuery] = useState("");
-  const [tool, setTool] = useState<"brush" | "pencil" | "pan">("brush");
+  const [tool, setTool] = useState<"brush" | "pencil" | "pan">(isCollaborator ? "pan" : "brush");
   const [maskInside, setMaskInside] = useState(false);
   const [activeLabel, setActiveLabel] = useState<number>(1);
   const [brushSize, setBrushSize] = useState(12);
@@ -88,10 +102,16 @@ export default function Painter2D() {
 
   // Collaboration States
   const { data: session } = useSession();
-  const [collabToken, setCollabToken] = useState<string | null>(null);
+  const [collabToken, setCollabToken] = useState<string | null>(externalCollabToken || null);
   const [shareUrl, setShareUrl] = useState<string>("");
   const [showMasterPanel, setShowMasterPanel] = useState(false);
   const [startingCollab, setStartingCollab] = useState(false);
+
+  useEffect(() => {
+    if (externalCollabToken) {
+      setCollabToken(externalCollabToken);
+    }
+  }, [externalCollabToken]);
 
   // Stable Master User ID for collaboration session and WebSocket
   const [masterUserId, setMasterUserId] = useState<string>("master_host");
@@ -112,11 +132,91 @@ export default function Painter2D() {
     }
   }, [session?.user?.id, session?.user?.name]);
 
+  const activeUserId = isCollaborator
+    ? (collaboratorUserId || (typeof window !== "undefined" && localStorage.getItem("bme_collab_radiologist_uid")) || `collab_${Math.random().toString(36).substring(2, 9)}`)
+    : masterUserId;
+  const activeUserName = isCollaborator
+    ? (collaboratorUserName || (typeof window !== "undefined" && localStorage.getItem("bme_collab_radiologist_name")) || "Dr. Radiologist")
+    : masterUserName;
+
   const collab = useCollaboration({
     token: collabToken || "",
-    userId: masterUserId,
-    userName: masterUserName,
+    userId: activeUserId,
+    userName: activeUserName,
+    onViewpointUpdated: (vp) => {
+      if (isCollaborator) {
+        if (vp.zoom !== undefined && !collab.permissions.ZOOM_PAN) setZoom(vp.zoom);
+        if (vp.pan !== undefined && !collab.permissions.ZOOM_PAN) setPan(vp.pan);
+        if (vp.selectedStem || vp.selectedRelPath || vp.selectedCaseId) {
+          setSelected((prev) => {
+            if (
+              prev &&
+              ((vp.selectedStem && prev.stem === vp.selectedStem) ||
+               (vp.selectedRelPath && prev.relPath === vp.selectedRelPath))
+            ) {
+              return prev;
+            }
+            const match = slices.find(
+              (s) =>
+                (vp.selectedStem && s.stem === vp.selectedStem) ||
+                (vp.selectedRelPath && s.relPath === vp.selectedRelPath) ||
+                (vp.selectedCaseId && s.caseId === vp.selectedCaseId)
+            );
+            return match || prev;
+          });
+        }
+      }
+    },
+    onMaskUpdated: (data) => {
+      if (!data.maskDataUrl) return;
+      const maskImg = new Image();
+      maskImg.src = data.maskDataUrl;
+      maskImg.onload = () => {
+        const mw = maskImg.naturalWidth || data.width || 512;
+        const mh = maskImg.naturalHeight || data.height || 512;
+        const off = document.createElement("canvas");
+        off.width = mw;
+        off.height = mh;
+        const offCtx = off.getContext("2d");
+        if (offCtx) {
+          offCtx.drawImage(maskImg, 0, 0);
+          const pxData = offCtx.getImageData(0, 0, mw, mh).data;
+          const maskArr = maskDataRef.current;
+          const { w, h } = imgDimRef.current;
+          if (maskArr && w > 0 && h > 0) {
+            for (let i = 0; i < maskArr.length; i++) {
+              const p = i * 4;
+              const r = pxData[p];
+              const g = pxData[p + 1];
+              const b = pxData[p + 2];
+              if (r === 16 && g === 185 && b === 129) maskArr[i] = 1;
+              else if (r === 239 && g === 68 && b === 68) maskArr[i] = 2;
+              else if (r === 245 && g === 158 && b === 11) maskArr[i] = 3;
+              else if (r === 1) maskArr[i] = 1;
+              else if (r === 2) maskArr[i] = 2;
+              else if (r === 3) maskArr[i] = 3;
+              else if (pxData[p + 3] === 0) maskArr[i] = 0;
+            }
+            renderMaskToCanvas();
+          }
+        }
+      };
+    },
   });
+
+  const permissions: ParticipantPermission = isCollaborator
+    ? collab.permissions
+    : {
+        VIEW: true,
+        ZOOM_PAN: true,
+        SLICE_CONTROL: true,
+        WINDOW_LEVEL: true,
+        ANNOTATE: true,
+        EDIT_ANNOTATION: true,
+        DELETE_ANNOTATION: true,
+        AI_ANALYSIS: true,
+        DOWNLOAD: false,
+      };
 
   const startCollaboration = async () => {
     if (collabToken) {
@@ -811,6 +911,7 @@ export default function Painter2D() {
 
   const handleDoubleClick = (e: React.MouseEvent<HTMLCanvasElement>) => {
     if (e.button !== 0 || tool === "pan") return;
+    if (isCollaborator && !permissions.ANNOTATE) return;
     const pos = getCanvasCoords(e);
     if (isLockedDrawRef.current) {
       finishLockedDraw();
@@ -825,11 +926,14 @@ export default function Painter2D() {
     e.preventDefault();
 
     if (tool === "pan") {
+      if (isCollaborator && !permissions.ZOOM_PAN) return;
       setIsPanning(true);
       const touch = e.touches[0];
       panStartRef.current = { x: touch.clientX - pan.x, y: touch.clientY - pan.y };
       return;
     }
+
+    if (isCollaborator && !permissions.ANNOTATE) return;
 
     const pos = getCanvasCoords(e);
 
@@ -869,7 +973,7 @@ export default function Painter2D() {
     e.preventDefault();
 
     if (tool === "pan") {
-      if (isPanning && e.touches.length === 1) {
+      if (isPanning && e.touches.length === 1 && (!isCollaborator || permissions.ZOOM_PAN)) {
         const touch = e.touches[0];
         setPan({
           x: touch.clientX - panStartRef.current.x,
@@ -878,6 +982,8 @@ export default function Painter2D() {
       }
       return;
     }
+
+    if (isCollaborator && !permissions.ANNOTATE) return;
 
     if (!isDrawingRef.current) return;
     const pos = getCanvasCoords(e);
@@ -928,10 +1034,13 @@ export default function Painter2D() {
     if (e.button !== 0) return;
 
     if (tool === "pan") {
+      if (isCollaborator && !permissions.ZOOM_PAN) return;
       setIsPanning(true);
       panStartRef.current = { x: e.clientX - pan.x, y: e.clientY - pan.y };
       return;
     }
+
+    if (isCollaborator && !permissions.ANNOTATE) return;
 
     const pos = getCanvasCoords(e);
 
@@ -974,7 +1083,7 @@ export default function Painter2D() {
     }
 
     if (tool === "pan") {
-      if (isPanning) {
+      if (isPanning && (!isCollaborator || permissions.ZOOM_PAN)) {
         setPan({
           x: e.clientX - panStartRef.current.x,
           y: e.clientY - panStartRef.current.y,
@@ -982,6 +1091,8 @@ export default function Painter2D() {
       }
       return;
     }
+
+    if (isCollaborator && !permissions.ANNOTATE) return;
 
     if (!isDrawingRef.current) return;
     const pos = getCanvasCoords(e);
@@ -1277,416 +1388,465 @@ export default function Painter2D() {
   });
 
   return (
-    <div className="grid gap-3 lg:grid-cols-[270px_minmax(0,1fr)] h-[calc(100vh-115px)]">
-      {/* Left sidebar: Slice list */}
-      <div className="flex flex-col gap-2 rounded-lg border border-border bg-card p-2.5 h-full overflow-hidden">
-        <div className="relative">
-          <Search className="absolute left-2.5 top-2.5 h-4 w-4 text-muted-foreground" />
-          <input
-            value={query}
-            onChange={(e) => {
-              setQuery(e.target.value);
-              try {
-                localStorage.setItem("bme_painter2d_query", e.target.value);
-              } catch { /* ignore */ }
-            }}
-            placeholder="Search 2D slices..."
-            className="w-full rounded-md border border-border bg-background py-1.5 pl-8 pr-2 text-sm"
-          />
-        </div>
+    <div className="flex flex-col gap-2 h-full w-full">
+      {isCollaborator && (
+        <CollaborationViewerHeader
+          caseId={selected?.caseId || "Volume Review"}
+          masterConnected={collab.participants.some((p) => p.role === "MASTER" && p.connected)}
+          followingMaster={!permissions.SLICE_CONTROL}
+          permissions={permissions}
+        />
+      )}
 
-        <div className="flex flex-wrap gap-1 text-xs">
-          {(["all", "bme", "non_bme", "annotated", "unannotated", "flagged"] as const).map((f) => {
-            const count =
-              f === "flagged"
-                ? slices.filter((s) => s.flagged).length
-                : f === "annotated"
-                ? slices.filter((s) => s.hasMask).length
-                : undefined;
-            return (
-              <button
-                key={f}
-                onClick={() => {
-                  setFilter(f);
+      <div className={`grid gap-3 ${(!isCollaborator || permissions.SLICE_CONTROL) ? "lg:grid-cols-[270px_minmax(0,1fr)]" : "grid-cols-1"} h-[calc(100vh-115px)]`}>
+        {/* Left sidebar: Slice list */}
+        {(!isCollaborator || permissions.SLICE_CONTROL) && (
+          <div className="flex flex-col gap-2 rounded-lg border border-border bg-card p-2.5 h-full overflow-hidden">
+            <div className="relative">
+              <Search className="absolute left-2.5 top-2.5 h-4 w-4 text-muted-foreground" />
+              <input
+                value={query}
+                onChange={(e) => {
+                  setQuery(e.target.value);
                   try {
-                    localStorage.setItem("bme_painter2d_filter", f);
+                    localStorage.setItem("bme_painter2d_query", e.target.value);
                   } catch { /* ignore */ }
                 }}
-                className={`inline-flex items-center gap-1 rounded px-2 py-1 transition ${
-                  filter === f
-                    ? f === "flagged"
-                      ? "bg-amber-500 text-white font-medium"
-                      : "bg-primary text-primary-foreground font-medium"
-                    : f === "flagged" && (count ?? 0) > 0
-                    ? "bg-amber-500/15 text-amber-500 hover:bg-amber-500/25"
-                    : "bg-muted text-muted-foreground hover:text-foreground"
-                }`}
-              >
-                {f === "flagged" && <Flag className="h-3 w-3 fill-current" />}
-                <span>{f.replace("_", " ")}</span>
-                {count !== undefined && <span className="opacity-70 text-[10px]">({count})</span>}
-              </button>
-            );
-          })}
-        </div>
-
-        <div className="text-xs text-muted-foreground font-medium flex items-center justify-between">
-          <span>
-            {filtered.length} of {slices.length} slices
-          </span>
-          <span className="text-[11px] opacity-75">
-            {slices.filter((s) => s.hasMask).length} annotated
-          </span>
-        </div>
-
-        <div className="flex-1 overflow-y-auto space-y-1 pr-1">
-          {loading ? (
-            <div className="py-12 text-center text-xs text-muted-foreground">
-              <Loader2 className="mx-auto h-4 w-4 animate-spin mb-2" />
-              Loading 2D slices...
+                placeholder="Search 2D slices..."
+                className="w-full rounded-md border border-border bg-background py-1.5 pl-8 pr-2 text-sm"
+              />
             </div>
-          ) : filtered.length === 0 ? (
-            <div className="py-12 text-center text-xs text-muted-foreground">No slices match.</div>
-          ) : (
-            filtered.map((s) => {
-              const active = selected?.relPath === s.relPath;
-              return (
-                <button
-                  key={s.relPath}
-                  onClick={() => {
-                    if (s.relPath === selected?.relPath) return;
 
-                    // Flush any pending auto-save for currently loaded slice
-                    if (autoSaveTimeoutRef.current) {
-                      clearTimeout(autoSaveTimeoutRef.current);
-                      autoSaveTimeoutRef.current = null;
-                    }
+            <div className="flex flex-wrap gap-1 text-xs">
+              {(["all", "bme", "non_bme", "annotated", "unannotated", "flagged"] as const).map((f) => {
+                const count =
+                  f === "flagged"
+                    ? slices.filter((s) => s.flagged).length
+                    : f === "annotated"
+                    ? slices.filter((s) => s.hasMask).length
+                    : undefined;
+                return (
+                  <button
+                    key={f}
+                    onClick={() => {
+                      setFilter(f);
+                      try {
+                        localStorage.setItem("bme_painter2d_filter", f);
+                      } catch { /* ignore */ }
+                    }}
+                    className={`inline-flex items-center gap-1 rounded px-2 py-1 transition ${
+                      filter === f
+                        ? f === "flagged"
+                          ? "bg-amber-500 text-white font-medium"
+                          : "bg-primary text-primary-foreground font-medium"
+                        : f === "flagged" && (count ?? 0) > 0
+                        ? "bg-amber-500/15 text-amber-500 hover:bg-amber-500/25"
+                        : "bg-muted text-muted-foreground hover:text-foreground"
+                    }`}
+                  >
+                    {f === "flagged" && <Flag className="h-3 w-3 fill-current" />}
+                    <span>{f.replace("_", " ")}</span>
+                    {count !== undefined && <span className="opacity-70 text-[10px]">({count})</span>}
+                  </button>
+                );
+              })}
+            </div>
 
-                    if (autoSave && isDirtyRef.current) {
-                      const c = countsRef.current;
-                      if (c.bone + c.bme + c.uncertain > 0 && loadedSliceRef.current && maskDataRef.current) {
-                        saveMaskInternal({
-                          isAuto: true,
-                          targetSlice: loadedSliceRef.current,
-                          pixelData: new Uint8Array(maskDataRef.current),
-                          dimensions: { ...imgDimRef.current },
-                        });
-                      }
-                    }
-                    setSelected(s);
-                    try {
-                      localStorage.setItem("bme_painter2d_selected", `${s.caseId}/${s.stem}`);
-                    } catch { /* ignore */ }
-                  }}
-                  onMouseEnter={(e) => {
-                    setHoveredSlice(s);
-                    setHoverPos({ x: e.clientX, y: e.clientY });
-                  }}
-                  onMouseMove={(e) => {
-                    setHoverPos({ x: e.clientX, y: e.clientY });
-                  }}
-                  onMouseLeave={() => setHoveredSlice(null)}
-                  className={`w-full group flex items-center justify-between rounded px-2.5 py-2 text-left text-xs transition border ${
-                    active
-                      ? "border-primary bg-primary/10 text-foreground font-medium"
-                      : "border-transparent hover:bg-muted/60 text-muted-foreground"
-                  }`}
-                >
-                  <div className="truncate pr-2 flex items-center gap-1.5">
-                    <Info className="h-3 w-3 text-muted-foreground/40 group-hover:text-primary transition shrink-0" />
-                    <div className="truncate">
-                      <span className="font-mono font-medium text-foreground">{s.caseId}</span>
-                      <span className="ml-1.5 opacity-60 text-[10px] truncate">{s.stem}</span>
-                    </div>
-                  </div>
-                  <div className="flex items-center gap-1.5 shrink-0">
-                    {s.flagged && (
-                      <span title={`Flagged: ${s.flagReason || "Not Sure"}`}>
-                        <Flag className="h-3.5 w-3.5 fill-amber-400 text-amber-400 shrink-0" />
-                      </span>
-                    )}
-                    <span
-                      className={`text-[9px] px-1.5 py-0.5 rounded font-medium ${
-                        s.label === "bme" ? "bg-red-500/15 text-red-400" : "bg-blue-500/15 text-blue-400"
+            <div className="text-xs text-muted-foreground font-medium flex items-center justify-between">
+              <span>
+                {filtered.length} of {slices.length} slices
+              </span>
+              <span className="text-[11px] opacity-75">
+                {slices.filter((s) => s.hasMask).length} annotated
+              </span>
+            </div>
+
+            <div className="flex-1 overflow-y-auto space-y-1 pr-1">
+              {loading ? (
+                <div className="py-12 text-center text-xs text-muted-foreground">
+                  <Loader2 className="mx-auto h-4 w-4 animate-spin mb-2" />
+                  Loading 2D slices...
+                </div>
+              ) : filtered.length === 0 ? (
+                <div className="py-12 text-center text-xs text-muted-foreground">No slices match.</div>
+              ) : (
+                filtered.map((s) => {
+                  const active = selected?.relPath === s.relPath;
+                  return (
+                    <button
+                      key={s.relPath}
+                      onClick={() => {
+                        if (s.relPath === selected?.relPath) return;
+
+                        // Flush any pending auto-save for currently loaded slice
+                        if (autoSaveTimeoutRef.current) {
+                          clearTimeout(autoSaveTimeoutRef.current);
+                          autoSaveTimeoutRef.current = null;
+                        }
+
+                        if (autoSave && isDirtyRef.current) {
+                          const c = countsRef.current;
+                          if (c.bone + c.bme + c.uncertain > 0 && loadedSliceRef.current && maskDataRef.current) {
+                            saveMaskInternal({
+                              isAuto: true,
+                              targetSlice: loadedSliceRef.current,
+                              pixelData: new Uint8Array(maskDataRef.current),
+                              dimensions: { ...imgDimRef.current },
+                            });
+                          }
+                        }
+                        setSelected(s);
+                        if (isCollaborator && permissions.SLICE_CONTROL && collabToken && collab.connected) {
+                          collab.updateViewpoint({
+                            sliceIndex: Math.max(0, slices.findIndex((item) => item.stem === s.stem)),
+                            maxSlices: slices.length,
+                            selectedCaseId: s.caseId,
+                            selectedStem: s.stem,
+                            selectedRelPath: s.relPath,
+                          }, true);
+                        }
+                        try {
+                          localStorage.setItem("bme_painter2d_selected", `${s.caseId}/${s.stem}`);
+                        } catch { /* ignore */ }
+                      }}
+                      onMouseEnter={(e) => {
+                        setHoveredSlice(s);
+                        setHoverPos({ x: e.clientX, y: e.clientY });
+                      }}
+                      onMouseMove={(e) => {
+                        setHoverPos({ x: e.clientX, y: e.clientY });
+                      }}
+                      onMouseLeave={() => setHoveredSlice(null)}
+                      className={`w-full group flex items-center justify-between rounded px-2.5 py-2 text-left text-xs transition border ${
+                        active
+                          ? "border-primary bg-primary/10 text-foreground font-medium"
+                          : "border-transparent hover:bg-muted/60 text-muted-foreground"
                       }`}
                     >
-                      {s.label === "bme" ? "BME" : "Non-BME"}
-                    </span>
-                    {s.hasMask && (
-                      <CheckCircle2 className="h-3.5 w-3.5 text-emerald-400" />
-                    )}
-                  </div>
-                </button>
-              );
-            })
-          )}
-        </div>
-      </div>
-
-
-      {/* Right side: 2D Canvas Editor */}
-      <div className="flex flex-col gap-2 rounded-lg border border-border bg-card p-3 h-full overflow-hidden">
-        {/* Editor Toolbar */}
-        <div className="flex flex-wrap items-center justify-between gap-3 border-b border-border pb-3">
-          <div className="flex flex-wrap items-center gap-2">
-            <span className="text-xs font-semibold uppercase tracking-wider text-muted-foreground mr-1">
-              Label:
-            </span>
-            {LABELS.map((l) => (
-              <button
-                key={l.id}
-                onClick={() => { setActiveLabel(l.id); setIsErasing(false); }}
-                className={`inline-flex items-center gap-1.5 rounded-md px-2.5 py-1 text-xs font-medium border transition ${
-                  !isErasing && activeLabel === l.id
-                    ? `${l.badge} ring-1 ring-primary`
-                    : "border-border bg-background text-muted-foreground hover:text-foreground"
-                }`}
-              >
-                <span className="h-2 w-2 rounded-full" style={{ backgroundColor: l.stroke }} />
-                {l.name} <span className="text-[10px] opacity-60">({l.id})</span>
-              </button>
-            ))}
-
-            <div className="mx-1 h-5 w-px bg-border" />
-
-            {/* Tool Mode: Brush (4) vs Pencil (5) vs Hand (6) */}
-            <div className="inline-flex overflow-hidden rounded-md border border-border">
-              <button
-                type="button"
-                onClick={() => setTool("brush")}
-                title="Brush mode (Key 4 or B)"
-                className={`inline-flex items-center gap-1.5 px-2.5 py-1 text-xs transition ${
-                  tool === "brush" ? "bg-primary text-primary-foreground font-medium" : "bg-background text-muted-foreground hover:text-foreground"
-                }`}
-              >
-                <Paintbrush className="h-3 w-3" /> Brush <span className="text-[10px] opacity-60">(4)</span>
-              </button>
-              <button
-                type="button"
-                onClick={() => setTool("pencil")}
-                title="Pencil mode — trace an outline, the inside auto-fills (Key 5 or P)"
-                className={`inline-flex items-center gap-1.5 border-l border-border px-2.5 py-1 text-xs transition ${
-                  tool === "pencil" ? "bg-primary text-primary-foreground font-medium" : "bg-background text-muted-foreground hover:text-foreground"
-                }`}
-              >
-                <Lasso className="h-3 w-3" /> Pencil <span className="text-[10px] opacity-60">(5)</span>
-              </button>
-              <button
-                type="button"
-                onClick={() => setTool("pan")}
-                title="Hand mode — click & drag to pan canvas (Key 6 or H)"
-                className={`inline-flex items-center gap-1.5 border-l border-border px-2.5 py-1 text-xs transition ${
-                  tool === "pan" ? "bg-primary text-primary-foreground font-medium" : "bg-background text-muted-foreground hover:text-foreground"
-                }`}
-              >
-                <Hand className="h-3 w-3" /> Hand <span className="text-[10px] opacity-60">(6)</span>
-              </button>
+                      <div className="truncate pr-2 flex items-center gap-1.5">
+                        <Info className="h-3 w-3 text-muted-foreground/40 group-hover:text-primary transition shrink-0" />
+                        <div className="truncate">
+                          <span className="font-mono font-medium text-foreground">{s.caseId}</span>
+                          <span className="ml-1.5 opacity-60 text-[10px] truncate">{s.stem}</span>
+                        </div>
+                      </div>
+                      <div className="flex items-center gap-1.5 shrink-0">
+                        {s.flagged && (
+                          <span title={`Flagged: ${s.flagReason || "Not Sure"}`}>
+                            <Flag className="h-3.5 w-3.5 fill-amber-400 text-amber-400 shrink-0" />
+                          </span>
+                        )}
+                        <span
+                          className={`text-[9px] px-1.5 py-0.5 rounded font-medium ${
+                            s.label === "bme" ? "bg-red-500/15 text-red-400" : "bg-blue-500/15 text-blue-400"
+                          }`}
+                        >
+                          {s.label === "bme" ? "BME" : "Non-BME"}
+                        </span>
+                        {s.hasMask && (
+                          <CheckCircle2 className="h-3.5 w-3.5 text-emerald-400" />
+                        )}
+                      </div>
+                    </button>
+                  );
+                })
+              )}
             </div>
-
-            <button
-              onClick={() => setIsErasing((e) => !e)}
-              title="Toggle eraser mode (Key 0 or E)"
-              className={`inline-flex items-center gap-1.5 rounded-md px-2.5 py-1 text-xs font-medium border transition ${
-                isErasing
-                  ? "border-destructive bg-destructive/10 text-destructive ring-1 ring-destructive"
-                  : "border-border bg-background text-muted-foreground hover:text-foreground"
-              }`}
-            >
-              <Eraser className="h-3.5 w-3.5" /> Eraser <span className="text-[10px] opacity-60">(0)</span>
-            </button>
-
-            <label className="flex items-center gap-1.5 text-xs text-muted-foreground cursor-pointer select-none ml-1">
-              <input
-                type="checkbox"
-                checked={maskInside}
-                onChange={(e) => setMaskInside(e.target.checked)}
-                className="rounded border-border accent-primary h-3.5 w-3.5"
-              />
-              <span>Only inside bone</span>
-            </label>
           </div>
+        )}
 
-          <div className="flex items-center gap-3">
-            {tool === "brush" && (
-              <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
-                <Paintbrush className="h-3.5 w-3.5" />
-                <span>Size: {brushSize}px</span>
-                <input
-                  type="range"
-                  min={2}
-                  max={50}
-                  value={brushSize}
-                  onChange={(e) => setBrushSize(Number(e.target.value))}
-                  className="w-20 accent-primary"
-                />
+        {/* Right side: 2D Canvas Editor */}
+        <div className="flex flex-col gap-2 rounded-lg border border-border bg-card p-3 h-full overflow-hidden">
+          {/* Editor Toolbar */}
+          <div className="flex flex-wrap items-center justify-between gap-3 border-b border-border pb-3">
+            {(!isCollaborator || permissions.ANNOTATE) ? (
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="text-xs font-semibold uppercase tracking-wider text-muted-foreground mr-1">
+                  Label:
+                </span>
+                {LABELS.map((l) => (
+                  <button
+                    key={l.id}
+                    onClick={() => { setActiveLabel(l.id); setIsErasing(false); }}
+                    className={`inline-flex items-center gap-1.5 rounded-md px-2.5 py-1 text-xs font-medium border transition ${
+                      !isErasing && activeLabel === l.id
+                        ? `${l.badge} ring-1 ring-primary`
+                        : "border-border bg-background text-muted-foreground hover:text-foreground"
+                    }`}
+                  >
+                    <span className="h-2 w-2 rounded-full" style={{ backgroundColor: l.stroke }} />
+                    {l.name} <span className="text-[10px] opacity-60">({l.id})</span>
+                  </button>
+                ))}
+
+                <div className="mx-1 h-5 w-px bg-border" />
+
+                {/* Tool Mode: Brush (4) vs Pencil (5) vs Hand (6) */}
+                <div className="inline-flex overflow-hidden rounded-md border border-border">
+                  <button
+                    type="button"
+                    onClick={() => setTool("brush")}
+                    title="Brush mode (Key 4 or B)"
+                    className={`inline-flex items-center gap-1.5 px-2.5 py-1 text-xs transition ${
+                      tool === "brush" ? "bg-primary text-primary-foreground font-medium" : "bg-background text-muted-foreground hover:text-foreground"
+                    }`}
+                  >
+                    <Paintbrush className="h-3 w-3" /> Brush <span className="text-[10px] opacity-60">(4)</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setTool("pencil")}
+                    title="Pencil mode — trace an outline, the inside auto-fills (Key 5 or P)"
+                    className={`inline-flex items-center gap-1.5 border-l border-border px-2.5 py-1 text-xs transition ${
+                      tool === "pencil" ? "bg-primary text-primary-foreground font-medium" : "bg-background text-muted-foreground hover:text-foreground"
+                    }`}
+                  >
+                    <Lasso className="h-3 w-3" /> Pencil <span className="text-[10px] opacity-60">(5)</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setTool("pan")}
+                    title="Hand mode — click & drag to pan canvas (Key 6 or H)"
+                    className={`inline-flex items-center gap-1.5 border-l border-border px-2.5 py-1 text-xs transition ${
+                      tool === "pan" ? "bg-primary text-primary-foreground font-medium" : "bg-background text-muted-foreground hover:text-foreground"
+                    }`}
+                  >
+                    <Hand className="h-3 w-3" /> Hand <span className="text-[10px] opacity-60">(6)</span>
+                  </button>
+                </div>
+
+                <button
+                  onClick={() => setIsErasing((e) => !e)}
+                  title="Toggle eraser mode (Key 0 or E)"
+                  className={`inline-flex items-center gap-1.5 rounded-md px-2.5 py-1 text-xs font-medium border transition ${
+                    isErasing
+                      ? "border-destructive bg-destructive/10 text-destructive ring-1 ring-destructive"
+                      : "border-border bg-background text-muted-foreground hover:text-foreground"
+                  }`}
+                >
+                  <Eraser className="h-3.5 w-3.5" /> Eraser <span className="text-[10px] opacity-60">(0)</span>
+                </button>
+
+                <label className="flex items-center gap-1.5 text-xs text-muted-foreground cursor-pointer select-none ml-1">
+                  <input
+                    type="checkbox"
+                    checked={maskInside}
+                    onChange={(e) => setMaskInside(e.target.checked)}
+                    className="rounded border-border accent-primary h-3.5 w-3.5"
+                  />
+                  <span>Only inside bone</span>
+                </label>
+              </div>
+            ) : (
+              <div className="flex items-center gap-2 rounded-md bg-blue-500/10 border border-blue-500/20 px-3 py-1 text-xs text-blue-400 font-medium">
+                <Lock className="h-3.5 w-3.5 text-blue-400" />
+                <span>Read-Only Review Mode — Drawing locked by Master</span>
               </div>
             )}
 
-            {/* Zoom Controls */}
-            <div className="flex items-center gap-1 border-l border-border pl-2">
-              <button
-                type="button"
-                onClick={() => setZoom((z) => Math.max(0.4, Number((z - 0.2).toFixed(1))))}
-                title="Zoom Out"
-                className="inline-flex items-center justify-center h-7 w-7 rounded border border-border bg-background text-muted-foreground hover:text-foreground transition"
-              >
-                <ZoomOut className="h-3.5 w-3.5" />
-              </button>
-              <button
-                type="button"
-                onClick={resetZoom}
-                title="Reset Zoom to 100%"
-                className="px-1.5 py-0.5 rounded text-xs font-mono font-medium text-muted-foreground hover:text-foreground hover:bg-muted"
-              >
-                {Math.round(zoom * 100)}%
-              </button>
-              <button
-                type="button"
-                onClick={() => setZoom((z) => Math.min(4, Number((z + 0.2).toFixed(1))))}
-                title="Zoom In"
-                className="inline-flex items-center justify-center h-7 w-7 rounded border border-border bg-background text-muted-foreground hover:text-foreground transition"
-              >
-                <ZoomIn className="h-3.5 w-3.5" />
-              </button>
-              <button
-                type="button"
-                onClick={resetZoom}
-                title="Fit / Reset"
-                className="inline-flex items-center justify-center h-7 w-7 rounded border border-border bg-background text-muted-foreground hover:text-foreground transition"
-              >
-                <Maximize2 className="h-3.5 w-3.5" />
-              </button>
-            </div>
-
-            {/* Undo (Ctrl+Z) & Redo (Ctrl+Shift+Z / Ctrl+Y) */}
-            <div className="inline-flex overflow-hidden rounded-md border border-border">
-              <button
-                type="button"
-                onClick={undo}
-                title="Undo (Ctrl+Z)"
-                className="inline-flex items-center gap-1 bg-background px-2 py-1 text-xs text-muted-foreground hover:text-foreground hover:bg-muted transition"
-              >
-                <RotateCcw className="h-3 w-3" /> Undo
-              </button>
-              <button
-                type="button"
-                onClick={redo}
-                title="Redo (Ctrl+Shift+Z or Ctrl+Y)"
-                className="inline-flex items-center gap-1 border-l border-border bg-background px-2 py-1 text-xs text-muted-foreground hover:text-foreground hover:bg-muted transition"
-              >
-                <RotateCw className="h-3 w-3" /> Redo
-              </button>
-            </div>
-
-            {/* Flag Slice button */}
-            <button
-              type="button"
-              onClick={() => {
-                if (selected) {
-                  setFlagReason(selected.flagReason || "Not Sure");
-                  setFlagNote(selected.flagNote || "");
-                  setFlagModalOpen(true);
-                }
-              }}
-              title={
-                selected?.flagged
-                  ? `Flagged: ${selected.flagReason || "Not Sure"}`
-                  : "Flag this annotation for review (e.g. Not Sure)"
-              }
-              className={`inline-flex items-center gap-1.5 rounded-md px-2.5 py-1 text-xs font-medium border transition ${
-                selected?.flagged
-                  ? "border-amber-500/50 bg-amber-500/15 text-amber-500 hover:bg-amber-500/25 ring-1 ring-amber-500/30"
-                  : "border-border bg-background text-muted-foreground hover:text-foreground"
-              }`}
-            >
-              <Flag className={`h-3.5 w-3.5 ${selected?.flagged ? "fill-amber-500 text-amber-500" : ""}`} />
-              <span>{selected?.flagged ? "Flagged" : "Flag"}</span>
-            </button>
-
-            {/* Auto Save Toggle & Status */}
-            <div className="flex items-center gap-1.5 border-l border-border pl-2">
-              <label
-                className="flex items-center gap-1.5 text-xs text-muted-foreground cursor-pointer select-none"
-                title="Auto-save annotation mask after each stroke/edit"
-              >
-                <input
-                  type="checkbox"
-                  checked={autoSave}
-                  onChange={(e) => {
-                    setAutoSave(e.target.checked);
-                    try {
-                      localStorage.setItem("bme_painter2d_autosave", e.target.checked ? "true" : "false");
-                    } catch { /* ignore */ }
-                    if (e.target.checked) toast.success("Auto Save enabled");
-                    else toast.info("Auto Save disabled");
-                  }}
-                  className="rounded border-border accent-primary h-3.5 w-3.5"
-                />
-                <span className="font-medium">Auto Save</span>
-              </label>
-              {autoSaveStatus && (
-                <span className="text-[10px] text-muted-foreground font-mono truncate max-w-[130px]">
-                  {autoSaveStatus}
-                </span>
+            <div className="flex items-center gap-3">
+              {(!isCollaborator || permissions.ANNOTATE) && tool === "brush" && (
+                <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
+                  <Paintbrush className="h-3.5 w-3.5" />
+                  <span>Size: {brushSize}px</span>
+                  <input
+                    type="range"
+                    min={2}
+                    max={50}
+                    value={brushSize}
+                    onChange={(e) => setBrushSize(Number(e.target.value))}
+                    className="w-20 accent-primary"
+                  />
+                </div>
               )}
-            </div>
 
-            {/* Collaboration Button */}
-            <button
-              type="button"
-              onClick={startCollaboration}
-              disabled={startingCollab}
-              className="inline-flex items-center gap-1.5 rounded-md border border-blue-500/40 bg-blue-500/10 px-2.5 py-1 text-xs font-semibold text-blue-400 hover:bg-blue-500/20 transition-all"
-            >
-              <Users className="h-3.5 w-3.5" />
-              <span>{collabToken ? "Collab Panel" : "Start Collaboration"}</span>
-            </button>
+              {/* Zoom Controls */}
+              <div className="flex items-center gap-1 border-l border-border pl-2">
+                <button
+                  type="button"
+                  disabled={isCollaborator && !permissions.ZOOM_PAN}
+                  onClick={() => setZoom((z) => Math.max(0.4, Number((z - 0.2).toFixed(1))))}
+                  title={isCollaborator && !permissions.ZOOM_PAN ? "Zoom locked by Master" : "Zoom Out"}
+                  className="inline-flex items-center justify-center h-7 w-7 rounded border border-border bg-background text-muted-foreground hover:text-foreground disabled:opacity-40 disabled:cursor-not-allowed transition"
+                >
+                  <ZoomOut className="h-3.5 w-3.5" />
+                </button>
+                <button
+                  type="button"
+                  disabled={isCollaborator && !permissions.ZOOM_PAN}
+                  onClick={resetZoom}
+                  title="Reset Zoom to 100%"
+                  className="px-1.5 py-0.5 rounded text-xs font-mono font-medium text-muted-foreground hover:text-foreground hover:bg-muted disabled:opacity-40 disabled:cursor-not-allowed"
+                >
+                  {Math.round(zoom * 100)}%
+                </button>
+                <button
+                  type="button"
+                  disabled={isCollaborator && !permissions.ZOOM_PAN}
+                  onClick={() => setZoom((z) => Math.min(4, Number((z + 0.2).toFixed(1))))}
+                  title={isCollaborator && !permissions.ZOOM_PAN ? "Zoom locked by Master" : "Zoom In"}
+                  className="inline-flex items-center justify-center h-7 w-7 rounded border border-border bg-background text-muted-foreground hover:text-foreground disabled:opacity-40 disabled:cursor-not-allowed transition"
+                >
+                  <ZoomIn className="h-3.5 w-3.5" />
+                </button>
+                <button
+                  type="button"
+                  disabled={isCollaborator && !permissions.ZOOM_PAN}
+                  onClick={resetZoom}
+                  title="Fit / Reset"
+                  className="inline-flex items-center justify-center h-7 w-7 rounded border border-border bg-background text-muted-foreground hover:text-foreground disabled:opacity-40 disabled:cursor-not-allowed transition"
+                >
+                  <Maximize2 className="h-3.5 w-3.5" />
+                </button>
+              </div>
 
-            <button
-              onClick={clearMask}
-              title="Clear current canvas mask"
-              className="inline-flex items-center gap-1 rounded border border-border bg-background px-2 py-1 text-xs text-muted-foreground hover:text-destructive"
-            >
-              <Trash2 className="h-3 w-3" />
-            </button>
+              {/* Undo & Redo (only when annotation allowed) */}
+              {(!isCollaborator || permissions.ANNOTATE) && (
+                <div className="inline-flex overflow-hidden rounded-md border border-border">
+                  <button
+                    type="button"
+                    onClick={undo}
+                    title="Undo (Ctrl+Z)"
+                    className="inline-flex items-center gap-1 bg-background px-2 py-1 text-xs text-muted-foreground hover:text-foreground hover:bg-muted transition"
+                  >
+                    <RotateCcw className="h-3 w-3" /> Undo
+                  </button>
+                  <button
+                    type="button"
+                    onClick={redo}
+                    title="Redo (Ctrl+Shift+Z or Ctrl+Y)"
+                    className="inline-flex items-center gap-1 border-l border-border bg-background px-2 py-1 text-xs text-muted-foreground hover:text-foreground hover:bg-muted transition"
+                  >
+                    <RotateCw className="h-3 w-3" /> Redo
+                  </button>
+                </div>
+              )}
 
-            {selected?.hasMask && (
+              {/* Flag Slice button */}
               <button
                 type="button"
                 onClick={() => {
-                  if (confirm(`Delete saved mask for ${selected.caseId} (${selected.stem})?`)) {
-                    deleteMask();
+                  if (selected) {
+                    setFlagReason(selected.flagReason || "Not Sure");
+                    setFlagNote(selected.flagNote || "");
+                    setFlagModalOpen(true);
                   }
                 }}
-                disabled={deletingMask}
-                title="Delete saved mask permanently from server"
-                className="inline-flex items-center gap-1 rounded border border-destructive/40 bg-destructive/10 px-2 py-1 text-xs text-destructive hover:bg-destructive/20 transition"
+                title={
+                  selected?.flagged
+                    ? `Flagged: ${selected.flagReason || "Not Sure"}`
+                    : "Flag this annotation for review (e.g. Not Sure)"
+                }
+                className={`inline-flex items-center gap-1.5 rounded-md px-2.5 py-1 text-xs font-medium border transition ${
+                  selected?.flagged
+                    ? "border-amber-500/50 bg-amber-500/15 text-amber-500 hover:bg-amber-500/25 ring-1 ring-amber-500/30"
+                    : "border-border bg-background text-muted-foreground hover:text-foreground"
+                }`}
               >
-                <XCircle className="h-3 w-3" />
-                <span className="hidden sm:inline">Delete Mask</span>
+                <Flag className={`h-3.5 w-3.5 ${selected?.flagged ? "fill-amber-500 text-amber-500" : ""}`} />
+                <span>{selected?.flagged ? "Flagged" : "Flag"}</span>
               </button>
-            )}
 
-            <button
-              onClick={saveMask}
-              disabled={saving || !selected}
-              className={`inline-flex items-center gap-1.5 rounded-md px-3 py-1 text-xs font-medium transition ${
-                savedSuccess
-                  ? "bg-emerald-600 text-white"
-                  : "bg-primary text-primary-foreground hover:bg-primary/90"
-              }`}
-            >
-              {saving ? (
-                <Loader2 className="h-3.5 w-3.5 animate-spin" />
-              ) : savedSuccess ? (
-                <Check className="h-3.5 w-3.5" />
-              ) : (
-                <Save className="h-3.5 w-3.5" />
+              {/* Auto Save (only when annotation allowed) */}
+              {(!isCollaborator || permissions.ANNOTATE) && (
+                <div className="flex items-center gap-1.5 border-l border-border pl-2">
+                  <label
+                    className="flex items-center gap-1.5 text-xs text-muted-foreground cursor-pointer select-none"
+                    title="Auto-save annotation mask after each stroke/edit"
+                  >
+                    <input
+                      type="checkbox"
+                      checked={autoSave}
+                      onChange={(e) => {
+                        setAutoSave(e.target.checked);
+                        try {
+                          localStorage.setItem("bme_painter2d_autosave", e.target.checked ? "true" : "false");
+                        } catch { /* ignore */ }
+                        if (e.target.checked) toast.success("Auto Save enabled");
+                        else toast.info("Auto Save disabled");
+                      }}
+                      className="rounded border-border accent-primary h-3.5 w-3.5"
+                    />
+                    <span className="font-medium">Auto Save</span>
+                  </label>
+                  {autoSaveStatus && (
+                    <span className="text-[10px] text-muted-foreground font-mono truncate max-w-[130px]">
+                      {autoSaveStatus}
+                    </span>
+                  )}
+                </div>
               )}
-              {savedSuccess ? "Saved!" : "Save Mask"}
-            </button>
+
+              {/* Collaboration Button (Master only) vs Participant Indicator (Collaborator) */}
+              {!isCollaborator ? (
+                <button
+                  type="button"
+                  onClick={startCollaboration}
+                  disabled={startingCollab}
+                  className="inline-flex items-center gap-1.5 rounded-md border border-blue-500/40 bg-blue-500/10 px-2.5 py-1 text-xs font-semibold text-blue-400 hover:bg-blue-500/20 transition-all"
+                >
+                  <Users className="h-3.5 w-3.5" />
+                  <span>{collabToken ? "Collab Panel" : "Start Collaboration"}</span>
+                </button>
+              ) : (
+                <div className="flex items-center gap-1.5 rounded-md border border-blue-500/30 bg-blue-500/10 px-2.5 py-1 text-xs font-medium text-blue-300">
+                  <Users className="h-3.5 w-3.5" />
+                  <span>Review Session ({collab.participants.length})</span>
+                </div>
+              )}
+
+              {/* Clear Mask Button (only if delete permission) */}
+              {(!isCollaborator || permissions.DELETE_ANNOTATION) && (
+                <button
+                  onClick={clearMask}
+                  title="Clear current canvas mask"
+                  className="inline-flex items-center gap-1 rounded border border-border bg-background px-2 py-1 text-xs text-muted-foreground hover:text-destructive"
+                >
+                  <Trash2 className="h-3 w-3" />
+                </button>
+              )}
+
+              {/* Delete Saved Mask (Master only or if delete permission) */}
+              {selected?.hasMask && (!isCollaborator || permissions.DELETE_ANNOTATION) && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    if (confirm(`Delete saved mask for ${selected.caseId} (${selected.stem})?`)) {
+                      deleteMask();
+                    }
+                  }}
+                  disabled={deletingMask}
+                  title="Delete saved mask permanently from server"
+                  className="inline-flex items-center gap-1 rounded border border-destructive/40 bg-destructive/10 px-2 py-1 text-xs text-destructive hover:bg-destructive/20 transition"
+                >
+                  <XCircle className="h-3 w-3" />
+                  <span className="hidden sm:inline">Delete Mask</span>
+                </button>
+              )}
+
+              {/* Save Mask (only if annotate or edit permission) */}
+              {(!isCollaborator || permissions.ANNOTATE || permissions.EDIT_ANNOTATION) && (
+                <button
+                  onClick={saveMask}
+                  disabled={saving || !selected}
+                  className={`inline-flex items-center gap-1.5 rounded-md px-3 py-1 text-xs font-medium transition ${
+                    savedSuccess
+                      ? "bg-emerald-600 text-white"
+                      : "bg-primary text-primary-foreground hover:bg-primary/90"
+                  }`}
+                >
+                  {saving ? (
+                    <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                  ) : savedSuccess ? (
+                    <Check className="h-3.5 w-3.5" />
+                  ) : (
+                    <Save className="h-3.5 w-3.5" />
+                  )}
+                  {savedSuccess ? "Saved!" : "Save Mask"}
+                </button>
+              )}
+            </div>
           </div>
-        </div>
 
         {/* Flagged Slice Banner */}
         {selected?.flagged && (
@@ -1736,22 +1896,32 @@ export default function Painter2D() {
           }`}
           onMouseDown={(e) => {
             if (tool === "pan" && e.button === 0) {
+              if (isCollaborator && !permissions.ZOOM_PAN) return;
               setIsPanning(true);
               panStartRef.current = { x: e.clientX - pan.x, y: e.clientY - pan.y };
             }
           }}
           onMouseMove={(e) => {
             if (tool === "pan" && isPanning) {
-              setPan({
-                x: e.clientX - panStartRef.current.x,
-                y: e.clientY - panStartRef.current.y,
-              });
+              if (!isCollaborator || permissions.ZOOM_PAN) {
+                setPan({
+                  x: e.clientX - panStartRef.current.x,
+                  y: e.clientY - panStartRef.current.y,
+                });
+              }
+            }
+            if (collabToken && collab.connected && viewportRef.current) {
+              const rect = viewportRef.current.getBoundingClientRect();
+              const x = (e.clientX - rect.left) / rect.width;
+              const y = (e.clientY - rect.top) / rect.height;
+              collab.updateCursor({ x, y, plane: "axial" });
             }
           }}
           onMouseUp={() => {
             if (isPanning) setIsPanning(false);
           }}
           onWheel={(e) => {
+            if (isCollaborator && !permissions.ZOOM_PAN) return;
             e.preventDefault();
             const delta = e.deltaY < 0 ? 0.15 : -0.15;
             setZoom((z) => Math.min(4, Math.max(0.4, Number((z + delta).toFixed(2)))));
@@ -1824,6 +1994,7 @@ export default function Painter2D() {
           )}
         </div>
       </div>
+    </div>
 
       {/* Flag Modal Dialog */}
       {flagModalOpen && selected && (
