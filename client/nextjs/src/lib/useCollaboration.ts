@@ -47,8 +47,9 @@ export type UseCollaborationOptions = {
   token: string;
   userId?: string;
   userName?: string;
-  onViewpointUpdated?: (viewpoint: ViewpointState) => void;
+  onViewpointUpdated?: (viewpoint: ViewpointState, updatedBy?: string) => void;
   onMaskUpdated?: (data: { stem?: string; caseId?: string; maskDataUrl?: string; maskPixels?: number[]; width?: number; height?: number }) => void;
+  onMaskRequested?: (data: { stem?: string; caseId?: string; requestedBy?: string }) => void;
   onSessionEnded?: () => void;
   onUserRemoved?: () => void;
 };
@@ -59,6 +60,7 @@ export function useCollaboration({
   userName,
   onViewpointUpdated,
   onMaskUpdated,
+  onMaskRequested,
   onSessionEnded,
   onUserRemoved,
 }: UseCollaborationOptions) {
@@ -83,14 +85,20 @@ export function useCollaboration({
   const [removed, setRemoved] = useState(false);
 
   const socketRef = useRef<WebSocket | null>(null);
+  // The socket's onmessage closure is created once per connection, so it cannot
+  // read currentUserId from state without going stale. Keep it in a ref.
+  const currentUserIdRef = useRef<string>("");
   const lastCursorEmitRef = useRef<number>(0);
   const lastViewpointEmitRef = useRef<number>(0);
   const lastMaskEmitRef = useRef<number>(0);
+  const pendingMaskEmitRef = useRef<{ stem: string; caseId: string; maskDataUrl?: string; maskPixels?: number[]; width?: number; height?: number } | null>(null);
+  const maskEmitTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // Stabilize callbacks in refs so they never trigger WebSocket reconnects
   const callbacksRef = useRef({
     onViewpointUpdated,
     onMaskUpdated,
+    onMaskRequested,
     onSessionEnded,
     onUserRemoved,
   });
@@ -98,10 +106,11 @@ export function useCollaboration({
     callbacksRef.current = {
       onViewpointUpdated,
       onMaskUpdated,
+      onMaskRequested,
       onSessionEnded,
       onUserRemoved,
     };
-  }, [onViewpointUpdated, onMaskUpdated, onSessionEnded, onUserRemoved]);
+  }, [onViewpointUpdated, onMaskUpdated, onMaskRequested, onSessionEnded, onUserRemoved]);
 
   const getWsUrl = useCallback(() => {
     let host = "localhost:4000";
@@ -152,6 +161,7 @@ export function useCollaboration({
 
         if (data.type === "SESSION_JOIN_SUCCESS") {
           setRole(data.role);
+          currentUserIdRef.current = data.userId;
           setCurrentUserId(data.userId);
           setPermissions(data.permissions);
           if (data.session) {
@@ -163,7 +173,7 @@ export function useCollaboration({
           if (data.viewpoint) {
             setViewpoint(data.viewpoint);
             if (callbacksRef.current.onViewpointUpdated) {
-              callbacksRef.current.onViewpointUpdated(data.viewpoint);
+              callbacksRef.current.onViewpointUpdated(data.viewpoint, data.updatedBy);
             }
           }
         } else if (data.type === "CURSOR_UPDATED") {
@@ -173,7 +183,7 @@ export function useCollaboration({
             )
           );
         } else if (data.type === "PERMISSION_UPDATED") {
-          if (data.targetUserId === currentUserId) {
+          if (data.targetUserId === currentUserIdRef.current) {
             setPermissions(data.permissions);
           }
           if (data.participants) {
@@ -182,6 +192,10 @@ export function useCollaboration({
         } else if (data.type === "PARTICIPANTS_UPDATED") {
           if (data.participants) {
             setParticipants(data.participants);
+          }
+        } else if (data.type === "MASK_REQUESTED") {
+          if (callbacksRef.current.onMaskRequested) {
+            callbacksRef.current.onMaskRequested(data);
           }
         } else if (data.type === "MASK_UPDATED") {
           if (callbacksRef.current.onMaskUpdated) {
@@ -244,16 +258,32 @@ export function useCollaboration({
   // Live Mask Update emitter
   const updateMask = useCallback((maskPayload: { stem: string; caseId: string; maskDataUrl?: string; maskPixels?: number[]; width?: number; height?: number }) => {
     if (!socketRef.current || socketRef.current.readyState !== WebSocket.OPEN) return;
-    const now = Date.now();
-    if (now - lastMaskEmitRef.current < 80) return;
-    lastMaskEmitRef.current = now;
 
-    socketRef.current.send(
-      JSON.stringify({
-        type: "MASK_UPDATE",
-        ...maskPayload,
-      })
-    );
+    const send = (payload: typeof maskPayload) => {
+      if (!socketRef.current || socketRef.current.readyState !== WebSocket.OPEN) return;
+      lastMaskEmitRef.current = Date.now();
+      socketRef.current.send(JSON.stringify({ type: "MASK_UPDATE", ...payload }));
+    };
+
+    const elapsed = Date.now() - lastMaskEmitRef.current;
+    if (elapsed >= 80) {
+      send(maskPayload);
+      return;
+    }
+
+    // Dropping an update inside the throttle window loses it for good, and the
+    // one that gets dropped is usually the last of a burst - the finished mask
+    // right after the empty one. Keep the newest and send it when the window
+    // closes instead.
+    pendingMaskEmitRef.current = maskPayload;
+    if (maskEmitTimerRef.current === null) {
+      maskEmitTimerRef.current = setTimeout(() => {
+        maskEmitTimerRef.current = null;
+        const queued = pendingMaskEmitRef.current;
+        pendingMaskEmitRef.current = null;
+        if (queued) send(queued);
+      }, 80 - elapsed);
+    }
   }, []);
 
   // Throttled Cursor Update emitter (max 1 update per 50ms)
@@ -272,6 +302,14 @@ export function useCollaboration({
   }, []);
 
   // Master Action: Grant/Revoke Permission
+  // Ask whoever else is in the session to resend their mask for this slice.
+  // Broadcasts are emitted by the drawer, so a viewer that arrives afterwards
+  // has no other way to obtain what is already on screen elsewhere.
+  const requestMask = useCallback((stem: string, caseId: string) => {
+    if (!socketRef.current || socketRef.current.readyState !== WebSocket.OPEN) return;
+    socketRef.current.send(JSON.stringify({ type: "REQUEST_MASK", stem, caseId }));
+  }, []);
+
   const updatePermission = useCallback((targetUserId: string, newPermissions: Partial<ParticipantPermission>) => {
     if (!socketRef.current || socketRef.current.readyState !== WebSocket.OPEN) return;
     socketRef.current.send(
@@ -317,6 +355,7 @@ export function useCollaboration({
     updateViewpoint,
     updateCursor,
     updateMask,
+    requestMask,
     updatePermission,
     removeUser,
     endSession,

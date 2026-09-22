@@ -83,6 +83,10 @@ export type CollabSession = {
 const sessions = new Map<string, CollabSession>();
 // Client socket to session mapping
 const socketMeta = new Map<WebSocket, { token: string; userId: string }>();
+// Every live socket per `${token}::${userId}`. A participant can legitimately
+// hold more than one (a second tab, or a reconnect that overlaps the old
+// socket's close), so a closing socket must not evict the ones still open.
+const activeSockets = new Map<string, Set<WebSocket>>();
 
 export function generateSessionToken(): string {
   return "collab_sec_" + crypto.randomBytes(16).toString("hex");
@@ -210,6 +214,10 @@ export function initCollaborationWSServer(wss: WebSocketServer) {
     }
 
     socketMeta.set(ws, { token, userId });
+    const socketKey = `${token}::${userId}`;
+    const liveSockets = activeSockets.get(socketKey) ?? new Set<WebSocket>();
+    liveSockets.add(ws);
+    activeSockets.set(socketKey, liveSockets);
 
     // Determine role: if userId matches session.masterId or creatorId or starts with master_
     const isMaster =
@@ -269,24 +277,32 @@ export function initCollaborationWSServer(wss: WebSocketServer) {
         const { type } = data;
 
         if (type === "VIEWPOINT_UPDATE") {
-          // Check permission or Master role
-          const canControlSlice = isMaster || participant?.permissions.SLICE_CONTROL || participant?.permissions.ZOOM_PAN;
-          if (!canControlSlice) {
-            ws.send(JSON.stringify({ type: "ERROR", error: "Permission denied: viewpoint control locked by Master" }));
-            return;
-          }
+          if (!data.viewpoint) return;
 
-          if (data.viewpoint) {
-            session.viewpoint = {
-              ...session.viewpoint,
-              ...data.viewpoint,
-            };
-            broadcastToSession(token, {
-              type: "VIEWPOINT_UPDATED",
-              updatedBy: userId,
-              viewpoint: session.viewpoint,
-            }, ws);
-          }
+          // Anyone may publish where they are looking: a viewpoint is only
+          // acted on by participants who have chosen to follow that person, so
+          // publishing it controls nobody. The session's own viewpoint — what
+          // a late joiner opens on — stays owned by the Master and by viewers
+          // the Master has given slice control to.
+          const ownsSessionView = isMaster || participant?.permissions.SLICE_CONTROL || participant?.permissions.ZOOM_PAN;
+          const viewpoint = ownsSessionView
+            ? (session.viewpoint = { ...session.viewpoint, ...data.viewpoint })
+            : { ...session.viewpoint, ...data.viewpoint };
+
+          broadcastToSession(token, {
+            type: "VIEWPOINT_UPDATED",
+            updatedBy: userId,
+            viewpoint,
+          }, ws);
+        } else if (type === "REQUEST_MASK") {
+          // Relayed so whoever holds this slice can resend it. Answering is the
+          // sender's choice, and the reply goes through MASK_UPDATE as usual.
+          broadcastToSession(token, {
+            type: "MASK_REQUESTED",
+            requestedBy: userId,
+            stem: data.stem,
+            caseId: data.caseId,
+          }, ws);
         } else if (type === "CURSOR_UPDATE") {
           if (data.cursor && participant) {
             participant.cursor = data.cursor;
@@ -389,6 +405,16 @@ export function initCollaborationWSServer(wss: WebSocketServer) {
 
     ws.on("close", () => {
       socketMeta.delete(ws);
+
+      // A client that reconnects (page refresh, React re-mount) opens its new
+      // socket before the old one finishes closing, and a second tab is a
+      // legitimate extra socket. Only tear the participant down once none of
+      // their sockets remain.
+      const remaining = activeSockets.get(socketKey);
+      remaining?.delete(ws);
+      if (remaining && remaining.size > 0) return;
+      activeSockets.delete(socketKey);
+
       if (participant) {
         participant.connected = false;
         if (isMaster) {

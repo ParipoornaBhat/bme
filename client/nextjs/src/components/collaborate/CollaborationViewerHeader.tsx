@@ -9,6 +9,9 @@ interface CollaborationViewerHeaderProps {
   masterConnected: boolean;
   followingMaster: boolean;
   permissions: ParticipantPermission;
+  followingName?: string | null;
+  canFollowMaster?: boolean;
+  onToggleFollowMaster?: () => void;
 }
 
 export default function CollaborationViewerHeader({
@@ -16,6 +19,9 @@ export default function CollaborationViewerHeader({
   masterConnected,
   followingMaster,
   permissions,
+  followingName = null,
+  canFollowMaster = false,
+  onToggleFollowMaster,
 }: CollaborationViewerHeaderProps) {
   return (
     <header className="flex w-full items-center justify-between border-b border-slate-800 bg-slate-950/90 px-5 py-3 text-slate-100 shadow-md backdrop-blur-md">
@@ -42,9 +48,33 @@ export default function CollaborationViewerHeader({
 
       {/* Sync Status Badge */}
       <div className="flex items-center gap-4">
-        {followingMaster ? (
+        {onToggleFollowMaster ? (
+          <button
+            onClick={onToggleFollowMaster}
+            disabled={!followingMaster && !canFollowMaster}
+            title={
+              followingMaster
+                ? "Stop mirroring and move through slices on your own"
+                : canFollowMaster
+                  ? "Mirror the host's slice, zoom and pan"
+                  : "Nobody is hosting this session right now"
+            }
+            className={`flex items-center gap-1.5 rounded-md border px-3 py-1 text-xs font-semibold transition-all ${
+              followingMaster
+                ? "bg-emerald-500/10 border-emerald-500/30 text-emerald-400 hover:bg-emerald-500/20 cursor-pointer"
+                : canFollowMaster
+                  ? "bg-amber-500/10 border-amber-500/30 text-amber-400 hover:bg-amber-500/20 cursor-pointer"
+                  : "bg-slate-800 border-slate-700 text-slate-500 cursor-not-allowed"
+            }`}
+          >
+            <Eye className={`h-3.5 w-3.5 ${followingMaster ? "animate-pulse" : ""}`} />
+            {followingMaster
+              ? `Following ${followingName || "Host"}`
+              : "Independent View"}
+          </button>
+        ) : followingMaster ? (
           <div className="flex items-center gap-1.5 rounded-md bg-emerald-500/10 border border-emerald-500/30 px-3 py-1 text-xs font-semibold text-emerald-400">
-            <Eye className="h-3.5 w-3.5 animate-pulse" /> Following Master's View
+            <Eye className="h-3.5 w-3.5 animate-pulse" /> Following {followingName || "Master"}
           </div>
         ) : (
           <div className="flex items-center gap-1.5 rounded-md bg-amber-500/10 border border-amber-500/30 px-3 py-1 text-xs font-semibold text-amber-400">

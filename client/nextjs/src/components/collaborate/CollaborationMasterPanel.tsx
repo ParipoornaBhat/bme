@@ -21,6 +21,8 @@ import type { Participant, ParticipantPermission } from "~/lib/useCollaboration"
 
 interface CollaborationMasterPanelProps {
   shareUrl: string;
+  followUserId?: string | null;
+  onFollowUser?: (userId: string | null) => void;
   participants: Participant[];
   currentUserId: string;
   onUpdatePermission: (targetUserId: string, permissions: Partial<ParticipantPermission>) => void;
@@ -31,6 +33,8 @@ interface CollaborationMasterPanelProps {
 
 export default function CollaborationMasterPanel({
   shareUrl,
+  followUserId = null,
+  onFollowUser,
   participants,
   currentUserId,
   onUpdatePermission,
@@ -141,6 +145,21 @@ export default function CollaborationMasterPanel({
                     </div>
                   </div>
 
+                  <div className="flex items-center gap-2">
+                  {!isSelf && onFollowUser && p.connected && (
+                    <button
+                      onClick={() => onFollowUser(followUserId === p.id ? null : p.id)}
+                      title={followUserId === p.id ? `Stop mirroring ${p.name}` : `Mirror ${p.name}'s view`}
+                      className={`flex items-center gap-1 rounded-lg border px-2.5 py-1.5 text-xs font-semibold transition-all cursor-pointer ${
+                        followUserId === p.id
+                          ? "border-emerald-500/40 bg-emerald-500/15 text-emerald-300 hover:bg-emerald-500/25"
+                          : "border-slate-700 bg-slate-800/60 text-slate-300 hover:bg-slate-700"
+                      }`}
+                    >
+                      <Eye className="h-3.5 w-3.5" />
+                      {followUserId === p.id ? "Following" : "Follow"}
+                    </button>
+                  )}
                   {!isMaster && (
                     <button
                       onClick={() => onRemoveUser(p.id)}
@@ -151,6 +170,7 @@ export default function CollaborationMasterPanel({
                       Revoke
                     </button>
                   )}
+                  </div>
                 </div>
 
                 {/* Granular Permission Toggles (For Viewers Only) */}

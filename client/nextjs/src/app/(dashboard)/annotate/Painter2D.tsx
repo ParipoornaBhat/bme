@@ -33,7 +33,7 @@ import { useSession } from "~/lib/auth-client";
 import CollaborationViewerHeader from "~/components/collaborate/CollaborationViewerHeader";
 import CollaborationMasterPanel from "~/components/collaborate/CollaborationMasterPanel";
 import LiveCursorsOverlay from "~/components/collaborate/LiveCursorsOverlay";
-import { useCollaboration, type Participant, type ParticipantPermission } from "~/lib/useCollaboration";
+import { useCollaboration, type Participant, type ParticipantPermission, type ViewpointState } from "~/lib/useCollaboration";
 
 export type Case2DSlice = {
   caseId: string;
@@ -94,11 +94,26 @@ export default function Painter2D({
   const [deletingMask, setDeletingMask] = useState(false);
 
   const [imgDim, setImgDim] = useState<{ w: number; h: number }>({ w: 0, h: 0 });
+  const [maskRevision, setMaskRevision] = useState(0);
+  // Whose view this client mirrors. Null means moving independently. Either
+  // side can follow the other: the host can watch a radiologist work, and a
+  // radiologist can watch the host.
+  const [followUserId, setFollowUserId] = useState<string | null>(null);
+  const followUserIdRef = useRef<string | null>(null);
+  followUserIdRef.current = followUserId;
+  const followInitialisedRef = useRef(false);
+  const appliedRemoteViewRef = useRef<string | null>(null);
+  const lastViewpointByUserRef = useRef<Map<string, ViewpointState>>(new Map());
+  const applyViewpointRef = useRef<(vp: ViewpointState) => void>(() => {});
   const [counts, setCounts] = useState<{ bone: number; bme: number; uncertain: number }>({ bone: 0, bme: 0, uncertain: 0 });
   const countsRef = useRef<{ bone: number; bme: number; uncertain: number }>({ bone: 0, bme: 0, uncertain: 0 });
 
   const [zoom, setZoom] = useState<number>(1);
   const [pan, setPan] = useState<{ x: number; y: number }>({ x: 0, y: 0 });
+  const zoomRef = useRef(zoom);
+  zoomRef.current = zoom;
+  const panRef = useRef(pan);
+  panRef.current = pan;
 
   // Collaboration States
   const { data: session } = useSession();
@@ -132,8 +147,24 @@ export default function Painter2D({
     }
   }, [session?.user?.id, session?.user?.name]);
 
+  // Generated once and persisted: the id is part of the WebSocket URL, so a new
+  // one on every render would reconnect in a loop and leave the master granting
+  // permissions to participants that no longer exist.
+  const [persistedCollabUserId] = useState<string>(() => {
+    if (typeof window === "undefined") return "";
+    try {
+      const saved = localStorage.getItem("bme_collab_radiologist_uid");
+      if (saved) return saved;
+      const fresh = `collab_${Math.random().toString(36).substring(2, 9)}`;
+      localStorage.setItem("bme_collab_radiologist_uid", fresh);
+      return fresh;
+    } catch {
+      return `collab_${Math.random().toString(36).substring(2, 9)}`;
+    }
+  });
+
   const activeUserId = isCollaborator
-    ? (collaboratorUserId || (typeof window !== "undefined" && localStorage.getItem("bme_collab_radiologist_uid")) || `collab_${Math.random().toString(36).substring(2, 9)}`)
+    ? (collaboratorUserId || persistedCollabUserId)
     : masterUserId;
   const activeUserName = isCollaborator
     ? (collaboratorUserName || (typeof window !== "undefined" && localStorage.getItem("bme_collab_radiologist_name")) || "Dr. Radiologist")
@@ -143,64 +174,27 @@ export default function Painter2D({
     token: collabToken || "",
     userId: activeUserId,
     userName: activeUserName,
-    onViewpointUpdated: (vp) => {
-      if (isCollaborator) {
-        if (vp.zoom !== undefined && !collab.permissions.ZOOM_PAN) setZoom(vp.zoom);
-        if (vp.pan !== undefined && !collab.permissions.ZOOM_PAN) setPan(vp.pan);
-        if (vp.selectedStem || vp.selectedRelPath || vp.selectedCaseId) {
-          setSelected((prev) => {
-            if (
-              prev &&
-              ((vp.selectedStem && prev.stem === vp.selectedStem) ||
-               (vp.selectedRelPath && prev.relPath === vp.selectedRelPath))
-            ) {
-              return prev;
-            }
-            const match = slices.find(
-              (s) =>
-                (vp.selectedStem && s.stem === vp.selectedStem) ||
-                (vp.selectedRelPath && s.relPath === vp.selectedRelPath) ||
-                (vp.selectedCaseId && s.caseId === vp.selectedCaseId)
-            );
-            return match || prev;
-          });
-        }
+    onViewpointUpdated: (vp, updatedBy) => {
+      // Remember where everyone is, so choosing to follow someone can jump
+      // straight to their view instead of waiting for them to move again.
+      if (updatedBy) lastViewpointByUserRef.current.set(updatedBy, vp);
+      if (updatedBy && followUserIdRef.current && updatedBy === followUserIdRef.current) {
+        applyViewpointRef.current(vp);
       }
+    },
+    onMaskRequested: (data) => {
+      const loaded = loadedSliceRef.current;
+      if (!loaded || data.stem !== loaded.stem || data.caseId !== loaded.caseId) return;
+      broadcastCurrentMaskRef.current();
     },
     onMaskUpdated: (data) => {
       if (!data.maskDataUrl) return;
-      const maskImg = new Image();
-      maskImg.src = data.maskDataUrl;
-      maskImg.onload = () => {
-        const mw = maskImg.naturalWidth || data.width || 512;
-        const mh = maskImg.naturalHeight || data.height || 512;
-        const off = document.createElement("canvas");
-        off.width = mw;
-        off.height = mh;
-        const offCtx = off.getContext("2d");
-        if (offCtx) {
-          offCtx.drawImage(maskImg, 0, 0);
-          const pxData = offCtx.getImageData(0, 0, mw, mh).data;
-          const maskArr = maskDataRef.current;
-          const { w, h } = imgDimRef.current;
-          if (maskArr && w > 0 && h > 0) {
-            for (let i = 0; i < maskArr.length; i++) {
-              const p = i * 4;
-              const r = pxData[p];
-              const g = pxData[p + 1];
-              const b = pxData[p + 2];
-              if (r === 16 && g === 185 && b === 129) maskArr[i] = 1;
-              else if (r === 239 && g === 68 && b === 68) maskArr[i] = 2;
-              else if (r === 245 && g === 158 && b === 11) maskArr[i] = 3;
-              else if (r === 1) maskArr[i] = 1;
-              else if (r === 2) maskArr[i] = 2;
-              else if (r === 3) maskArr[i] = 3;
-              else if (pxData[p + 3] === 0) maskArr[i] = 0;
-            }
-            renderMaskToCanvas();
-          }
-        }
-      };
+      // Hold the newest broadcast. The sender only emits while it renders, so
+      // an update that arrives before this slice has finished loading is the
+      // only one we will ever see for it; applying it later is the difference
+      // between the mask appearing and the viewer staying blank.
+      pendingRemoteMaskRef.current = data;
+      applyRemoteMaskRef.current();
     },
   });
 
@@ -265,6 +259,14 @@ export default function Painter2D({
 
   useEffect(() => {
     if (collabToken && collab.connected && selected) {
+      // Do not echo a view we only adopted because we are following someone.
+      // Two participants following each other would otherwise bounce the same
+      // viewpoint back and forth.
+      const signature = `${selected.stem}|${zoom}|${pan.x}|${pan.y}`;
+      if (appliedRemoteViewRef.current === signature) {
+        appliedRemoteViewRef.current = null;
+        return;
+      }
       collab.updateViewpoint(
         {
           sliceIndex: Math.max(0, slices.findIndex((s) => s.stem === selected.stem)),
@@ -327,6 +329,16 @@ export default function Painter2D({
   const overlayCanvasRef = useRef<HTMLCanvasElement>(null);
   const viewportRef = useRef<HTMLDivElement>(null);
   const maskDataRef = useRef<Uint8Array | null>(null);
+  const applyingRemoteMaskRef = useRef(false);
+  const pendingRemoteMaskRef = useRef<{
+    stem?: string;
+    caseId?: string;
+    maskDataUrl?: string;
+    width?: number;
+    height?: number;
+  } | null>(null);
+  const applyRemoteMaskRef = useRef<() => void>(() => {});
+  const broadcastCurrentMaskRef = useRef<() => void>(() => {});
   const imgDimRef = useRef<{ w: number; h: number }>({ w: 0, h: 0 });
   const undoStackRef = useRef<Uint8Array[]>([]);
   const redoStackRef = useRef<Uint8Array[]>([]);
@@ -459,7 +471,7 @@ export default function Painter2D({
     countsRef.current = newCounts;
 
     // Broadcast live mask to active collaboration session
-    if (collabToken && collab.connected && selected) {
+    if (collabToken && collab.connected && selected && !applyingRemoteMaskRef.current) {
       try {
         const dataUrl = canvas.toDataURL("image/png");
         collab.updateMask({
@@ -545,6 +557,171 @@ export default function Painter2D({
   const selectedCaseId = selected?.caseId;
   const selectedStem = selected?.stem;
 
+  // Read by the slice loader below without being part of its dependencies:
+  // renderMaskToCanvas is rebuilt on every collaboration update, and depending
+  // on it would restart the in-flight load each time a participant moves.
+  const renderMaskRef = useRef(renderMaskToCanvas);
+  renderMaskRef.current = renderMaskToCanvas;
+
+  // Sending the mask only as a side effect of rendering loses it whenever every
+  // render for a slice happens before the socket is open - which is what a
+  // cached mask does, because the load finishes in a few milliseconds. Push the
+  // current mask explicitly once the slice is loaded and the session is live.
+  const broadcastCurrentMask = useCallback(() => {
+    if (!collabToken || !collab.connected) return;
+    const loaded = loadedSliceRef.current;
+    const canvas = maskCanvasRef.current;
+    const { w, h } = imgDimRef.current;
+    if (!loaded || !canvas || w === 0 || h === 0) return;
+    try {
+      collab.updateMask({
+        stem: loaded.stem,
+        caseId: loaded.caseId,
+        maskDataUrl: canvas.toDataURL("image/png"),
+        width: w,
+        height: h,
+      });
+    } catch { /* ignore */ }
+  }, [collabToken, collab.connected, collab.updateMask]);
+
+  applyViewpointRef.current = (vp) => {
+    const nextZoom = vp.zoom ?? zoomRef.current;
+    const nextPan = vp.pan ?? panRef.current;
+    if (vp.selectedStem) {
+      appliedRemoteViewRef.current = `${vp.selectedStem}|${nextZoom}|${nextPan.x}|${nextPan.y}`;
+    }
+    if (vp.zoom !== undefined) setZoom(vp.zoom);
+    if (vp.pan !== undefined) setPan(vp.pan);
+    if (vp.selectedStem || vp.selectedRelPath || vp.selectedCaseId) {
+      setSelected((prev) => {
+        if (
+          prev &&
+          ((vp.selectedStem && prev.stem === vp.selectedStem) ||
+           (vp.selectedRelPath && prev.relPath === vp.selectedRelPath))
+        ) {
+          return prev;
+        }
+        // Resolve the precise slice first. A single find() with these three
+        // checks OR'd together matches on caseId for every slice of the case,
+        // so it always returns the first one (_s000) whatever stem the
+        // follow target actually selected.
+        let match: Case2DSlice | undefined;
+        if (vp.selectedStem) {
+          match = slices.find((s) => s.stem === vp.selectedStem);
+        }
+        if (!match && vp.selectedRelPath) {
+          match = slices.find((s) => s.relPath === vp.selectedRelPath);
+        }
+        if (!match && vp.selectedCaseId) {
+          match = slices.find((s) => s.caseId === vp.selectedCaseId);
+        }
+        return match || prev;
+      });
+    }
+  };
+
+  // Snap to the followed participant's last known view the moment we start
+  // following them.
+  useEffect(() => {
+    if (!followUserId) return;
+    const vp = lastViewpointByUserRef.current.get(followUserId);
+    if (vp) applyViewpointRef.current(vp);
+  }, [followUserId]);
+
+  broadcastCurrentMaskRef.current = broadcastCurrentMask;
+
+  useEffect(() => {
+    if (!collabToken || !collab.connected) return;
+    broadcastCurrentMask();
+
+    // Publishing alone is not enough: whoever already has this slice open may
+    // not draw again while we are watching, so ask them for what is on their
+    // screen right now.
+    const loaded = loadedSliceRef.current;
+    if (loaded) collab.requestMask(loaded.stem, loaded.caseId);
+  }, [collabToken, collab.connected, maskRevision, broadcastCurrentMask, collab.requestMask]);
+
+  // Default to following the host, so a radiologist opening the link lands on
+  // the same slice without having to do anything. Settled once, then it is the
+  // participant's own choice.
+  const masterId = collab.participants.find((p) => p.role === "MASTER")?.id ?? null;
+  useEffect(() => {
+    if (followInitialisedRef.current || !collabToken || !isCollaborator || !masterId) return;
+    if (masterId === collab.currentUserId) return;
+    followInitialisedRef.current = true;
+    setFollowUserId(masterId);
+  }, [collabToken, isCollaborator, masterId, collab.currentUserId]);
+
+  // Stop following someone who has left.
+  useEffect(() => {
+    if (!followUserId) return;
+    const stillHere = collab.participants.some((p) => p.id === followUserId && p.connected);
+    if (!stillHere) setFollowUserId(null);
+  }, [collab.participants, followUserId]);
+
+  // Decode and apply the buffered remote mask, if it belongs to the slice whose
+  // buffers are currently loaded and matches its dimensions. Left pending
+  // otherwise, so the slice loader can drain it once the canvas is ready.
+  applyRemoteMaskRef.current = () => {
+    const data = pendingRemoteMaskRef.current;
+    if (!data?.maskDataUrl) return;
+    const loaded = loadedSliceRef.current;
+    if (!loaded || data.stem !== loaded.stem || data.caseId !== loaded.caseId) return;
+
+    const maskImg = new Image();
+    maskImg.src = data.maskDataUrl;
+    maskImg.onload = () => {
+      const mw = maskImg.naturalWidth || data.width || 512;
+      const mh = maskImg.naturalHeight || data.height || 512;
+      const maskArr = maskDataRef.current;
+      const { w, h } = imgDimRef.current;
+      // The loop below indexes the incoming pixels with the local stride, so
+      // mismatched dimensions would scramble the mask.
+      if (!maskArr || w === 0 || h === 0 || mw !== w || mh !== h) return;
+
+      const off = document.createElement("canvas");
+      off.width = mw;
+      off.height = mh;
+      const offCtx = off.getContext("2d");
+      if (!offCtx) return;
+      offCtx.drawImage(maskImg, 0, 0);
+      const pxData = offCtx.getImageData(0, 0, mw, mh).data;
+
+      // A canvas premultiplies alpha, so a label colour does not survive the
+      // toDataURL/drawImage round trip intact: bone leaves as 16,185,129 and
+      // comes back as 15,185,128. Matching on exact equality therefore never
+      // fires, and the incoming mask can only ever clear pixels. Classify by
+      // nearest label colour instead.
+      const near = (r: number, g: number, b: number, cr: number, cg: number, cb: number) =>
+        Math.abs(r - cr) <= 8 && Math.abs(g - cg) <= 8 && Math.abs(b - cb) <= 8;
+      for (let i = 0; i < maskArr.length; i++) {
+        const p = i * 4;
+        const r = pxData[p];
+        const g = pxData[p + 1];
+        const b = pxData[p + 2];
+        if (pxData[p + 3] === 0) maskArr[i] = 0;
+        else if (r === 1 || r === 2 || r === 3) maskArr[i] = r;
+        else if (near(r, g, b, 16, 185, 129)) maskArr[i] = 1;
+        else if (near(r, g, b, 239, 68, 68)) maskArr[i] = 2;
+        else if (near(r, g, b, 245, 158, 11)) maskArr[i] = 3;
+        else maskArr[i] = 0;
+      }
+
+      pendingRemoteMaskRef.current = null;
+      // Rendering normally broadcasts the canvas. Doing that for a mask that
+      // just arrived would echo it back to the sender, who would render and
+      // echo it again.
+      applyingRemoteMaskRef.current = true;
+      try {
+        renderMaskRef.current();
+      } finally {
+        applyingRemoteMaskRef.current = false;
+      }
+    };
+  };
+  const selectedRef = useRef(selected);
+  selectedRef.current = selected;
+
   // Load image and existing mask on slice change
   useEffect(() => {
     if (!selectedRelPath || !selectedCaseId || !selectedStem) return;
@@ -553,9 +730,14 @@ export default function Painter2D({
     if (lastLoadedStemRef.current === sliceKey) {
       return;
     }
+    // Claim the slice now so a re-render cannot start a second load, but
+    // release the claim below if this run is torn down before it finishes:
+    // otherwise a cancelled run (a StrictMode remount, or a fast slice switch)
+    // leaves the slice marked as loaded and its mask never renders.
     lastLoadedStemRef.current = sliceKey;
+    let established = false;
     const currentRequestId = ++loadRequestIdRef.current;
-    const sliceSnapshot = selected;
+    const sliceSnapshot = selectedRef.current;
 
     let cancelled = false;
     const img = new Image();
@@ -596,6 +778,15 @@ export default function Painter2D({
       const maskArr = new Uint8Array(w * h);
       maskDataRef.current = maskArr;
       loadedSliceRef.current = sliceSnapshot;
+      established = true;
+
+      // A mask broadcast that arrived while this slice was still loading was
+      // held back; drop it if it was for a different slice, otherwise apply it
+      // now that there is a canvas to paint onto.
+      const pending = pendingRemoteMaskRef.current;
+      if (pending && (pending.stem !== selectedStem || pending.caseId !== selectedCaseId)) {
+        pendingRemoteMaskRef.current = null;
+      }
       undoStackRef.current = [];
       redoStackRef.current = [];
       isDirtyRef.current = false;
@@ -641,21 +832,30 @@ export default function Painter2D({
                   }
                 }
               }
-              renderMaskToCanvas();
+              renderMaskRef.current();
+              applyRemoteMaskRef.current();
+              setMaskRevision((v) => v + 1);
             }
           };
         } else {
-          renderMaskToCanvas();
+          renderMaskRef.current();
+          applyRemoteMaskRef.current();
+          setMaskRevision((v) => v + 1);
         }
       } catch {
-        if (!cancelled && loadRequestIdRef.current === currentRequestId) renderMaskToCanvas();
+        if (!cancelled && loadRequestIdRef.current === currentRequestId) renderMaskRef.current();
+        applyRemoteMaskRef.current();
+        setMaskRevision((v) => v + 1);
       }
     };
 
     return () => {
       cancelled = true;
+      if (!established && lastLoadedStemRef.current === sliceKey) {
+        lastLoadedStemRef.current = "";
+      }
     };
-  }, [selectedRelPath, selectedCaseId, selectedStem, selected, renderMaskToCanvas]);
+  }, [selectedRelPath, selectedCaseId, selectedStem]);
 
   // Clear overlay canvas
   const clearOverlay = useCallback(() => {
@@ -1393,7 +1593,10 @@ export default function Painter2D({
         <CollaborationViewerHeader
           caseId={selected?.caseId || "Volume Review"}
           masterConnected={collab.participants.some((p) => p.role === "MASTER" && p.connected)}
-          followingMaster={!permissions.SLICE_CONTROL}
+          followingMaster={Boolean(followUserId)}
+          followingName={collab.participants.find((p) => p.id === followUserId)?.name ?? null}
+          canFollowMaster={Boolean(masterId) && masterId !== collab.currentUserId}
+          onToggleFollowMaster={() => setFollowUserId((curr) => (curr ? null : masterId))}
           permissions={permissions}
         />
       )}
@@ -1910,12 +2113,6 @@ export default function Painter2D({
                 });
               }
             }
-            if (collabToken && collab.connected && viewportRef.current) {
-              const rect = viewportRef.current.getBoundingClientRect();
-              const x = (e.clientX - rect.left) / rect.width;
-              const y = (e.clientY - rect.top) / rect.height;
-              collab.updateCursor({ x, y, plane: "axial" });
-            }
           }}
           onMouseUp={() => {
             if (isPanning) setIsPanning(false);
@@ -2149,6 +2346,8 @@ export default function Painter2D({
           <div onClick={(e) => e.stopPropagation()} className="cursor-default">
             <CollaborationMasterPanel
               shareUrl={shareUrl}
+              followUserId={followUserId}
+              onFollowUser={setFollowUserId}
               participants={collab.participants}
               currentUserId={collab.currentUserId}
               onUpdatePermission={collab.updatePermission}
