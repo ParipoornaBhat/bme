@@ -14,6 +14,11 @@ import { useRouter } from "next/navigation";
 
 type Fold = { fold: number; prob: number; val_auc: number | null };
 
+/** Set when the uploaded image is already a slice in data/slices2d. */
+type Existing = {
+  case_id: string; stem: string; cls: string; path: string; annotated: boolean;
+} | null;
+
 type Detection =
   | { available: false; reason: string }
   | {
@@ -59,6 +64,7 @@ type Result = {
   ok: true;
   device: string;
   input: { filename: string; width: number; height: number; mode: string; preview: string };
+  existing: Existing;
   preprocessing: { steps: string[]; img_size: number; note: string };
   detection: Detection;
   segmentation: Segmentation;
@@ -541,6 +547,33 @@ export default function TestImage() {
               </div>
 
               <div className="flex flex-col justify-end">
+                {result.existing && (
+                  <div className="mb-3 rounded border border-amber-500/40 bg-amber-500/10 p-2.5 text-xs">
+                    <p className="font-medium text-amber-400">
+                      This slice is already in the dataset
+                      {" — "}
+                      <span className="font-mono">{result.existing.case_id}</span>
+                      {" ("}{result.existing.cls}{result.existing.annotated ? ", annotated" : ", not yet annotated"}{")"}
+                    </p>
+                    <p className="mt-1 text-muted-foreground">
+                      Adding it again would put the same scan in two folds, so it would appear in
+                      both training and validation and quietly inflate every score. Correct the
+                      annotation it already has instead.
+                    </p>
+                    <button
+                      type="button"
+                      onClick={() =>
+                        router.push(
+                          `/annotate?case=${encodeURIComponent(result.existing!.case_id)}&stem=${encodeURIComponent(result.existing!.stem)}`,
+                        )
+                      }
+                      className="mt-2 inline-flex items-center gap-1.5 rounded-md bg-primary px-3 py-1.5 text-xs font-medium text-primary-foreground hover:bg-primary/90">
+                      <Paintbrush className="h-3.5 w-3.5" />
+                      Correct its annotation
+                    </button>
+                  </div>
+                )}
+
                 {result.segmentation?.available && (
                   <label className="flex items-center gap-2 text-xs text-muted-foreground cursor-pointer select-none mb-2">
                     <input
@@ -555,7 +588,7 @@ export default function TestImage() {
 
                 <button
                   type="button"
-                  disabled={promoting}
+                  disabled={promoting || Boolean(result.existing)}
                   onClick={handleAddToDataset}
                   className="inline-flex items-center justify-center gap-1.5 rounded-md bg-primary px-3 py-2 text-xs font-medium text-primary-foreground hover:bg-primary/90 transition shadow-sm disabled:opacity-50"
                 >

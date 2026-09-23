@@ -21,6 +21,7 @@
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^5.20260706.1",
+    "@types/node": "^22.20.0",
     "@types/nodemailer": "^6.4.14",
     "@types/ws": "^8.18.1",
     "tsx": "^4.23.12",

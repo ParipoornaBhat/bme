@@ -191,6 +191,58 @@ def segment(base: Path, img: Image.Image, device: str) -> dict:
     }
 
 
+def _fingerprint(im) -> str:
+    """64-bit gradient hash — the same one build_2d.py deduplicates with."""
+    g = im.convert("L").resize((9, 8), Image.LANCZOS)
+    a = np.asarray(g, dtype=np.int16)
+    return "".join("1" if b else "0" for b in (a[:, 1:] > a[:, :-1]).flatten())
+
+
+def find_existing(base: Path, im) -> dict | None:
+    """Is this uploaded image already in the training set?
+
+    Testing on a slice the model trained on is a normal thing to do, but adding
+    it back as a new case would duplicate it: the same scan would land in two
+    folds, appear in both train and validation, and quietly inflate every
+    metric afterwards.
+
+    So the answer is looked up rather than assumed. Matching is by pixel
+    fingerprint, not filename, because the file arrives re-encoded from the
+    browser and its name means nothing. An exact hash match is required —
+    a near-match would risk overwriting the annotation of a different slice.
+    """
+    idx = base / "data" / "slices2d" / "index.csv"
+    if not idx.exists():
+        return None
+    try:
+        want = _fingerprint(im)
+    except Exception:
+        return None
+    import csv as _csv
+    with idx.open(encoding="utf-8") as fh:
+        for row in _csv.DictReader(fh):
+            p = base / "data" / "slices2d" / row["path"]
+            if not p.exists():
+                continue
+            try:
+                with Image.open(p) as other:
+                    other.load()
+                    if _fingerprint(other) != want:
+                        continue
+            except Exception:
+                continue
+            stem = Path(row["path"]).stem
+            mask = base / "data" / "annotations2d" / row["case_id"] / f"{stem}.mask.png"
+            return {
+                "case_id": row["case_id"],
+                "stem": stem,
+                "cls": row["class"],
+                "path": row["path"],
+                "annotated": mask.exists(),
+            }
+    return None
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("base")
@@ -213,10 +265,14 @@ def main():
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
     det = detect(base, img, device)
+    existing = find_existing(base, img)
 
     result = {
         "ok": True,
         "device": device,
+        # Set when this exact image is already in data/slices2d. The UI uses it
+        # to offer "correct the existing annotation" instead of "add as new".
+        "existing": existing,
         "input": {
             "filename": src.name,
             "width": img.width,

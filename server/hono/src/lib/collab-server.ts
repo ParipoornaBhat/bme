@@ -1,6 +1,6 @@
 import { WebSocketServer, WebSocket } from "ws";
 import type { IncomingMessage } from "node:http";
-import crypto from "node:crypto";
+import { randomBytes } from "node:crypto";
 
 export type ParticipantPermission = {
   VIEW: boolean;
@@ -103,7 +103,7 @@ function randomSecret(bytes = 24): string {
 }
 
 export function generateSessionToken(): string {
-  return "collab_sec_" + crypto.randomBytes(16).toString("hex");
+  return "collab_sec_" + randomBytes(16).toString("hex");
 }
 
 export function createSession(caseId: string, creatorId: string, creatorName: string): CollabSession {
@@ -243,7 +243,7 @@ export function initCollaborationWSServer(wss: WebSocketServer) {
   wss.on("connection", (ws: WebSocket, req: IncomingMessage) => {
     const url = new URL(req.url ?? "", `http://${req.headers.host ?? "localhost"}`);
     const token = url.searchParams.get("token");
-    const userId = url.searchParams.get("userId") || `user_${crypto.randomBytes(4).toString("hex")}`;
+    const userId = url.searchParams.get("userId") || `user_${randomBytes(4).toString("hex")}`;
     const userName = url.searchParams.get("userName") || `Dr. ${userId.slice(-4)}`;
 
     if (!token || !sessions.has(token)) {

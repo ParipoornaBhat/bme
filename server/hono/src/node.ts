@@ -26,6 +26,6 @@ const server = serve({ fetch: app.fetch, hostname: "0.0.0.0", port }, (info) => 
 });
 
 // Attach WebSocket server for Realtime MRI Collaboration
-const wss = new WebSocketServer({ server, path: "/ws/collaborate" });
+const wss = new WebSocketServer({ server: server as any, path: "/ws/collaborate" });
 initCollaborationWSServer(wss);
 console.log("Realtime Collaboration WebSocket endpoint mounted at /ws/collaborate");

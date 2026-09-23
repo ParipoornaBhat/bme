@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Eraser, Lasso, Link2, Link2Off, Loader2, Minus, Paintbrush, Plus, Redo2, RotateCcw, Save, Users } from "lucide-react";
+import { ChevronDown, ChevronUp, Eraser, Lasso, Link2, Link2Off, Loader2, Minus, Paintbrush, Plus, Redo2, RotateCcw, Save, SlidersHorizontal, Trash2, Users, XCircle } from "lucide-react";
 import { toast } from "sonner";
 import { useSession } from "~/lib/auth-client";
 import Render3D from "./Render3D";
@@ -163,9 +163,27 @@ export default function Viewer({ caseId, onSaved }: { caseId: string; onSaved?: 
   const [shareUrl, setShareUrl] = useState<string>("");
   const [showMasterPanel, setShowMasterPanel] = useState(false);
   const [startingCollab, setStartingCollab] = useState(false);
-  // Returned by the API to whoever created the session; it is what makes this
-  // socket the host.
   const [collabHostKey, setCollabHostKey] = useState<string | null>(null);
+  const [toolbarCollapsed, setToolbarCollapsed] = useState(false);
+  const [deletingMask, setDeletingMask] = useState(false);
+
+  // Hydrate active collaboration session from sessionStorage on reload / tab switch
+  useEffect(() => {
+    try {
+      const savedToken = sessionStorage.getItem("bme_active_3d_collab_token");
+      const savedHostKey = sessionStorage.getItem("bme_active_3d_collab_host_key");
+      if (savedToken && !collabToken) {
+        setCollabToken(savedToken);
+        setCollabHostKey(savedHostKey || null);
+        const baseOrigin =
+          process.env.NEXT_PUBLIC_APP_URL &&
+          !process.env.NEXT_PUBLIC_APP_URL.includes("localhost")
+            ? process.env.NEXT_PUBLIC_APP_URL.replace(/\/$/, "")
+            : window.location.origin;
+        setShareUrl(`${baseOrigin}/collaborate/${savedToken}`);
+      }
+    } catch { /* ignore */ }
+  }, []);
 
   const collab = useCollaboration({
     token: collabToken || "",
@@ -218,6 +236,10 @@ export default function Viewer({ caseId, onSaved }: { caseId: string; onSaved?: 
         setCollabToken(data.token);
         setShareUrl(shareUrl);
         setShowMasterPanel(true);
+        try {
+          sessionStorage.setItem("bme_active_3d_collab_token", data.token);
+          if (data.hostKey) sessionStorage.setItem("bme_active_3d_collab_host_key", data.hostKey);
+        } catch { /* ignore */ }
       }
     } catch (err) {
       console.error("Failed to start collaboration:", err);
@@ -646,6 +668,36 @@ export default function Viewer({ caseId, onSaved }: { caseId: string; onSaved?: 
     }
   };
 
+  const clearMask = useCallback(() => {
+    if (!labels) return;
+    pushUndo();
+    labels.fill(0);
+    setCounts([0, 0, 0]);
+    drawAll();
+    setDirty(true);
+    toast.info("Cleared 3D canvas mask");
+  }, [labels, pushUndo, drawAll]);
+
+  const deleteMask = async () => {
+    if (!confirm(`Delete saved 3D mask for ${caseId}?`)) return;
+    setDeletingMask(true);
+    try {
+      const res = await fetch(`/api/cases/${encodeURIComponent(caseId)}/mask`, {
+        method: "DELETE",
+      });
+      if (res.ok) {
+        clearMask();
+        toast.success(`Deleted saved 3D mask for ${caseId}`);
+      } else {
+        toast.error("Failed to delete mask from server");
+      }
+    } catch {
+      toast.error("Error deleting mask");
+    } finally {
+      setDeletingMask(false);
+    }
+  };
+
   if (busy) {
     return (
       <div className="flex h-96 items-center justify-center gap-2 text-sm text-muted-foreground">
@@ -902,20 +954,25 @@ export default function Viewer({ caseId, onSaved }: { caseId: string; onSaved?: 
       </div>
 
       {showMasterPanel && collabToken && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4 backdrop-blur-sm">
-          <CollaborationMasterPanel
-            shareUrl={shareUrl}
-            participants={collab.participants}
-            currentUserId={collab.currentUserId}
-            onUpdatePermission={collab.updatePermission}
-            onRemoveUser={collab.removeUser}
-            onEndSession={() => {
-              collab.endSession();
-              setCollabToken(null);
-              setShowMasterPanel(false);
-            }}
-            onClose={() => setShowMasterPanel(false)}
-          />
+        <div
+          onClick={() => setShowMasterPanel(false)}
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 p-4 backdrop-blur-sm cursor-pointer animate-in fade-in duration-150"
+        >
+          <div onClick={(e) => e.stopPropagation()} className="cursor-default">
+            <CollaborationMasterPanel
+              shareUrl={shareUrl}
+              participants={collab.participants}
+              currentUserId={collab.currentUserId}
+              onUpdatePermission={collab.updatePermission}
+              onRemoveUser={collab.removeUser}
+              onEndSession={() => {
+                collab.endSession();
+                setCollabToken(null);
+                setShowMasterPanel(false);
+              }}
+              onClose={() => setShowMasterPanel(false)}
+            />
+          </div>
         </div>
       )}
     </div>
