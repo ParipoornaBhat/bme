@@ -169,6 +169,7 @@ async function seed() {
     console.log(`    password: ${TEAM_PASSWORD}`);
     for (const m of TEAM) console.log(`    ${m.email}`);
     console.log("");
+    process.exit(0);
   } catch (error) {
     console.error("❌ Seeding failed:", error);
     process.exit(1);

@@ -2,13 +2,13 @@ import { createAuthClient } from "better-auth/react";
 
 const getBaseURL = () => {
   if (typeof window !== "undefined") {
-    return `${window.location.origin}/api/auth`;
+    return window.location.origin;
   }
-  const serverUrl =
-    process.env.EXPO_PUBLIC_SERVER_URL ||
-    process.env.NEXT_PUBLIC_SERVER_URL ||
-    "http://localhost:4000";
-  return `${serverUrl}/api/auth`;
+  return (
+    process.env.NEXT_PUBLIC_APP_URL ||
+    process.env.CLIENT_URL ||
+    "http://localhost:3000"
+  );
 };
 
 export const authClient = createAuthClient({
@@ -23,3 +23,4 @@ export const authClient = createAuthClient({
 export const { signIn, signOut, signUp, useSession } = authClient;
 export type Session = typeof authClient.$Infer.Session;
 export type User = typeof authClient.$Infer.Session.user;
+
