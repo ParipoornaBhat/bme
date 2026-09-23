@@ -1641,6 +1641,26 @@ export default function Painter2D({
     return true;
   });
 
+  // Ending the session or revoking this participant closes their socket, but the
+  // study was still rendered - with working tools - until a reload. Take it off
+  // the screen the moment either happens. Both are final, so unlike the paused
+  // state below there is nothing to wait for.
+  if (isCollaborator && (collab.sessionEnded || collab.removed)) {
+    return (
+      <div className="flex h-full w-full flex-col items-center justify-center gap-3 p-6 text-center">
+        <XCircle className="h-10 w-10 text-red-500" />
+        <h1 className="text-lg font-semibold">
+          {collab.removed ? "You were removed from this review" : "Review session ended"}
+        </h1>
+        <p className="max-w-md text-sm text-muted-foreground">
+          {collab.removed
+            ? "The host revoked your access. This link no longer works for you."
+            : "The host ended this session. This link no longer works."}
+        </p>
+      </div>
+    );
+  }
+
   // A shared link is only live while the host is in the room. Render nothing of
   // the study when they are not: the scan should not sit unattended on someone
   // else's screen. The session reconnects on its own when the host returns.
