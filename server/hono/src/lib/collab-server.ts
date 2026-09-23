@@ -81,7 +81,13 @@ export type CollabSession = {
   hostKey: string;
   viewpoint: ViewpointState;
   participants: Map<string, Participant>;
+  // The authoritative mask for each slice opened during this review, keyed
+  // `${caseId}::${stem}`. Every edit is applied here and numbered before it
+  // is sent out, so all participants apply the same edits in the same order.
+  masks: Map<string, SliceMask>;
 };
+
+type SliceMask = { width: number; height: number; labels: Uint8Array; seq: number };
 
 // In-memory store for active sessions
 const sessions = new Map<string, CollabSession>();
@@ -100,6 +106,42 @@ const participantKeys = new Map<string, string>();
 // typecheck against this package's @types/node (see generateSessionToken).
 function randomSecret(bytes = 24): string {
   return randomBytes(bytes).toString("hex");
+}
+
+/*
+ * Masks travel as runs: a flat array of [start, length, label, ...], where
+ * start indexes the row-major pixel array. A label mask is mostly long stretches
+ * of one value, so this is small, and it carries exact label values - no colour
+ * encoding to drift.
+ */
+const MAX_RUN_NUMBERS = 3_000_000;
+const SLICE_ID = /^[A-Za-z0-9_-]{1,120}$/;
+
+function isValidRuns(runs: unknown, pixels: number): runs is number[] {
+  if (!Array.isArray(runs) || runs.length % 3 !== 0 || runs.length > MAX_RUN_NUMBERS) return false;
+  for (let i = 0; i < runs.length; i += 3) {
+    const start = runs[i], len = runs[i + 1], label = runs[i + 2];
+    if (!Number.isInteger(start) || !Number.isInteger(len) || !Number.isInteger(label)) return false;
+    if (start < 0 || len < 1 || start + len > pixels || label < 0 || label > 3) return false;
+  }
+  return true;
+}
+
+function applyRuns(labels: Uint8Array, runs: number[]) {
+  for (let i = 0; i < runs.length; i += 3) labels.fill(runs[i + 2], runs[i], runs[i] + runs[i + 1]);
+}
+
+function nonZeroRuns(labels: Uint8Array): number[] {
+  const runs: number[] = [];
+  let i = 0;
+  while (i < labels.length) {
+    const v = labels[i];
+    let j = i + 1;
+    while (j < labels.length && labels[j] === v) j++;
+    if (v !== 0) runs.push(i, j - i, v);
+    i = j;
+  }
+  return runs;
 }
 
 export function generateSessionToken(): string {
@@ -131,6 +173,7 @@ export function createSession(caseId: string, creatorId: string, creatorName: st
       },
     },
     participants: new Map(),
+    masks: new Map(),
   };
 
   // Add Master participant
@@ -372,15 +415,35 @@ export function initCollaborationWSServer(wss: WebSocketServer) {
             updatedBy: userId,
             viewpoint,
           }, ws);
-        } else if (type === "REQUEST_MASK") {
-          // Relayed so whoever holds this slice can resend it. Answering is the
-          // sender's choice, and the reply goes through MASK_UPDATE as usual.
+        } else if (type === "MASK_JOIN") {
+          // A client has opened a slice and wants the live state. The first
+          // participant allowed to annotate seeds it with what they have on
+          // screen, so their unsaved work is not lost; everyone after that gets
+          // the server's copy.
+          const { caseId, stem, width, height, base } = data;
+          if (!SLICE_ID.test(String(caseId)) || !SLICE_ID.test(String(stem))) return;
+          if (!Number.isInteger(width) || !Number.isInteger(height) || width < 1 || height < 1 || width * height > 16_000_000) return;
+
+          const key = `${caseId}::${stem}`;
+          let slice = session.masks.get(key);
+          if (!slice) {
+            const canAnnotate = isMaster || participant?.permissions.ANNOTATE;
+            if (!canAnnotate || !isValidRuns(base, width * height)) return;
+            slice = { width, height, labels: new Uint8Array(width * height), seq: 0 };
+            applyRuns(slice.labels, base);
+            session.masks.set(key, slice);
+          }
+
+          // Sent to everyone: a viewer already on this slice, who could not
+          // seed it, is waiting for exactly this.
           broadcastToSession(token, {
-            type: "MASK_REQUESTED",
-            requestedBy: userId,
-            stem: data.stem,
-            caseId: data.caseId,
-          }, ws);
+            type: "MASK_SNAPSHOT",
+            caseId, stem,
+            width: slice.width,
+            height: slice.height,
+            seq: slice.seq,
+            runs: nonZeroRuns(slice.labels),
+          });
         } else if (type === "CURSOR_UPDATE") {
           if (data.cursor && participant) {
             participant.cursor = data.cursor;
@@ -392,23 +455,26 @@ export function initCollaborationWSServer(wss: WebSocketServer) {
               cursor: data.cursor,
             }, ws);
           }
-        } else if (type === "MASK_UPDATE") {
+        } else if (type === "MASK_OP") {
           const canAnnotate = isMaster || participant?.permissions.ANNOTATE;
           if (!canAnnotate) {
             ws.send(JSON.stringify({ type: "ERROR", error: "Permission denied: drawing locked by Master" }));
             return;
           }
+          const { caseId, stem, opId, runs } = data;
+          const slice = session.masks.get(`${caseId}::${stem}`);
+          if (!slice || !isValidRuns(runs, slice.width * slice.height) || typeof opId !== "string") return;
 
+          // Applied and numbered here, then sent to everyone including the
+          // author, so every screen applies edits in this one order.
+          applyRuns(slice.labels, runs);
+          slice.seq += 1;
           broadcastToSession(token, {
-            type: "MASK_UPDATED",
+            type: "MASK_OP_APPLIED",
+            caseId, stem, opId, runs,
+            seq: slice.seq,
             userId,
-            stem: data.stem,
-            caseId: data.caseId,
-            maskDataUrl: data.maskDataUrl,
-            maskPixels: data.maskPixels,
-            width: data.width,
-            height: data.height,
-          }, ws);
+          });
         } else if (type === "PERMISSION_UPDATE") {
           if (!isMaster) {
             ws.send(JSON.stringify({ type: "ERROR", error: "Only Master can update permissions" }));

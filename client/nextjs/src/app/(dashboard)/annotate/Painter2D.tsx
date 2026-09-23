@@ -38,7 +38,16 @@ import { useSession } from "~/lib/auth-client";
 import CollaborationViewerHeader from "~/components/collaborate/CollaborationViewerHeader";
 import CollaborationMasterPanel from "~/components/collaborate/CollaborationMasterPanel";
 import LiveCursorsOverlay from "~/components/collaborate/LiveCursorsOverlay";
-import { useCollaboration, type Participant, type ParticipantPermission, type ViewpointState } from "~/lib/useCollaboration";
+import {
+  useCollaboration,
+  type MaskOpApplied,
+  type MaskRuns,
+  type MaskSnapshot,
+  type Participant,
+  type ParticipantPermission,
+  type ViewpointState,
+} from "~/lib/useCollaboration";
+import { MaskSync, type MaskSyncIO } from "~/lib/mask-sync";
 
 export type Case2DSlice = {
   caseId: string;
@@ -197,19 +206,15 @@ export default function Painter2D({
         applyViewpointRef.current(vp);
       }
     },
-    onMaskRequested: (data) => {
-      const loaded = loadedSliceRef.current;
-      if (!loaded || data.stem !== loaded.stem || data.caseId !== loaded.caseId) return;
-      broadcastCurrentMaskRef.current();
+    onMaskSnapshot: (data) => {
+      const screen = maskDataRef.current;
+      if (!screen || sliceLoadingRef.current) return;
+      maskSync.onSnapshot(data, screen, canEditRef.current, [undoStackRef.current, redoStackRef.current]);
     },
-    onMaskUpdated: (data) => {
-      if (!data.maskDataUrl) return;
-      // Hold the newest broadcast. The sender only emits while it renders, so
-      // an update that arrives before this slice has finished loading is the
-      // only one we will ever see for it; applying it later is the difference
-      // between the mask appearing and the viewer staying blank.
-      pendingRemoteMaskRef.current = data;
-      applyRemoteMaskRef.current();
+    onMaskOp: (data) => {
+      const screen = maskDataRef.current;
+      if (!screen || sliceLoadingRef.current) return;
+      maskSync.onOp(data, screen, canEditRef.current, currentUserIdRef.current, [undoStackRef.current, redoStackRef.current]);
     },
   });
 
@@ -392,18 +397,22 @@ export default function Painter2D({
   const overlayCanvasRef = useRef<HTMLCanvasElement>(null);
   const viewportRef = useRef<HTMLDivElement>(null);
   const maskDataRef = useRef<Uint8Array | null>(null);
-  const applyingRemoteMaskRef = useRef(false);
-  const pendingRemoteMaskRef = useRef<{
-    stem?: string;
-    caseId?: string;
-    maskDataUrl?: string;
-    width?: number;
-    height?: number;
-  } | null>(null);
-  const applyRemoteMaskRef = useRef<() => void>(() => {});
   const sliceLoadingRef = useRef(false);
-  const lastPublishedMaskRef = useRef(0);
-  const broadcastCurrentMaskRef = useRef<() => void>(() => {});
+  // Keeps this client's mask in step with a live review; see src/lib/mask-sync.ts.
+  // Its callbacks go through syncIORef so they always see the current render.
+  const syncIORef = useRef<MaskSyncIO>({ sendOp: () => {}, render: () => {}, newOpId: () => "" });
+  const maskSyncRef = useRef<MaskSync | null>(null);
+  if (!maskSyncRef.current) {
+    maskSyncRef.current = new MaskSync({
+      sendOp: (opId, runs) => syncIORef.current.sendOp(opId, runs),
+      render: () => syncIORef.current.render(),
+      newOpId: () => syncIORef.current.newOpId(),
+    });
+  }
+  const maskSync = maskSyncRef.current;
+  const canEditRef = useRef(false);
+  const currentUserIdRef = useRef("");
+  const flushTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const imgDimRef = useRef<{ w: number; h: number }>({ w: 0, h: 0 });
   const undoStackRef = useRef<Uint8Array[]>([]);
   const redoStackRef = useRef<Uint8Array[]>([]);
@@ -537,36 +546,19 @@ export default function Painter2D({
     setCounts(newCounts);
     countsRef.current = newCounts;
 
-    // Broadcast live mask to active collaboration session.
-    //
-    // Labelled from loadedSliceRef, never from `selected`: selected changes the
-    // moment a new slice is picked, while the canvas still holds the previous
-    // slice's mask, so labelling from it publishes the old annotation under the
-    // new slice's name. Suppressed entirely while a slice is loading, which is
-    // when that mismatch exists and when the mask is a half-built intermediate.
-    const publishAs = loadedSliceRef.current;
-    if (
-      collabToken &&
-      collab.connected &&
-      publishAs &&
-      !sliceLoadingRef.current &&
-      !applyingRemoteMaskRef.current
-    ) {
-      try {
-        const dataUrl = canvas.toDataURL("image/png");
-        lastPublishedMaskRef.current = Date.now();
-        collab.updateMask({
-          stem: publishAs.stem,
-          caseId: publishAs.caseId,
-          maskDataUrl: dataUrl,
-          width: w,
-          height: h,
-        });
-      } catch { /* ignore */ }
+    // In a live session, send what changed since the last flush. Batched, so a
+    // brush stroke goes out as a few edits rather than one per mouse event.
+    if (maskSyncRef.current?.ready && flushTimerRef.current === null) {
+      flushTimerRef.current = setTimeout(() => {
+        flushTimerRef.current = null;
+        const screen = maskDataRef.current;
+        if (screen && !sliceLoadingRef.current) maskSyncRef.current?.flush(screen, canEditRef.current);
+      }, 60);
     }
-  }, [collabToken, collab.connected, selected, collab.updateMask]);
+  }, []);
 
-  // Re-broadcast viewpoint and mask whenever participants join or reconnect
+  // Re-broadcast the viewpoint whenever participants join or reconnect. Masks
+  // need no help here: a joiner gets the live mask from the server.
   useEffect(() => {
     if (collabToken && collab.connected && collab.role === "MASTER" && selected) {
       collab.updateViewpoint(
@@ -581,7 +573,6 @@ export default function Painter2D({
         },
         true,
       );
-      renderMaskToCanvas();
     }
   }, [collab.participants.length]);
 
@@ -644,29 +635,6 @@ export default function Painter2D({
   const renderMaskRef = useRef(renderMaskToCanvas);
   renderMaskRef.current = renderMaskToCanvas;
 
-  // Sending the mask only as a side effect of rendering loses it whenever every
-  // render for a slice happens before the socket is open - which is what a
-  // cached mask does, because the load finishes in a few milliseconds. Push the
-  // current mask explicitly once the slice is loaded and the session is live.
-  const broadcastCurrentMask = useCallback(() => {
-    if (!collabToken || !collab.connected || sliceLoadingRef.current) return;
-    // Rendering the freshly loaded mask has usually just published it; sending
-    // the identical bytes again only doubles what every viewer downloads.
-    if (Date.now() - lastPublishedMaskRef.current < 250) return;
-    const loaded = loadedSliceRef.current;
-    const canvas = maskCanvasRef.current;
-    const { w, h } = imgDimRef.current;
-    if (!loaded || !canvas || w === 0 || h === 0) return;
-    try {
-      collab.updateMask({
-        stem: loaded.stem,
-        caseId: loaded.caseId,
-        maskDataUrl: canvas.toDataURL("image/png"),
-        width: w,
-        height: h,
-      });
-    } catch { /* ignore */ }
-  }, [collabToken, collab.connected, collab.updateMask]);
 
   applyViewpointRef.current = (vp) => {
     const nextZoom = vp.zoom ?? zoomRef.current;
@@ -712,18 +680,36 @@ export default function Painter2D({
     if (vp) applyViewpointRef.current(vp);
   }, [followUserId]);
 
-  broadcastCurrentMaskRef.current = broadcastCurrentMask;
+  // ── Live mask sync ── (the algorithm is in src/lib/mask-sync.ts)
+  // Viewers without annotate permission never send: the server would refuse,
+  // and their edits would sit unconfirmed forever.
+  canEditRef.current = !isCollaborator || permissions.ANNOTATE;
+  currentUserIdRef.current = collab.currentUserId;
+  syncIORef.current = {
+    sendOp: (opId, runs) => {
+      const loaded = loadedSliceRef.current;
+      if (loaded) collab.sendMaskOp({ caseId: loaded.caseId, stem: loaded.stem, opId, runs });
+    },
+    render: () => renderMaskRef.current(),
+    newOpId: () =>
+      `${collab.currentUserId || "me"}:${Date.now().toString(36)}:${Math.random().toString(36).slice(2, 8)}`,
+  };
 
+  // Open the loaded slice in the live session - on load, on connecting, and
+  // again after a reconnect.
   useEffect(() => {
-    if (!collabToken || !collab.connected) return;
-    broadcastCurrentMask();
-
-    // Publishing alone is not enough: whoever already has this slice open may
-    // not draw again while we are watching, so ask them for what is on their
-    // screen right now.
+    if (!collabToken) {
+      maskSync.leave();
+      return;
+    }
     const loaded = loadedSliceRef.current;
-    if (loaded) collab.requestMask(loaded.stem, loaded.caseId);
-  }, [collabToken, collab.connected, maskRevision, broadcastCurrentMask, collab.requestMask]);
+    const screen = maskDataRef.current;
+    const { w, h } = imgDimRef.current;
+    if (!collab.connected || !loaded || !screen || w === 0 || h === 0 || sliceLoadingRef.current) return;
+    const base = maskSync.join(`${loaded.caseId}::${loaded.stem}`, screen, canEditRef.current);
+    collab.sendMaskJoin({ caseId: loaded.caseId, stem: loaded.stem, width: w, height: h, base });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [collabToken, collab.connected, maskRevision]);
 
   // Default to following the host, so a radiologist opening the link lands on
   // the same slice without having to do anything. Settled once, then it is the
@@ -743,66 +729,6 @@ export default function Painter2D({
     if (!stillHere) setFollowUserId(null);
   }, [collab.participants, followUserId]);
 
-  // Decode and apply the buffered remote mask, if it belongs to the slice whose
-  // buffers are currently loaded and matches its dimensions. Left pending
-  // otherwise, so the slice loader can drain it once the canvas is ready.
-  applyRemoteMaskRef.current = () => {
-    const data = pendingRemoteMaskRef.current;
-    if (!data?.maskDataUrl) return;
-    const loaded = loadedSliceRef.current;
-    if (!loaded || data.stem !== loaded.stem || data.caseId !== loaded.caseId) return;
-
-    const maskImg = new Image();
-    maskImg.src = data.maskDataUrl;
-    maskImg.onload = () => {
-      const mw = maskImg.naturalWidth || data.width || 512;
-      const mh = maskImg.naturalHeight || data.height || 512;
-      const maskArr = maskDataRef.current;
-      const { w, h } = imgDimRef.current;
-      // The loop below indexes the incoming pixels with the local stride, so
-      // mismatched dimensions would scramble the mask.
-      if (!maskArr || w === 0 || h === 0 || mw !== w || mh !== h) return;
-
-      const off = document.createElement("canvas");
-      off.width = mw;
-      off.height = mh;
-      const offCtx = off.getContext("2d");
-      if (!offCtx) return;
-      offCtx.drawImage(maskImg, 0, 0);
-      const pxData = offCtx.getImageData(0, 0, mw, mh).data;
-
-      // A canvas premultiplies alpha, so a label colour does not survive the
-      // toDataURL/drawImage round trip intact: bone leaves as 16,185,129 and
-      // comes back as 15,185,128. Matching on exact equality therefore never
-      // fires, and the incoming mask can only ever clear pixels. Classify by
-      // nearest label colour instead.
-      const near = (r: number, g: number, b: number, cr: number, cg: number, cb: number) =>
-        Math.abs(r - cr) <= 8 && Math.abs(g - cg) <= 8 && Math.abs(b - cb) <= 8;
-      for (let i = 0; i < maskArr.length; i++) {
-        const p = i * 4;
-        const r = pxData[p];
-        const g = pxData[p + 1];
-        const b = pxData[p + 2];
-        if (pxData[p + 3] === 0) maskArr[i] = 0;
-        else if (r === 1 || r === 2 || r === 3) maskArr[i] = r;
-        else if (near(r, g, b, 16, 185, 129)) maskArr[i] = 1;
-        else if (near(r, g, b, 239, 68, 68)) maskArr[i] = 2;
-        else if (near(r, g, b, 245, 158, 11)) maskArr[i] = 3;
-        else maskArr[i] = 0;
-      }
-
-      pendingRemoteMaskRef.current = null;
-      // Rendering normally broadcasts the canvas. Doing that for a mask that
-      // just arrived would echo it back to the sender, who would render and
-      // echo it again.
-      applyingRemoteMaskRef.current = true;
-      try {
-        renderMaskRef.current();
-      } finally {
-        applyingRemoteMaskRef.current = false;
-      }
-    };
-  };
   const selectedRef = useRef(selected);
   selectedRef.current = selected;
 
@@ -865,13 +791,9 @@ export default function Painter2D({
       loadedSliceRef.current = sliceSnapshot;
       established = true;
 
-      // A mask broadcast that arrived while this slice was still loading was
-      // held back; drop it if it was for a different slice, otherwise apply it
-      // now that there is a canvas to paint onto.
-      const pending = pendingRemoteMaskRef.current;
-      if (pending && (pending.stem !== selectedStem || pending.caseId !== selectedCaseId)) {
-        pendingRemoteMaskRef.current = null;
-      }
+      // New buffers: whatever was in step with the live session belonged to the
+      // previous slice. Rejoining happens once this load settles.
+      maskSyncRef.current?.leave();
       undoStackRef.current = [];
       redoStackRef.current = [];
       isDirtyRef.current = false;
@@ -911,18 +833,15 @@ export default function Painter2D({
           }
           sliceLoadingRef.current = false;
           renderMaskRef.current();
-          applyRemoteMaskRef.current();
           setMaskRevision((v) => v + 1);
         } else {
           sliceLoadingRef.current = false;
           renderMaskRef.current();
-          applyRemoteMaskRef.current();
           setMaskRevision((v) => v + 1);
         }
       } catch {
         sliceLoadingRef.current = false;
         if (!cancelled && loadRequestIdRef.current === currentRequestId) renderMaskRef.current();
-        applyRemoteMaskRef.current();
         setMaskRevision((v) => v + 1);
       }
     };

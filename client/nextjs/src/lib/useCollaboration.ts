@@ -43,6 +43,11 @@ export type Participant = {
   cursor?: { x: number; y: number; plane?: string };
 };
 
+// [start, length, label, start, length, label, ...] over the row-major pixels.
+export type MaskRuns = number[];
+export type MaskSnapshot = { caseId: string; stem: string; width: number; height: number; seq: number; runs: MaskRuns };
+export type MaskOpApplied = { caseId: string; stem: string; opId: string; runs: MaskRuns; seq: number; userId: string };
+
 export type UseCollaborationOptions = {
   token: string;
   userId?: string;
@@ -51,8 +56,12 @@ export type UseCollaborationOptions = {
   // this socket the host; a viewer never has one.
   hostKey?: string;
   onViewpointUpdated?: (viewpoint: ViewpointState, updatedBy?: string) => void;
-  onMaskUpdated?: (data: { stem?: string; caseId?: string; maskDataUrl?: string; maskPixels?: number[]; width?: number; height?: number }) => void;
-  onMaskRequested?: (data: { stem?: string; caseId?: string; requestedBy?: string }) => void;
+  // The live mask for a slice, from the server: the whole thing, when a slice
+  // is opened or reopened.
+  onMaskSnapshot?: (data: MaskSnapshot) => void;
+  // One numbered edit. Arrives for every edit by anyone, including this
+  // client's own, in the single order the server applied them.
+  onMaskOp?: (data: MaskOpApplied) => void;
   onSessionEnded?: () => void;
   onUserRemoved?: () => void;
 };
@@ -63,8 +72,8 @@ export function useCollaboration({
   userName,
   hostKey,
   onViewpointUpdated,
-  onMaskUpdated,
-  onMaskRequested,
+  onMaskSnapshot,
+  onMaskOp,
   onSessionEnded,
   onUserRemoved,
 }: UseCollaborationOptions) {
@@ -101,29 +110,26 @@ export function useCollaboration({
   const currentUserIdRef = useRef<string>("");
   const lastCursorEmitRef = useRef<number>(0);
   const lastViewpointEmitRef = useRef<number>(0);
-  const lastMaskEmitRef = useRef<number>(0);
-  const pendingMaskEmitRef = useRef<{ stem: string; caseId: string; maskDataUrl?: string; maskPixels?: number[]; width?: number; height?: number } | null>(null);
-  const maskEmitTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const fatalRef = useRef(false);
 
   // Stabilize callbacks in refs so they never trigger WebSocket reconnects
   const callbacksRef = useRef({
     onViewpointUpdated,
-    onMaskUpdated,
-    onMaskRequested,
+    onMaskSnapshot,
+    onMaskOp,
     onSessionEnded,
     onUserRemoved,
   });
   useEffect(() => {
     callbacksRef.current = {
       onViewpointUpdated,
-      onMaskUpdated,
-      onMaskRequested,
+      onMaskSnapshot,
+      onMaskOp,
       onSessionEnded,
       onUserRemoved,
     };
-  }, [onViewpointUpdated, onMaskUpdated, onMaskRequested, onSessionEnded, onUserRemoved]);
+  }, [onViewpointUpdated, onMaskSnapshot, onMaskOp, onSessionEnded, onUserRemoved]);
 
   const getWsUrl = useCallback(() => {
     let host = "localhost:4000";
@@ -222,13 +228,13 @@ export function useCollaboration({
           if (data.participants) {
             setParticipants(data.participants);
           }
-        } else if (data.type === "MASK_REQUESTED") {
-          if (callbacksRef.current.onMaskRequested) {
-            callbacksRef.current.onMaskRequested(data);
+        } else if (data.type === "MASK_SNAPSHOT") {
+          if (callbacksRef.current.onMaskSnapshot) {
+            callbacksRef.current.onMaskSnapshot(data);
           }
-        } else if (data.type === "MASK_UPDATED") {
-          if (callbacksRef.current.onMaskUpdated) {
-            callbacksRef.current.onMaskUpdated(data);
+        } else if (data.type === "MASK_OP_APPLIED") {
+          if (callbacksRef.current.onMaskOp) {
+            callbacksRef.current.onMaskOp(data);
           }
         } else if (data.type === "USER_REMOVED") {
           setRemoved(true);
@@ -300,36 +306,6 @@ export function useCollaboration({
   }, []);
 
   // Live Mask Update emitter
-  const updateMask = useCallback((maskPayload: { stem: string; caseId: string; maskDataUrl?: string; maskPixels?: number[]; width?: number; height?: number }) => {
-    if (!socketRef.current || socketRef.current.readyState !== WebSocket.OPEN) return;
-
-    const send = (payload: typeof maskPayload) => {
-      if (!socketRef.current || socketRef.current.readyState !== WebSocket.OPEN) return;
-      lastMaskEmitRef.current = Date.now();
-      socketRef.current.send(JSON.stringify({ type: "MASK_UPDATE", ...payload }));
-    };
-
-    const elapsed = Date.now() - lastMaskEmitRef.current;
-    if (elapsed >= 80) {
-      send(maskPayload);
-      return;
-    }
-
-    // Dropping an update inside the throttle window loses it for good, and the
-    // one that gets dropped is usually the last of a burst - the finished mask
-    // right after the empty one. Keep the newest and send it when the window
-    // closes instead.
-    pendingMaskEmitRef.current = maskPayload;
-    if (maskEmitTimerRef.current === null) {
-      maskEmitTimerRef.current = setTimeout(() => {
-        maskEmitTimerRef.current = null;
-        const queued = pendingMaskEmitRef.current;
-        pendingMaskEmitRef.current = null;
-        if (queued) send(queued);
-      }, 80 - elapsed);
-    }
-  }, []);
-
   // Throttled Cursor Update emitter (max 1 update per 50ms)
   const updateCursor = useCallback((cursor: { x: number; y: number; plane?: string }) => {
     if (!socketRef.current || socketRef.current.readyState !== WebSocket.OPEN) return;
@@ -345,13 +321,20 @@ export function useCollaboration({
     );
   }, []);
 
-  // Master Action: Grant/Revoke Permission
-  // Ask whoever else is in the session to resend their mask for this slice.
-  // Broadcasts are emitted by the drawer, so a viewer that arrives afterwards
-  // has no other way to obtain what is already on screen elsewhere.
-  const requestMask = useCallback((stem: string, caseId: string) => {
-    if (!socketRef.current || socketRef.current.readyState !== WebSocket.OPEN) return;
-    socketRef.current.send(JSON.stringify({ type: "REQUEST_MASK", stem, caseId }));
+  // Open a slice in the live session. `base` is what this client has on
+  // screen; the server keeps it only if nobody has opened the slice yet.
+  const sendMaskJoin = useCallback((join: { caseId: string; stem: string; width: number; height: number; base: MaskRuns }) => {
+    if (!socketRef.current || socketRef.current.readyState !== WebSocket.OPEN) return false;
+    socketRef.current.send(JSON.stringify({ type: "MASK_JOIN", ...join }));
+    return true;
+  }, []);
+
+  // Send one edit: only the pixels that changed. Not throttled here - the
+  // caller batches - and never dropped, because a lost edit is a lost stroke.
+  const sendMaskOp = useCallback((op: { caseId: string; stem: string; opId: string; runs: MaskRuns }) => {
+    if (!socketRef.current || socketRef.current.readyState !== WebSocket.OPEN) return false;
+    socketRef.current.send(JSON.stringify({ type: "MASK_OP", ...op }));
+    return true;
   }, []);
 
   const updatePermission = useCallback((targetUserId: string, newPermissions: Partial<ParticipantPermission>) => {
@@ -400,8 +383,8 @@ export function useCollaboration({
     participantKey,
     updateViewpoint,
     updateCursor,
-    updateMask,
-    requestMask,
+    sendMaskJoin,
+    sendMaskOp,
     updatePermission,
     removeUser,
     endSession,
