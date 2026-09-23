@@ -10,6 +10,7 @@ import {
   ChevronRight,
   ChevronUp,
   Eraser,
+  Flashlight,
   Flag,
   Hand,
   Info,
@@ -86,7 +87,21 @@ export default function Painter2D({
   const [selected, setSelected] = useState<Case2DSlice | null>(null);
   const [filter, setFilter] = useState<"all" | "bme" | "non_bme" | "annotated" | "unannotated" | "flagged">("all");
   const [query, setQuery] = useState("");
-  const [tool, setTool] = useState<"brush" | "pencil" | "pan">(isCollaborator ? "pan" : "brush");
+  const [tool, setTool] = useState<"brush" | "pencil" | "pan" | "torch">(isCollaborator ? "pan" : "brush");
+  // Torch: hides the annotation inside a circle around the cursor so the scan
+  // underneath can be seen. Purely visual - it never touches the mask data, so
+  // nothing is erased and collaborators are unaffected. Selected as a tool, or
+  // held with T to peek while using another tool.
+  const [torchSize, setTorchSize] = useState(48);
+  const [torchHeld, setTorchHeld] = useState(false);
+  const torchActive = tool === "torch" || torchHeld;
+  const torchActiveRef = useRef(torchActive);
+  torchActiveRef.current = torchActive;
+  const torchSizeRef = useRef(torchSize);
+  torchSizeRef.current = torchSize;
+  const toolRef = useRef(tool);
+  toolRef.current = tool;
+  const torchRingRef = useRef<HTMLDivElement>(null);
   const [maskInside, setMaskInside] = useState(false);
   const [activeLabel, setActiveLabel] = useState<number>(1);
   const [brushSize, setBrushSize] = useState(12);
@@ -1106,6 +1121,58 @@ export default function Painter2D({
     [tool, drawOutlineOverlay, renderMaskToCanvas],
   );
 
+  // ── Torch ──
+  // Drawn with a CSS mask on the annotation canvas, so moving it costs nothing
+  // and the mask data is never read or written. Coordinates are in the
+  // canvas's own layout box: the zoom/pan transform on its container then
+  // scales the hole along with the image.
+  const lastTorchPointRef = useRef<{ x: number; y: number } | null>(null);
+
+  const clearTorch = () => {
+    lastTorchPointRef.current = null;
+    const canvas = maskCanvasRef.current;
+    if (canvas) {
+      canvas.style.maskImage = "";
+      canvas.style.webkitMaskImage = "";
+    }
+    if (torchRingRef.current) torchRingRef.current.style.display = "none";
+  };
+
+  const updateTorch = (clientX: number, clientY: number) => {
+    const canvas = maskCanvasRef.current;
+    if (!canvas || canvas.width === 0) return;
+    lastTorchPointRef.current = { x: clientX, y: clientY };
+    const rect = canvas.getBoundingClientRect();
+    if (rect.width === 0 || rect.height === 0) return;
+    const x = (clientX - rect.left) * (canvas.offsetWidth / rect.width);
+    const y = (clientY - rect.top) * (canvas.offsetHeight / rect.height);
+    // Size is a diameter in image pixels, like the brush.
+    const r = (torchSizeRef.current / 2) * (canvas.offsetWidth / canvas.width);
+    const hole = `radial-gradient(circle ${r}px at ${x}px ${y}px, transparent ${Math.max(0, r - 1.5)}px, black ${r}px)`;
+    canvas.style.maskImage = hole;
+    canvas.style.webkitMaskImage = hole;
+    const ring = torchRingRef.current;
+    if (ring) {
+      ring.style.display = "block";
+      ring.style.left = `${x}px`;
+      ring.style.top = `${y}px`;
+      ring.style.width = `${2 * r}px`;
+      ring.style.height = `${2 * r}px`;
+    }
+  };
+
+  // Put the annotation back the moment the torch is put down, and resize the
+  // hole in place when the size changes.
+  useEffect(() => {
+    if (!torchActive) {
+      clearTorch();
+      return;
+    }
+    const last = lastTorchPointRef.current;
+    if (last) updateTorch(last.x, last.y);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [torchActive, torchSize]);
+
   const getCanvasCoords = (
     e: React.MouseEvent<HTMLCanvasElement> | React.TouchEvent<HTMLCanvasElement> | Touch,
   ) => {
@@ -1137,7 +1204,7 @@ export default function Painter2D({
   };
 
   const handleDoubleClick = (e: React.MouseEvent<HTMLCanvasElement>) => {
-    if (e.button !== 0 || tool === "pan") return;
+    if (e.button !== 0 || tool === "pan" || tool === "torch") return;
     if (isCollaborator && !permissions.ANNOTATE) return;
     const pos = getCanvasCoords(e);
     if (isLockedDrawRef.current) {
@@ -1151,6 +1218,11 @@ export default function Painter2D({
   const handleTouchStart = (e: React.TouchEvent<HTMLCanvasElement>) => {
     if (e.touches.length > 1) return; // Ignore pinch/multitouch gestures
     e.preventDefault();
+
+    if (tool === "torch") {
+      updateTorch(e.touches[0].clientX, e.touches[0].clientY);
+      return;
+    }
 
     if (tool === "pan") {
       if (isCollaborator && !permissions.ZOOM_PAN) return;
@@ -1199,6 +1271,11 @@ export default function Painter2D({
     if (e.touches.length > 1) return;
     e.preventDefault();
 
+    if (tool === "torch") {
+      updateTorch(e.touches[0].clientX, e.touches[0].clientY);
+      return;
+    }
+
     if (tool === "pan") {
       if (isPanning && e.touches.length === 1 && (!isCollaborator || permissions.ZOOM_PAN)) {
         const touch = e.touches[0];
@@ -1239,6 +1316,11 @@ export default function Painter2D({
 
   const handleTouchEnd = (e: React.TouchEvent<HTMLCanvasElement>) => {
     e.preventDefault();
+    // Lifting the finger puts the annotation back.
+    if (tool === "torch") {
+      clearTorch();
+      return;
+    }
     if (isPanning) {
       setIsPanning(false);
     }
@@ -1259,6 +1341,7 @@ export default function Painter2D({
 
   const handleMouseDown = (e: React.MouseEvent<HTMLCanvasElement>) => {
     if (e.button !== 0) return;
+    if (tool === "torch") return;
 
     if (tool === "pan") {
       if (isCollaborator && !permissions.ZOOM_PAN) return;
@@ -1302,12 +1385,15 @@ export default function Painter2D({
   };
 
   const handleMouseMove = (e: React.MouseEvent<HTMLCanvasElement>) => {
+    if (torchActiveRef.current) updateTorch(e.clientX, e.clientY);
     if (collabToken && collab.connected) {
       const pos = getCanvasCoords(e);
       const w = imgDim.w || 512;
       const h = imgDim.h || 512;
       collab.updateCursor({ x: pos.x / w, y: pos.y / h, plane: "axial" });
     }
+
+    if (tool === "torch") return;
 
     if (tool === "pan") {
       if (isPanning && (!isCollaborator || permissions.ZOOM_PAN)) {
@@ -1584,15 +1670,34 @@ export default function Painter2D({
       else if (e.key === "4" || e.key.toLowerCase() === "b") { setTool("brush"); }
       else if (e.key === "5" || e.key.toLowerCase() === "p") { setTool("pencil"); }
       else if (e.key === "6" || e.key.toLowerCase() === "h") { setTool("pan"); }
+      else if (e.key === "7") { setTool("torch"); }
+      else if (e.key.toLowerCase() === "t" && !e.ctrlKey && !e.metaKey && !e.altKey) { setTorchHeld(true); }
       else if (e.key === "0" || e.key.toLowerCase() === "e") { setIsErasing((prev) => !prev); }
       else if (e.key === "z" && (e.ctrlKey || e.metaKey) && !e.shiftKey) { e.preventDefault(); undo(); }
       else if (((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "y") || ((e.ctrlKey || e.metaKey) && e.shiftKey && e.key.toLowerCase() === "z")) { e.preventDefault(); redo(); }
       else if (e.key === "s" && (e.ctrlKey || e.metaKey)) { e.preventDefault(); saveMask(); }
-      else if (e.key === "[") { setBrushSize((b) => Math.max(2, b - 4)); }
-      else if (e.key === "]") { setBrushSize((b) => Math.min(60, b + 4)); }
+      else if (e.key === "[") {
+        if (torchActiveRef.current) setTorchSize((t) => Math.max(8, t - 8));
+        else setBrushSize((b) => Math.max(2, b - 4));
+      }
+      else if (e.key === "]") {
+        if (torchActiveRef.current) setTorchSize((t) => Math.min(240, t + 8));
+        else setBrushSize((b) => Math.min(60, b + 4));
+      }
     };
+    // Holding T peeks; letting go (or leaving the window) puts the annotation back.
+    const onKeyUp = (e: KeyboardEvent) => {
+      if (e.key.toLowerCase() === "t") setTorchHeld(false);
+    };
+    const onBlur = () => setTorchHeld(false);
     window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
+    window.addEventListener("keyup", onKeyUp);
+    window.addEventListener("blur", onBlur);
+    return () => {
+      window.removeEventListener("keydown", onKey);
+      window.removeEventListener("keyup", onKeyUp);
+      window.removeEventListener("blur", onBlur);
+    };
   }, [undo, redo, saveMask, finishLockedDraw]);
 
 
@@ -1930,6 +2035,16 @@ export default function Painter2D({
                     </button>
                     <button
                       type="button"
+                      onClick={() => setTool("torch")}
+                      title="Torch - see the scan under the annotation (Key 7, or hold T with any tool)"
+                      className={`p-1.5 rounded transition border cursor-pointer ${
+                        tool === "torch" ? "bg-primary text-primary-foreground border-primary font-medium" : "border-border bg-background text-muted-foreground hover:text-foreground"
+                      }`}
+                    >
+                      <Flashlight className="h-3.5 w-3.5" />
+                    </button>
+                    <button
+                      type="button"
                       onClick={() => setIsErasing((e) => !e)}
                       title="Eraser (Key 0 or E)"
                       className={`p-1.5 rounded transition border cursor-pointer ${
@@ -1960,9 +2075,21 @@ export default function Painter2D({
                     </button>
                   </>
                 ) : (
-                  <div className="flex items-center gap-1.5 rounded-md bg-blue-500/10 border border-blue-500/20 px-2 py-1 text-xs text-blue-400 font-medium">
-                    <Lock className="h-3 w-3 text-blue-400" />
-                    <span className="hidden sm:inline">Review Mode</span>
+                  <div className="flex items-center gap-1.5">
+                    <div className="flex items-center gap-1.5 rounded-md bg-blue-500/10 border border-blue-500/20 px-2 py-1 text-xs text-blue-400 font-medium">
+                      <Lock className="h-3 w-3 text-blue-400" />
+                      <span className="hidden sm:inline">Review Mode</span>
+                    </div>
+                    <button
+                    type="button"
+                    onClick={() => setTool((t) => (t === "torch" ? "pan" : "torch"))}
+                    title="Torch - see the scan under the annotation. Nothing is changed. (Key 7, or hold T)"
+                    className={`inline-flex items-center gap-1.5 rounded-md px-2.5 py-1 text-xs font-medium border transition cursor-pointer ${
+                      tool === "torch" ? "bg-primary text-primary-foreground border-primary" : "border-border bg-background text-muted-foreground hover:text-foreground"
+                    }`}
+                  >
+                    <Flashlight className="h-3 w-3" /> Torch
+                  </button>
                   </div>
                 )}
               </div>
@@ -2113,6 +2240,16 @@ export default function Painter2D({
                     >
                       <Hand className="h-3 w-3" /> Hand <span className="text-[10px] opacity-60">(6)</span>
                     </button>
+                    <button
+                      type="button"
+                      onClick={() => setTool("torch")}
+                      title="Torch - hides the annotation around the cursor so you can see the scan underneath. Nothing is erased. (Key 7, or hold T with any tool)"
+                      className={`inline-flex items-center gap-1.5 border-l border-border px-2.5 py-1 text-xs transition cursor-pointer ${
+                        tool === "torch" ? "bg-primary text-primary-foreground font-medium" : "bg-background text-muted-foreground hover:text-foreground"
+                      }`}
+                    >
+                      <Flashlight className="h-3 w-3" /> Torch <span className="text-[10px] opacity-60">(7)</span>
+                    </button>
                   </div>
 
                   <button
@@ -2138,9 +2275,21 @@ export default function Painter2D({
                   </label>
                 </div>
               ) : (
-                <div className="flex items-center gap-2 rounded-md bg-blue-500/10 border border-blue-500/20 px-3 py-1 text-xs text-blue-400 font-medium">
-                  <Lock className="h-3.5 w-3.5 text-blue-400" />
-                  <span>Read-Only Review Mode — Drawing locked by Master</span>
+                <div className="flex items-center gap-2">
+                  <div className="flex items-center gap-2 rounded-md bg-blue-500/10 border border-blue-500/20 px-3 py-1 text-xs text-blue-400 font-medium">
+                    <Lock className="h-3.5 w-3.5 text-blue-400" />
+                    <span>Read-Only Review Mode — Drawing locked by Master</span>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setTool((t) => (t === "torch" ? "pan" : "torch"))}
+                    title="Torch - see the scan under the annotation. Nothing is changed. (Key 7, or hold T)"
+                    className={`inline-flex items-center gap-1.5 rounded-md px-2.5 py-1 text-xs font-medium border transition cursor-pointer ${
+                      tool === "torch" ? "bg-primary text-primary-foreground border-primary" : "border-border bg-background text-muted-foreground hover:text-foreground"
+                    }`}
+                  >
+                    <Flashlight className="h-3.5 w-3.5" /> Torch
+                  </button>
                 </div>
               )}
 
@@ -2155,6 +2304,21 @@ export default function Painter2D({
                       max={50}
                       value={brushSize}
                       onChange={(e) => setBrushSize(Number(e.target.value))}
+                      className="w-20 accent-primary"
+                    />
+                  </div>
+                )}
+                {tool === "torch" && (
+                  <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
+                    <Flashlight className="h-3.5 w-3.5" />
+                    <span>Torch: {torchSize}px</span>
+                    <input
+                      type="range"
+                      min={8}
+                      max={240}
+                      step={4}
+                      value={torchSize}
+                      onChange={(e) => setTorchSize(Number(e.target.value))}
                       className="w-20 accent-primary"
                     />
                   </div>
@@ -2462,14 +2626,17 @@ export default function Painter2D({
               onMouseDown={handleMouseDown}
               onMouseMove={handleMouseMove}
               onMouseUp={handleMouseUp}
-              onMouseLeave={handleMouseUp}
+              onMouseLeave={() => {
+                clearTorch();
+                handleMouseUp();
+              }}
               onDoubleClick={handleDoubleClick}
               onTouchStart={handleTouchStart}
               onTouchMove={handleTouchMove}
               onTouchEnd={handleTouchEnd}
               onTouchCancel={handleTouchEnd}
               className={`absolute inset-0 block ${
-                tool === "pan" ? (isPanning ? "cursor-grabbing" : "cursor-grab") : "cursor-crosshair"
+                tool === "pan" ? (isPanning ? "cursor-grabbing" : "cursor-grab") : tool === "torch" ? "cursor-none" : "cursor-crosshair"
               }`}
             />
             {/* Live pencil polygon overlay preview canvas */}
@@ -2477,6 +2644,13 @@ export default function Painter2D({
               ref={overlayCanvasRef}
               style={{ width: "100%", height: "100%", touchAction: "none" }}
               className="absolute inset-0 block pointer-events-none"
+            />
+            {/* Torch outline: positioned by updateTorch, hidden until used */}
+            <div
+              ref={torchRingRef}
+              aria-hidden
+              className="absolute pointer-events-none rounded-full border-white/80 shadow-[0_0_0_1px_rgba(0,0,0,0.6)]"
+              style={{ display: "none", transform: "translate(-50%, -50%)", borderStyle: "solid", borderWidth: `${1.5 / zoom}px` }}
             />
             {/* Live participant cursors overlay for Master */}
             {collabToken && collab.connected && (
