@@ -1,15 +1,43 @@
 import { spawn } from "node:child_process";
+import fs from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 
-// Target port (defaults to Next.js port 3000)
-const portArgIndex = process.argv.indexOf("--port");
-const port = portArgIndex !== -1 && process.argv[portArgIndex + 1]
-  ? process.argv[portArgIndex + 1]
-  : process.env.PORT || "3000";
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+const rootDir = path.resolve(__dirname, "..");
+const rootEnv = path.join(rootDir, ".env");
 
-const targetUrl = `http://localhost:${port}`;
+// Parse .env directly if present
+let token = process.env.CLOUDFLARE_TUNNEL_TOKEN;
+if (!token && fs.existsSync(rootEnv)) {
+  const envContent = fs.readFileSync(rootEnv, "utf8");
+  for (const line of envContent.split("\n")) {
+    const trimmed = line.trim();
+    if (trimmed.startsWith("CLOUDFLARE_TUNNEL_TOKEN=")) {
+      token = trimmed.split("=")[1].replace(/^["']|["']$/g, "");
+      break;
+    }
+  }
+}
 
-console.log("\n🚀 Starting Cloudflare Tunnel for BME platform...");
-console.log(`📡 Forwarding to local app: ${targetUrl}\n`);
+if (token) {
+  console.log("\n🚀 Starting Cloudflare Named Tunnel...");
+  console.log("📡 Connecting with persistent token...\n");
+  startTunnel("npx", ["--yes", "cloudflared", "tunnel", "run", "--token", token]);
+} else {
+  // Target port (defaults to Next.js port 3000)
+  const portArgIndex = process.argv.indexOf("--port");
+  const port = portArgIndex !== -1 && process.argv[portArgIndex + 1]
+    ? process.argv[portArgIndex + 1]
+    : process.env.PORT || "3000";
+
+  const targetUrl = `http://localhost:${port}`;
+
+  console.log("\n🚀 Starting Cloudflare Tunnel for BME platform...");
+  console.log(`📡 Forwarding to local app: ${targetUrl}\n`);
+  startTunnel("npx", ["--yes", "cloudflared", "tunnel", "--url", targetUrl]);
+}
 
 function startTunnel(cmd, args) {
   const child = spawn(cmd, args, {
@@ -23,7 +51,7 @@ function startTunnel(cmd, args) {
     const text = chunk.toString();
     process.stderr.write(text);
 
-    // Look for trycloudflare.com URL pattern
+    // Look for trycloudflare.com URL pattern if temporary
     const match = text.match(/https:\/\/[a-zA-Z0-9-]+\.trycloudflare\.com/);
     if (match && !printedUrl) {
       printedUrl = true;
@@ -40,12 +68,7 @@ function startTunnel(cmd, args) {
   child.stderr.on("data", handleData);
 
   child.on("error", (err) => {
-    if (cmd === "cloudflared") {
-      console.log("⚠️ 'cloudflared' command not found directly, falling back to 'npx cloudflared'...");
-      startTunnel("npx", ["--yes", "cloudflared", "tunnel", "--url", targetUrl]);
-    } else {
-      console.error("❌ Failed to start Cloudflare tunnel:", err.message);
-    }
+    console.error("❌ Failed to start Cloudflare tunnel:", err.message);
   });
 
   child.on("exit", (code) => {
@@ -64,5 +87,3 @@ function startTunnel(cmd, args) {
     process.exit(0);
   });
 }
-
-startTunnel("cloudflared", ["tunnel", "--url", targetUrl]);
