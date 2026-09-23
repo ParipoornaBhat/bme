@@ -208,7 +208,12 @@ export default function Viewer({ caseId, onSaved }: { caseId: string; onSaved?: 
       }
       const data = await res.json();
       if (data.token) {
-        const shareUrl = `${window.location.origin}/collaborate/${data.token}`;
+        const baseOrigin =
+          process.env.NEXT_PUBLIC_APP_URL &&
+          !process.env.NEXT_PUBLIC_APP_URL.includes("localhost")
+            ? process.env.NEXT_PUBLIC_APP_URL.replace(/\/$/, "")
+            : window.location.origin;
+        const shareUrl = `${baseOrigin}/collaborate/${data.token}`;
         setCollabHostKey(data.hostKey ?? null);
         setCollabToken(data.token);
         setShareUrl(shareUrl);
