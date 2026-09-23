@@ -877,52 +877,42 @@ export default function Painter2D({
       isDirtyRef.current = false;
       if (autoSaveTimeoutRef.current) clearTimeout(autoSaveTimeoutRef.current);
 
-      // Try to load existing mask
+      // Try to load existing mask.
+      //
+      // Asked for as plain label bytes, never as an image: decoding an image
+      // means drawing it to a canvas and reading it back, and privacy-hardened
+      // browsers add +/-1 noise to canvas readback. That flips labels stored
+      // as 0-3 at random pixels - holes and stray specks - and the next save
+      // writes the damage to disk. See decodeMaskPng in src/lib/mask-png.ts.
       try {
         const maskRes = await fetch(
-          withAccessRef.current(`/api/annotation2d/${selectedCaseId}?stem=${encodeURIComponent(selectedStem)}&raw=true`),
+          withAccessRef.current(`/api/annotation2d/${selectedCaseId}?stem=${encodeURIComponent(selectedStem)}&format=labels`),
         );
         if (cancelled || loadRequestIdRef.current !== currentRequestId) return;
-        if (maskRes.ok && maskRes.headers.get("content-type")?.includes("image")) {
-          const blob = await maskRes.blob();
+        if (maskRes.ok && maskRes.headers.get("content-type")?.includes("application/octet-stream")) {
+          const mw = Number(maskRes.headers.get("X-Mask-Width")) || w;
+          const mh = Number(maskRes.headers.get("X-Mask-Height")) || h;
+          const labels = new Uint8Array(await maskRes.arrayBuffer());
           if (cancelled || loadRequestIdRef.current !== currentRequestId) return;
-          const maskImg = new Image();
-          const blobUrl = URL.createObjectURL(blob);
-          maskImg.src = blobUrl;
-          maskImg.onload = () => {
-            URL.revokeObjectURL(blobUrl);
-            if (cancelled || loadRequestIdRef.current !== currentRequestId) return;
-            const mw = maskImg.naturalWidth || w;
-            const mh = maskImg.naturalHeight || h;
-            const off = document.createElement("canvas");
-            off.width = mw;
-            off.height = mh;
-            const offCtx = off.getContext("2d");
-            if (offCtx) {
-              offCtx.drawImage(maskImg, 0, 0);
-              const pxData = offCtx.getImageData(0, 0, mw, mh).data;
-              if (mw === w && mh === h) {
-                for (let i = 0; i < maskArr.length; i++) {
-                  maskArr[i] = pxData[i * 4];
-                }
-              } else {
-                // If mask file dimensions differ from base slice, scale proportionally
-                const scaleX = mw / w;
-                const scaleY = mh / h;
-                for (let y = 0; y < h; y++) {
-                  const sy = Math.min(mh - 1, Math.floor(y * scaleY));
-                  for (let x = 0; x < w; x++) {
-                    const sx = Math.min(mw - 1, Math.floor(x * scaleX));
-                    maskArr[y * w + x] = pxData[(sy * mw + sx) * 4];
-                  }
-                }
+          if (labels.length !== mw * mh) throw new Error("mask size does not match its header");
+          if (mw === w && mh === h) {
+            maskArr.set(labels);
+          } else {
+            // If mask file dimensions differ from base slice, scale proportionally
+            const scaleX = mw / w;
+            const scaleY = mh / h;
+            for (let y = 0; y < h; y++) {
+              const sy = Math.min(mh - 1, Math.floor(y * scaleY));
+              for (let x = 0; x < w; x++) {
+                const sx = Math.min(mw - 1, Math.floor(x * scaleX));
+                maskArr[y * w + x] = labels[sy * mw + sx];
               }
-              sliceLoadingRef.current = false;
-              renderMaskRef.current();
-              applyRemoteMaskRef.current();
-              setMaskRevision((v) => v + 1);
             }
-          };
+          }
+          sliceLoadingRef.current = false;
+          renderMaskRef.current();
+          applyRemoteMaskRef.current();
+          setMaskRevision((v) => v + 1);
         } else {
           sliceLoadingRef.current = false;
           renderMaskRef.current();

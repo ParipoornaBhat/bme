@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import fs from "node:fs";
 import path from "node:path";
 import zlib from "node:zlib";
+import { decodeMaskPng } from "~/lib/mask-png";
 
 export const dynamic = "force-dynamic";
 
@@ -86,6 +87,22 @@ export async function GET(
 
   if (!fs.existsSync(maskPath)) {
     return NextResponse.json({ exists: false });
+  }
+
+  if (req.nextUrl.searchParams.get("format") === "labels") {
+    try {
+      const { width, height, labels } = decodeMaskPng(fs.readFileSync(maskPath));
+      return new NextResponse(Buffer.from(labels), {
+        headers: {
+          "Content-Type": "application/octet-stream",
+          "X-Mask-Width": String(width),
+          "X-Mask-Height": String(height),
+          "Cache-Control": "no-store",
+        },
+      });
+    } catch (err: any) {
+      return NextResponse.json({ error: `could not decode mask: ${err.message}` }, { status: 500 });
+    }
   }
 
   if (raw) {
