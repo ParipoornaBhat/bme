@@ -10,9 +10,14 @@ export async function POST(req: NextRequest) {
       process.env.NEXT_PUBLIC_SERVER_URL ||
       "http://localhost:4000";
 
+    // Forward the caller's session cookie: the API only lets a signed-in team
+    // member open a review, and it can only tell who is asking from this.
     const res = await fetch(`${serverUrl}/api/collaborate/session`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: {
+        "Content-Type": "application/json",
+        cookie: req.headers.get("cookie") ?? "",
+      },
       body: JSON.stringify(body),
     });
 

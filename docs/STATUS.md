@@ -4,7 +4,7 @@
 If you are picking this project up cold (new chat, new teammate, new machine), read this
 file first, then [SUMMARY.md](SUMMARY.md) for the full picture, then [PRD.md](PRD.md).
 
-Last updated: **2026-09-04**
+Last updated: **2026-09-23**
 
 ---
 
@@ -59,6 +59,18 @@ Phases are defined in [PRD.md](PRD.md) §8.
 ## Do this next
 
 In order. Each step's output is the next step's input.
+
+00. **Every `/api` route now requires auth (2026-09-23, branch
+   `collaborative-radiologist-view`).** Until then none checked who was asking:
+   anyone who could reach the server, or the `pnpm tunnel` URL, could list and
+   download every scan. `client/nextjs/src/middleware.ts` now denies by default.
+   Signed-in **admin** accounts (all four seeded team accounts) get everything; a
+   review guest gets only the 2D study routes, only while the host is connected,
+   and only with the permission the host granted. If you get 401 everywhere
+   after pulling, your local account is not admin -- re-run `pnpm run setup`.
+   The signed-in path was verified piecewise (roles in the DB, the profile call,
+   cookie forwarding) but not exercised end to end: confirm `/annotate` loads
+   and saves, and that Start Collaboration makes you host.
 
 0. **2D track was rebuilt from scratch on 2026-09-04.** Read
    [HANDOFF.md](HANDOFF.md) before touching anything 2D. In short: 2D now uses
@@ -206,6 +218,10 @@ Carried from [PRD.md](PRD.md) §10, updated with what the data answered.
 | ~10:1 voxel anisotropy | 3D surfaces look terraced | Taubin smoothing in Stage E is required, not cosmetic. |
 | ~~Python 3.14 cannot run PyTorch~~ | **Wrong — retracted 2026-08-26** | torch 2.13.0, nnunetv2 2.8.1, monai 1.6.0 all ship cp314 wheels. 3.14 is fine; the `<3.13` pin was removed. |
 | 3 scanners, 2 vendors | Raw intensities not comparable | Normalization in PRD §4.1 is mandatory. |
+| **A live Supabase password was committed in `.env.example`** on `collaborative-radiologist-view` | It was public on GitHub. Scrubbed from the branch history by force-push on 2026-09-23, but anyone who fetched earlier still has it, and GitHub keeps orphaned commits reachable by hash for a while | **Rotate the password in Supabase.** The scrub does not make the old one safe. |
+| ~~API served patient data with no auth; host role claimable by a `master_` user id; sign-up as `admin@thunder.com` auto-granted admin; `seed-trial` route minted that account~~ | **Fixed 2026-09-23** | Middleware, per-session host key, per-participant guest keys; backdoor hook and route removed. |
+| Review sessions live in server memory | A restart of the API ends every open review | Acceptable for a demo tool; persist them if reviews ever need to survive restarts. |
+| `/api/collaborate/session/<token>` answers without auth | Anyone holding a token sees participant names | Minor; it serves no study data. Trim the response if it matters. |
 
 ---
 

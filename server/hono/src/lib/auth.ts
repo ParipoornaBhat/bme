@@ -83,34 +83,10 @@ const getAuth = () => {
           create: {
             after: async (createdUser) => {
               try {
-                if (createdUser.email === "admin@thunder.com") {
-                  const adminRole = await db.query.role.findFirst({
-                    where: (r, { eq }) => eq(r.name, "admin"),
-                  });
-                  if (adminRole) {
-                    await db.insert(userRole).values({
-                      userId: createdUser.id,
-                      roleId: adminRole.id,
-                      isActive: true,
-                    });
-                  }
-                  return;
-                }
-
-                if (createdUser.email === "user@thunder.com") {
-                  const defaultRole = await db.query.role.findFirst({
-                    where: (r, { eq }) => eq(r.name, "user"),
-                  });
-                  if (defaultRole) {
-                    await db.insert(userRole).values({
-                      userId: createdUser.id,
-                      roleId: defaultRole.id,
-                      isActive: true,
-                    });
-                  }
-                  return;
-                }
-
+                // No address gets a role by name. This used to hand the admin
+                // role to whoever registered as admin@thunder.com - a template
+                // account whose password is published - and sign-up is open,
+                // so that was a way for anyone to become an administrator.
                 const userCountResult = await db.query.user.findMany({ limit: 2 });
                 const isFirstUser = userCountResult.length <= 1;
                 const targetRoleName = isFirstUser ? "admin" : "user";

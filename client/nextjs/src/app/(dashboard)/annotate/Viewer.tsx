@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Eraser, Lasso, Link2, Link2Off, Loader2, Minus, Paintbrush, Plus, Redo2, RotateCcw, Save, Users } from "lucide-react";
+import { toast } from "sonner";
 import { useSession } from "~/lib/auth-client";
 import Render3D from "./Render3D";
 import CollaborationMasterPanel from "~/components/collaborate/CollaborationMasterPanel";
@@ -162,11 +163,15 @@ export default function Viewer({ caseId, onSaved }: { caseId: string; onSaved?: 
   const [shareUrl, setShareUrl] = useState<string>("");
   const [showMasterPanel, setShowMasterPanel] = useState(false);
   const [startingCollab, setStartingCollab] = useState(false);
+  // Returned by the API to whoever created the session; it is what makes this
+  // socket the host.
+  const [collabHostKey, setCollabHostKey] = useState<string | null>(null);
 
   const collab = useCollaboration({
     token: collabToken || "",
     userId: session?.user?.id || "master_user",
     userName: session?.user?.name || "Dr. Master",
+    hostKey: collabHostKey ?? undefined,
   });
 
   const startCollaboration = async () => {
@@ -198,11 +203,13 @@ export default function Viewer({ caseId, onSaved }: { caseId: string; onSaved?: 
           errorMsg = "Backend API server (port 4000) is unreachable. Please make sure the backend server is running via 'pnpm dev'.";
         }
         console.error("Failed to start collaboration:", errorMsg);
+        toast.error(errorMsg);
         return;
       }
       const data = await res.json();
       if (data.token) {
         const shareUrl = `${window.location.origin}/collaborate/${data.token}`;
+        setCollabHostKey(data.hostKey ?? null);
         setCollabToken(data.token);
         setShareUrl(shareUrl);
         setShowMasterPanel(true);

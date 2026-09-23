@@ -121,6 +121,15 @@ export default function Painter2D({
   const [shareUrl, setShareUrl] = useState<string>("");
   const [showMasterPanel, setShowMasterPanel] = useState(false);
   const [startingCollab, setStartingCollab] = useState(false);
+  // The id this client created the session under. masterUserId starts as a
+  // placeholder and is replaced once the auth session loads, so without pinning
+  // it the host can connect under a different id than the one that owns the
+  // session - and, now that nobody is promoted automatically, be locked out of
+  // their own review.
+  const [collabHostId, setCollabHostId] = useState<string | null>(null);
+  // Returned by the API to whoever created the session; it is what makes this
+  // socket the host. Never shared, never put in a link.
+  const [collabHostKey, setCollabHostKey] = useState<string | null>(null);
 
   useEffect(() => {
     if (externalCollabToken) {
@@ -165,7 +174,7 @@ export default function Painter2D({
 
   const activeUserId = isCollaborator
     ? (collaboratorUserId || persistedCollabUserId)
-    : masterUserId;
+    : (collabHostId ?? masterUserId);
   const activeUserName = isCollaborator
     ? (collaboratorUserName || (typeof window !== "undefined" && localStorage.getItem("bme_collab_radiologist_name")) || "Dr. Radiologist")
     : masterUserName;
@@ -174,6 +183,7 @@ export default function Painter2D({
     token: collabToken || "",
     userId: activeUserId,
     userName: activeUserName,
+    hostKey: isCollaborator ? undefined : (collabHostKey ?? undefined),
     onViewpointUpdated: (vp, updatedBy) => {
       // Remember where everyone is, so choosing to follow someone can jump
       // straight to their view instead of waiting for them to move again.
@@ -198,6 +208,20 @@ export default function Painter2D({
     },
   });
 
+  // Study data routes refuse anyone who is not a signed-in team member unless
+  // the request proves the caller is in a live review. A guest does that by
+  // sending the session token and the key the server issued them on joining.
+  const guestAccessQuery =
+    isCollaborator && collabToken && collab.participantKey
+      ? `collab=${encodeURIComponent(collabToken)}&key=${encodeURIComponent(collab.participantKey)}`
+      : "";
+  const withAccess = (url: string) =>
+    guestAccessQuery ? `${url}${url.includes("?") ? "&" : "?"}${guestAccessQuery}` : url;
+  const withAccessRef = useRef(withAccess);
+  withAccessRef.current = withAccess;
+  // A guest has nothing to fetch with until the server has issued their key.
+  const dataReady = !isCollaborator || Boolean(guestAccessQuery);
+
   const permissions: ParticipantPermission = isCollaborator
     ? collab.permissions
     : {
@@ -218,13 +242,15 @@ export default function Painter2D({
       return;
     }
     setStartingCollab(true);
+    const hostId = masterUserId;
+    setCollabHostId(hostId);
     try {
       const res = await fetch("/api/collaborate/session", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           caseId: selected?.stem || "2d_slice",
-          userId: masterUserId,
+          userId: hostId,
           userName: masterUserName,
         }),
       });
@@ -241,11 +267,13 @@ export default function Painter2D({
           errorMsg = "Backend API server (port 4000) is unreachable. Please make sure the backend server is running via 'pnpm dev'.";
         }
         console.error("Failed to start 2D collaboration:", errorMsg);
+        toast.error(errorMsg);
         return;
       }
       const data = await res.json();
       if (data.token) {
         const shareUrl = `${window.location.origin}/collaborate/${data.token}`;
+        setCollabHostKey(data.hostKey ?? null);
         setCollabToken(data.token);
         setShareUrl(shareUrl);
         setShowMasterPanel(true);
@@ -338,6 +366,8 @@ export default function Painter2D({
     height?: number;
   } | null>(null);
   const applyRemoteMaskRef = useRef<() => void>(() => {});
+  const sliceLoadingRef = useRef(false);
+  const lastPublishedMaskRef = useRef(0);
   const broadcastCurrentMaskRef = useRef<() => void>(() => {});
   const imgDimRef = useRef<{ w: number; h: number }>({ w: 0, h: 0 });
   const undoStackRef = useRef<Uint8Array[]>([]);
@@ -376,13 +406,15 @@ export default function Painter2D({
     } catch { /* ignore */ }
   }, []);
 
-  // Load slices once on mount (supporting ?case=...&stem=... deep linking with localStorage fallback)
+  // Load slices once access is settled (supporting ?case=...&stem=... deep
+  // linking with localStorage fallback)
   useEffect(() => {
+    if (!dataReady) return;
     let mounted = true;
     (async () => {
       try {
         setLoading(true);
-        const res = await fetch("/api/cases2d", { cache: "no-store" });
+        const res = await fetch(withAccessRef.current("/api/cases2d"), { cache: "no-store" });
         if (!res.ok) return;
         const data = await res.json();
         if (!mounted) return;
@@ -416,7 +448,7 @@ export default function Painter2D({
     return () => {
       mounted = false;
     };
-  }, []);
+  }, [dataReady]);
 
 
   const renderMaskToCanvas = useCallback(() => {
@@ -470,13 +502,27 @@ export default function Painter2D({
     setCounts(newCounts);
     countsRef.current = newCounts;
 
-    // Broadcast live mask to active collaboration session
-    if (collabToken && collab.connected && selected && !applyingRemoteMaskRef.current) {
+    // Broadcast live mask to active collaboration session.
+    //
+    // Labelled from loadedSliceRef, never from `selected`: selected changes the
+    // moment a new slice is picked, while the canvas still holds the previous
+    // slice's mask, so labelling from it publishes the old annotation under the
+    // new slice's name. Suppressed entirely while a slice is loading, which is
+    // when that mismatch exists and when the mask is a half-built intermediate.
+    const publishAs = loadedSliceRef.current;
+    if (
+      collabToken &&
+      collab.connected &&
+      publishAs &&
+      !sliceLoadingRef.current &&
+      !applyingRemoteMaskRef.current
+    ) {
       try {
         const dataUrl = canvas.toDataURL("image/png");
+        lastPublishedMaskRef.current = Date.now();
         collab.updateMask({
-          stem: selected.stem,
-          caseId: selected.caseId,
+          stem: publishAs.stem,
+          caseId: publishAs.caseId,
           maskDataUrl: dataUrl,
           width: w,
           height: h,
@@ -568,7 +614,10 @@ export default function Painter2D({
   // cached mask does, because the load finishes in a few milliseconds. Push the
   // current mask explicitly once the slice is loaded and the session is live.
   const broadcastCurrentMask = useCallback(() => {
-    if (!collabToken || !collab.connected) return;
+    if (!collabToken || !collab.connected || sliceLoadingRef.current) return;
+    // Rendering the freshly loaded mask has usually just published it; sending
+    // the identical bytes again only doubles what every viewer downloads.
+    if (Date.now() - lastPublishedMaskRef.current < 250) return;
     const loaded = loadedSliceRef.current;
     const canvas = maskCanvasRef.current;
     const { w, h } = imgDimRef.current;
@@ -735,6 +784,7 @@ export default function Painter2D({
     // otherwise a cancelled run (a StrictMode remount, or a fast slice switch)
     // leaves the slice marked as loaded and its mask never renders.
     lastLoadedStemRef.current = sliceKey;
+    sliceLoadingRef.current = true;
     let established = false;
     const currentRequestId = ++loadRequestIdRef.current;
     const sliceSnapshot = selectedRef.current;
@@ -742,7 +792,7 @@ export default function Painter2D({
     let cancelled = false;
     const img = new Image();
     img.crossOrigin = "anonymous";
-    img.src = `/api/cases2d?image=${encodeURIComponent(selectedRelPath)}`;
+    img.src = withAccessRef.current(`/api/cases2d?image=${encodeURIComponent(selectedRelPath)}`);
 
     img.onload = async () => {
       if (cancelled || loadRequestIdRef.current !== currentRequestId) return;
@@ -795,7 +845,7 @@ export default function Painter2D({
       // Try to load existing mask
       try {
         const maskRes = await fetch(
-          `/api/annotation2d/${selectedCaseId}?stem=${encodeURIComponent(selectedStem)}&raw=true`,
+          withAccessRef.current(`/api/annotation2d/${selectedCaseId}?stem=${encodeURIComponent(selectedStem)}&raw=true`),
         );
         if (cancelled || loadRequestIdRef.current !== currentRequestId) return;
         if (maskRes.ok && maskRes.headers.get("content-type")?.includes("image")) {
@@ -832,17 +882,20 @@ export default function Painter2D({
                   }
                 }
               }
+              sliceLoadingRef.current = false;
               renderMaskRef.current();
               applyRemoteMaskRef.current();
               setMaskRevision((v) => v + 1);
             }
           };
         } else {
+          sliceLoadingRef.current = false;
           renderMaskRef.current();
           applyRemoteMaskRef.current();
           setMaskRevision((v) => v + 1);
         }
       } catch {
+        sliceLoadingRef.current = false;
         if (!cancelled && loadRequestIdRef.current === currentRequestId) renderMaskRef.current();
         applyRemoteMaskRef.current();
         setMaskRevision((v) => v + 1);
@@ -853,6 +906,7 @@ export default function Painter2D({
       cancelled = true;
       if (!established && lastLoadedStemRef.current === sliceKey) {
         lastLoadedStemRef.current = "";
+        sliceLoadingRef.current = false;
       }
     };
   }, [selectedRelPath, selectedCaseId, selectedStem]);
@@ -1382,7 +1436,7 @@ export default function Painter2D({
 
     try {
       const res = await fetch(
-        `/api/annotation2d/${sliceToSave.caseId}?stem=${encodeURIComponent(sliceToSave.stem)}`,
+        withAccess(`/api/annotation2d/${sliceToSave.caseId}?stem=${encodeURIComponent(sliceToSave.stem)}`),
         {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -1444,7 +1498,7 @@ export default function Painter2D({
     setDeletingMask(true);
     try {
       const res = await fetch(
-        `/api/annotation2d/${selected.caseId}?stem=${encodeURIComponent(selected.stem)}`,
+        withAccess(`/api/annotation2d/${selected.caseId}?stem=${encodeURIComponent(selected.stem)}`),
         { method: "DELETE" },
       );
       if (res.ok) {
@@ -1470,7 +1524,7 @@ export default function Painter2D({
     if (!selected) return;
     setFlagSaving(true);
     try {
-      const res = await fetch("/api/annotation2d/flag", {
+      const res = await fetch(withAccess("/api/annotation2d/flag"), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -1509,7 +1563,7 @@ export default function Painter2D({
     if (!selected) return;
     setFlagSaving(true);
     try {
-      const res = await fetch("/api/annotation2d/flag", {
+      const res = await fetch(withAccess("/api/annotation2d/flag"), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -1586,6 +1640,26 @@ export default function Painter2D({
     }
     return true;
   });
+
+  // A shared link is only live while the host is in the room. Render nothing of
+  // the study when they are not: the scan should not sit unattended on someone
+  // else's screen. The session reconnects on its own when the host returns.
+  if (isCollaborator && collab.hostOffline) {
+    return (
+      <div className="flex h-full w-full flex-col items-center justify-center gap-3 p-6 text-center">
+        <Lock className="h-10 w-10 text-amber-500" />
+        <h1 className="text-lg font-semibold">Review session paused</h1>
+        <p className="max-w-md text-sm text-muted-foreground">
+          The host is not connected. This link stays inactive until they rejoin,
+          at which point this page reconnects on its own.
+        </p>
+        <span className="mt-1 flex items-center gap-2 text-xs text-muted-foreground">
+          <Loader2 className="h-3.5 w-3.5 animate-spin" />
+          Waiting for the host
+        </span>
+      </div>
+    );
+  }
 
   return (
     <div className="flex flex-col gap-2 h-full w-full">
@@ -2136,7 +2210,7 @@ export default function Painter2D({
             {selected && (
               // eslint-disable-next-line @next/next/no-img-element
               <img
-                src={`/api/cases2d?image=${encodeURIComponent(selected.relPath)}`}
+                src={withAccess(`/api/cases2d?image=${encodeURIComponent(selected.relPath)}`)}
                 alt={selected.stem}
                 className="absolute inset-0 block pointer-events-none select-none w-full h-full object-contain"
                 style={{ imageRendering: "pixelated" }}
@@ -2145,8 +2219,11 @@ export default function Painter2D({
             {/* Drawing mask layer canvas */}
             <canvas
               ref={maskCanvasRef}
-              width={imgDim.w || 512}
-              height={imgDim.h || 512}
+              // Size is set imperatively by the slice loader and by
+              // renderMaskToCanvas. Setting it here as well means React
+              // re-applies it on the render that follows setImgDim, and
+              // assigning canvas.width wipes the canvas - so the mask is
+              // cleared a second time, after it has already been drawn.
               style={{ width: "100%", height: "100%", touchAction: "none" }}
               onMouseDown={handleMouseDown}
               onMouseMove={handleMouseMove}
@@ -2164,8 +2241,6 @@ export default function Painter2D({
             {/* Live pencil polygon overlay preview canvas */}
             <canvas
               ref={overlayCanvasRef}
-              width={imgDim.w || 512}
-              height={imgDim.h || 512}
               style={{ width: "100%", height: "100%", touchAction: "none" }}
               className="absolute inset-0 block pointer-events-none"
             />

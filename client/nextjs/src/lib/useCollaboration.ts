@@ -47,6 +47,9 @@ export type UseCollaborationOptions = {
   token: string;
   userId?: string;
   userName?: string;
+  // Secret returned to whoever created the session. Presenting it is what makes
+  // this socket the host; a viewer never has one.
+  hostKey?: string;
   onViewpointUpdated?: (viewpoint: ViewpointState, updatedBy?: string) => void;
   onMaskUpdated?: (data: { stem?: string; caseId?: string; maskDataUrl?: string; maskPixels?: number[]; width?: number; height?: number }) => void;
   onMaskRequested?: (data: { stem?: string; caseId?: string; requestedBy?: string }) => void;
@@ -58,6 +61,7 @@ export function useCollaboration({
   token,
   userId,
   userName,
+  hostKey,
   onViewpointUpdated,
   onMaskUpdated,
   onMaskRequested,
@@ -83,6 +87,13 @@ export function useCollaboration({
   const [caseId, setCaseId] = useState<string>("");
   const [sessionEnded, setSessionEnded] = useState(false);
   const [removed, setRemoved] = useState(false);
+  const [hostOffline, setHostOffline] = useState(false);
+  // Issued by the server on join. Study data requests carry it so the server
+  // can confirm they come from someone who is actually in this review.
+  const [participantKey, setParticipantKey] = useState<string | null>(null);
+  // Bumped to re-run the connect effect. The server closes viewer sockets when
+  // the host leaves, so without retrying the link stays dead until a refresh.
+  const [reconnectTick, setReconnectTick] = useState(0);
 
   const socketRef = useRef<WebSocket | null>(null);
   // The socket's onmessage closure is created once per connection, so it cannot
@@ -93,6 +104,8 @@ export function useCollaboration({
   const lastMaskEmitRef = useRef<number>(0);
   const pendingMaskEmitRef = useRef<{ stem: string; caseId: string; maskDataUrl?: string; maskPixels?: number[]; width?: number; height?: number } | null>(null);
   const maskEmitTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const fatalRef = useRef(false);
 
   // Stabilize callbacks in refs so they never trigger WebSocket reconnects
   const callbacksRef = useRef({
@@ -141,8 +154,9 @@ export function useCollaboration({
     const uid = userId || defaultUid || `user_${Math.random().toString(36).substring(2, 9)}`;
     const uname = userName || `Dr. ${uid.slice(-4)}`;
 
-    return `${protocol}//${host}/ws/collaborate?token=${encodeURIComponent(token)}&userId=${encodeURIComponent(uid)}&userName=${encodeURIComponent(uname)}`;
-  }, [token, userId, userName]);
+    const hostParam = hostKey ? `&hostKey=${encodeURIComponent(hostKey)}` : "";
+    return `${protocol}//${host}/ws/collaborate?token=${encodeURIComponent(token)}&userId=${encodeURIComponent(uid)}&userName=${encodeURIComponent(uname)}${hostParam}`;
+  }, [token, userId, userName, hostKey]);
 
   useEffect(() => {
     if (!token) return;
@@ -150,6 +164,11 @@ export function useCollaboration({
     const wsUrl = getWsUrl();
     const ws = new WebSocket(wsUrl);
     socketRef.current = ws;
+    // Captured by this socket's own handlers. A shared ref cannot work here:
+    // close() resolves asynchronously, so a flag cleared right after the call
+    // is already false by the time onclose runs, and every teardown then looks
+    // like a dropped connection and schedules another reconnect.
+    let disposed = false;
 
     ws.onopen = () => {
       setConnected(true);
@@ -159,7 +178,17 @@ export function useCollaboration({
       try {
         const data = JSON.parse(evt.data);
 
-        if (data.type === "SESSION_JOIN_SUCCESS") {
+        if (data.type === "ERROR") {
+          // Only a session that can never become valid again stops the retry
+          // loop. Routine refusals - a permission the host has not granted -
+          // arrive as errors too, and must not kill the connection.
+          if (data.fatal) fatalRef.current = true;
+          console.warn("Collaboration error:", data.error);
+        } else if (data.type === "HOST_OFFLINE") {
+          setHostOffline(true);
+        } else if (data.type === "SESSION_JOIN_SUCCESS") {
+          setHostOffline(false);
+          setParticipantKey(data.participantKey ?? null);
           setRole(data.role);
           currentUserIdRef.current = data.userId;
           setCurrentUserId(data.userId);
@@ -203,11 +232,13 @@ export function useCollaboration({
           }
         } else if (data.type === "USER_REMOVED") {
           setRemoved(true);
+          fatalRef.current = true;
           if (callbacksRef.current.onUserRemoved) {
             callbacksRef.current.onUserRemoved();
           }
         } else if (data.type === "SESSION_ENDED") {
           setSessionEnded(true);
+          fatalRef.current = true;
           if (callbacksRef.current.onSessionEnded) {
             callbacksRef.current.onSessionEnded();
           }
@@ -218,20 +249,33 @@ export function useCollaboration({
     };
 
     ws.onclose = () => {
+      if (disposed) return;
       setConnected(false);
+      // A close we did not ask for means a dropped connection or a host who
+      // stepped out; both recover on their own. A finished or invalid session
+      // never will, so it stops here.
+      if (!fatalRef.current) {
+        reconnectTimerRef.current = setTimeout(() => setReconnectTick((t) => t + 1), 4000);
+      }
     };
 
     ws.onerror = (err) => {
+      if (disposed) return;
       console.warn("WS error:", err);
       setConnected(false);
     };
 
     return () => {
+      if (reconnectTimerRef.current) {
+        clearTimeout(reconnectTimerRef.current);
+        reconnectTimerRef.current = null;
+      }
+      disposed = true;
       if (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING) {
         ws.close();
       }
     };
-  }, [token, getWsUrl]);
+  }, [token, getWsUrl, reconnectTick]);
 
   // Viewpoint Update emitter (throttling only continuous pan updates)
   const updateViewpoint = useCallback((newVp: Partial<ViewpointState>, force = false) => {
@@ -352,6 +396,8 @@ export function useCollaboration({
     caseId,
     sessionEnded,
     removed,
+    hostOffline,
+    participantKey,
     updateViewpoint,
     updateCursor,
     updateMask,

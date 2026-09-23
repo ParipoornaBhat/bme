@@ -21,54 +21,6 @@ const rateLimit = (key: string, maxAttempts: number, windowMs: number): boolean 
   return entry.count > maxAttempts;
 };
 
-// ── Development Only: Seed Trial Users ──────────────────────────────────────
-router.post("/seed-trial", async (c) => {
-  if (process.env.NODE_ENV === "production") {
-    return c.json({ error: "Not available in production" }, 403);
-  }
-
-  try {
-    console.log("🌱 Seeding trial credentials...");
-    
-    try {
-      await auth.api.signUpEmail({
-        body: {
-          email: "admin@thunder.com",
-          password: "AdminPassword123",
-          name: "Trial Admin",
-        },
-      });
-      console.log("   Admin seeded");
-    } catch (e: any) {
-      console.log("   Admin could not be seeded (probably already exists):", e.message);
-    }
-
-    try {
-      await auth.api.signUpEmail({
-        body: {
-          email: "user@thunder.com",
-          password: "UserPassword123",
-          name: "Trial User",
-        },
-      });
-      console.log("   User seeded");
-    } catch (e: any) {
-      console.log("   User could not be seeded (probably already exists):", e.message);
-    }
-
-    return c.json({
-      success: true,
-      message: "Trial login credentials initialized successfully!",
-      credentials: [
-        { role: "admin", email: "admin@thunder.com", password: "AdminPassword123" },
-        { role: "user", email: "user@thunder.com", password: "UserPassword123" }
-      ]
-    });
-  } catch (error: any) {
-    return c.json({ error: error.message || "Failed to seed trial users" }, 500);
-  }
-});
-
 // ── Get Current Profile with Active Role and Permissions ────────────────────
 router.get("/profile", async (c) => {
   const authCtx = await getAuthContext(c);
