@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import { AlertTriangle, Boxes, CheckCircle2, Circle, Download, Layers, Search, Users } from "lucide-react";
+import { AlertTriangle, Boxes, CheckCircle2, ChevronLeft, ChevronRight, Circle, Download, Layers, Search, Users } from "lucide-react";
 import Viewer from "./Viewer";
 import Painter2D from "./Painter2D";
 
@@ -30,6 +30,7 @@ export default function AnnotatePage() {
   const [showNames, setShowNames] = useState(false);
   const [ledger, setLedger] = useState<Record<string, { annotator: string | null; at: string; localFile: boolean }>>({});
   const [needFrom, setNeedFrom] = useState<string[]>([]);
+  const [caseListCollapsed, setCaseListCollapsed] = useState(false);
 
   // Restore tab and filters from localStorage
   useEffect(() => {
@@ -54,6 +55,9 @@ export default function AnnotatePage() {
 
   const handleSelectCase = (caseId: string) => {
     setSelected(caseId);
+    if (typeof window !== "undefined" && window.innerWidth < 1024) {
+      setCaseListCollapsed(true);
+    }
     try {
       localStorage.setItem("bme_annotate_3d_selected", caseId);
     } catch { /* ignore */ }
@@ -156,93 +160,135 @@ export default function AnnotatePage() {
       <div className="flex-1 min-h-0">
         {tab === "2d" && <Painter2D />}
 
+      {/* Mobile/Tablet Case List Toggle for 3D */}
       {tab === "3d" && (
-        <div className="grid gap-3 lg:grid-cols-[230px_minmax(0,1fr)]">
-          <div className="space-y-3">
-            <div className="flex gap-2">
-              <div className="relative flex-1">
-                <Search className="absolute left-2.5 top-2.5 h-4 w-4 text-muted-foreground" />
-                <input
-                  value={q}
-                  onChange={(e) => handleQChange(e.target.value)}
-                  placeholder="Find case"
-                  className="w-full rounded-md border border-border bg-background py-2 pl-8 pr-2 text-sm"
-                />
-              </div>
-            </div>
+        <div className="flex lg:hidden items-center justify-between gap-2 bg-card/90 backdrop-blur p-2 rounded-lg border border-border mb-2">
+          <button
+            type="button"
+            onClick={() => setCaseListCollapsed(!caseListCollapsed)}
+            className="inline-flex items-center gap-1.5 rounded-md border border-border bg-background px-2.5 py-1.5 text-xs font-semibold text-foreground hover:bg-muted transition shadow-sm cursor-pointer"
+          >
+            <Boxes className="h-3.5 w-3.5 text-primary" />
+            <span>{caseListCollapsed ? `Show Cases (${cases.length})` : "Hide Cases"}</span>
+            {caseListCollapsed ? <ChevronRight className="h-3.5 w-3.5" /> : <ChevronLeft className="h-3.5 w-3.5" />}
+          </button>
+          {selected && (
+            <span className="text-xs font-mono font-medium text-muted-foreground truncate max-w-[160px]">
+              Case: <strong className="text-foreground">{selected}</strong>
+            </span>
+          )}
+        </div>
+      )}
 
-            <div className="relative">
-              <Users className="absolute left-2.5 top-2.5 h-4 w-4 text-muted-foreground" />
-              <select
-                value={who}
-                onChange={(e) => handleWhoChange(e.target.value)}
-                className="w-full rounded-md border border-border bg-background py-2 pl-8 pr-2 text-sm"
-              >
-                <option value="">Everyone&apos;s cases</option>
-                {annotators.map((a) => (
-                  <option key={a} value={a}>{a}</option>
-                ))}
-              </select>
-            </div>
-
-            <div className="space-y-1 overflow-y-auto rounded-lg border border-border p-1"
-              style={{ maxHeight: "min(calc(100vh - 250px), 1100px)" }}>
-              {visible.map((c) => (
+      {tab === "3d" && (
+        <div className={`grid gap-3 ${caseListCollapsed ? "grid-cols-1" : "lg:grid-cols-[230px_minmax(0,1fr)]"}`}>
+          {!caseListCollapsed && (
+            <div className="space-y-3 rounded-lg border border-border bg-card p-2.5">
+              <div className="flex items-center gap-1.5">
+                <div className="relative flex-1">
+                  <Search className="absolute left-2.5 top-2.5 h-4 w-4 text-muted-foreground" />
+                  <input
+                    value={q}
+                    onChange={(e) => handleQChange(e.target.value)}
+                    placeholder="Find case"
+                    className="w-full rounded-md border border-border bg-background py-1.5 pl-8 pr-2 text-sm"
+                  />
+                </div>
                 <button
-                  key={c.id}
-                  onClick={() => handleSelectCase(c.id)}
-                  title={c.sourceName ?? undefined}
-                  className={`flex w-full items-center gap-2 rounded-md px-2.5 py-2 text-left text-sm transition ${
-                    selected === c.id ? "bg-accent" : "hover:bg-accent/50"
-                  }`}
+                  type="button"
+                  onClick={() => setCaseListCollapsed(true)}
+                  title="Collapse case list"
+                  className="p-1.5 rounded border border-border bg-background text-muted-foreground hover:text-foreground hover:bg-muted transition cursor-pointer"
                 >
-                  {c.annotated ? (
-                    <CheckCircle2 className="h-4 w-4 shrink-0 text-emerald-500" />
-                  ) : ledger[c.id] ? (
-                    <Download className="h-4 w-4 shrink-0 text-amber-500" />
-                  ) : (
-                    <Circle className="h-4 w-4 shrink-0 text-muted-foreground/40" />
-                  )}
-                  <span className="flex-1">
-                    <span className="font-medium tabular-nums">{c.id}</span>
-                    {ledger[c.id]?.annotator && (
-                      <span className="block text-[10px] leading-tight text-muted-foreground">
-                        {c.annotated ? "by " : "ask "}{ledger[c.id].annotator}
+                  <ChevronLeft className="h-4 w-4" />
+                </button>
+              </div>
+
+              <div className="relative">
+                <Users className="absolute left-2.5 top-2.5 h-4 w-4 text-muted-foreground" />
+                <select
+                  value={who}
+                  onChange={(e) => handleWhoChange(e.target.value)}
+                  className="w-full rounded-md border border-border bg-background py-1.5 pl-8 pr-2 text-sm"
+                >
+                  <option value="">Everyone&apos;s cases</option>
+                  {annotators.map((a) => (
+                    <option key={a} value={a}>{a}</option>
+                  ))}
+                </select>
+              </div>
+
+              <div className="space-y-1 overflow-y-auto rounded-lg border border-border p-1"
+                style={{ maxHeight: "min(calc(100vh - 250px), 1100px)" }}>
+                {visible.map((c) => (
+                  <button
+                    key={c.id}
+                    onClick={() => handleSelectCase(c.id)}
+                    title={c.sourceName ?? undefined}
+                    className={`flex w-full items-center gap-2 rounded-md px-2.5 py-2 text-left text-sm transition cursor-pointer ${
+                      selected === c.id ? "bg-accent" : "hover:bg-accent/50"
+                    }`}
+                  >
+                    {c.annotated ? (
+                      <CheckCircle2 className="h-4 w-4 shrink-0 text-emerald-500" />
+                    ) : ledger[c.id] ? (
+                      <Download className="h-4 w-4 shrink-0 text-amber-500" />
+                    ) : (
+                      <Circle className="h-4 w-4 shrink-0 text-muted-foreground/40" />
+                    )}
+                    <span className="flex-1">
+                      <span className="font-medium tabular-nums">{c.id}</span>
+                      {ledger[c.id]?.annotator && (
+                        <span className="block text-[10px] leading-tight text-muted-foreground">
+                          {c.annotated ? "by " : "ask "}{ledger[c.id].annotator}
+                        </span>
+                      )}
+                    </span>
+                    {c.isotropic && (
+                      <span className="rounded bg-muted px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+                        Iso
                       </span>
                     )}
-                  </span>
-                  {c.isotropic && (
-                    <span className="rounded bg-muted px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
-                      Iso
-                    </span>
-                  )}
-                  <span
-                    className={`h-2 w-2 shrink-0 rounded-full ${
-                      c.cls === "bme" ? "bg-rose-500" : "bg-slate-400"
-                    }`}
-                    title={c.cls === "bme" ? "BME positive" : "No BME"}
-                  />
-                </button>
-              ))}
-              {visible.length === 0 && (
-                <p className="p-4 text-center text-xs text-muted-foreground">
-                  No cases match.
-                </p>
-              )}
-            </div>
+                    <span
+                      className={`h-2 w-2 shrink-0 rounded-full ${
+                        c.cls === "bme" ? "bg-rose-500" : "bg-slate-400"
+                      }`}
+                      title={c.cls === "bme" ? "BME positive" : "No BME"}
+                    />
+                  </button>
+                ))}
+                {visible.length === 0 && (
+                  <p className="p-4 text-center text-xs text-muted-foreground">
+                    No cases match.
+                  </p>
+                )}
+              </div>
 
-            <p className="text-xs text-muted-foreground">
-              <span className="mr-2 inline-block h-2 w-2 rounded-full bg-rose-500" />BME
-              <span className="ml-3 mr-2 inline-block h-2 w-2 rounded-full bg-slate-400" />No BME
-              <br />
-              <strong>Iso</strong> = thin slices, best for 3D. Annotate these first.
-              <br />
-              <Download className="mr-1 inline h-3 w-3 text-amber-500" />
-              means a teammate annotated it — ask them to send the file.
-            </p>
-          </div>
+              <p className="text-xs text-muted-foreground">
+                <span className="mr-2 inline-block h-2 w-2 rounded-full bg-rose-500" />BME
+                <span className="ml-3 mr-2 inline-block h-2 w-2 rounded-full bg-slate-400" />No BME
+                <br />
+                <strong>Iso</strong> = thin slices, best for 3D. Annotate these first.
+                <br />
+                <Download className="mr-1 inline h-3 w-3 text-amber-500" />
+                means a teammate annotated it — ask them to send the file.
+              </p>
+            </div>
+          )}
 
           <div>
+            {caseListCollapsed && (
+              <div className="mb-2 hidden lg:flex items-center">
+                <button
+                  type="button"
+                  onClick={() => setCaseListCollapsed(false)}
+                  className="inline-flex items-center gap-1.5 rounded-md border border-border bg-card px-2.5 py-1 text-xs font-semibold text-foreground hover:bg-muted transition shadow-sm cursor-pointer"
+                >
+                  <Boxes className="h-3.5 w-3.5 text-primary" />
+                  <span>Show Cases ({cases.length})</span>
+                </button>
+              </div>
+            )}
             {selected ? (
               <Viewer key={selected} caseId={selected} onSaved={load} />
             ) : (

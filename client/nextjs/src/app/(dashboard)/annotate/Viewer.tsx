@@ -1,7 +1,34 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { ChevronDown, ChevronUp, Eraser, Lasso, Link2, Link2Off, Loader2, Minus, Paintbrush, Plus, Redo2, RotateCcw, Save, SlidersHorizontal, Trash2, Users, XCircle } from "lucide-react";
+import {
+  Check,
+  ChevronDown,
+  ChevronLeft,
+  ChevronRight,
+  ChevronUp,
+  Eraser,
+  Flag,
+  Hand,
+  Lasso,
+  Link2,
+  Link2Off,
+  Loader2,
+  Maximize2,
+  Minus,
+  Paintbrush,
+  Plus,
+  Redo2,
+  RotateCcw,
+  RotateCw,
+  Save,
+  SlidersHorizontal,
+  Trash2,
+  Users,
+  XCircle,
+  ZoomIn,
+  ZoomOut,
+} from "lucide-react";
 import { toast } from "sonner";
 import { useSession } from "~/lib/auth-client";
 import Render3D from "./Render3D";
@@ -33,9 +60,9 @@ import { useCollaboration } from "~/lib/useCollaboration";
  */
 
 export const SEGMENTS = [
-  { value: 1, name: "bone_marrow", label: "Bone marrow", color: "#3ddc84" },
-  { value: 2, name: "bme", label: "Edema (BME)", color: "#f24c38" },
-  { value: 3, name: "uncertain", label: "Uncertain", color: "#8c8c99" },
+  { value: 1, name: "bone_marrow", label: "Bone marrow", color: "#3ddc84", stroke: "#22c55e", badge: "border-emerald-500/50 bg-emerald-500/10 text-emerald-400" },
+  { value: 2, name: "bme", label: "Edema (BME)", color: "#f24c38", stroke: "#ef4444", badge: "border-red-500/50 bg-red-500/10 text-red-400" },
+  { value: 3, name: "uncertain", label: "Uncertain", color: "#8c8c99", stroke: "#eab308", badge: "border-amber-500/50 bg-amber-500/10 text-amber-400" },
 ] as const;
 
 type Plane = "axial" | "coronal" | "sagittal";
@@ -166,6 +193,7 @@ export default function Viewer({ caseId, onSaved }: { caseId: string; onSaved?: 
   const [collabHostKey, setCollabHostKey] = useState<string | null>(null);
   const [toolbarCollapsed, setToolbarCollapsed] = useState(false);
   const [deletingMask, setDeletingMask] = useState(false);
+  const [savedSuccess, setSavedSuccess] = useState(false);
 
   // Hydrate active collaboration session from sessionStorage on reload / tab switch
   useEffect(() => {
@@ -587,47 +615,42 @@ export default function Viewer({ caseId, onSaved }: { caseId: string; onSaved?: 
     drawAll();
   }, [vol, labels, cursor, erasing, maskInside, seg, planeGeom, sliceOf, sampleAt, drawAll]);
 
-  // ---- keyboard --------------------------------------------------------
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      const mod = e.ctrlKey || e.metaKey;
-      if (mod && e.key.toLowerCase() === "z" && !e.shiftKey) { e.preventDefault(); undo(); return; }
-      if (mod && (e.key.toLowerCase() === "y" || (e.key.toLowerCase() === "z" && e.shiftKey))) {
-        e.preventDefault(); redo(); return;
+  const clearMask = useCallback(() => {
+    if (!labels) return;
+    pushUndo();
+    labels.fill(0);
+    setCounts([0, 0, 0]);
+    drawAll();
+    setDirty(true);
+    toast.info("Cleared 3D canvas mask");
+  }, [labels, pushUndo, drawAll]);
+
+  const deleteMask = async () => {
+    if (!confirm(`Delete saved 3D mask for ${caseId}?`)) return;
+    setDeletingMask(true);
+    try {
+      const res = await fetch(`/api/cases/${encodeURIComponent(caseId)}/mask`, {
+        method: "DELETE",
+      });
+      if (res.ok) {
+        clearMask();
+        toast.success(`Deleted saved 3D mask for ${caseId}`);
+      } else {
+        toast.error("Failed to delete mask from server");
       }
-      if (mod) return;
-      if (e.key === "1") setSeg(1);
-      else if (e.key === "2") setSeg(2);
-      else if (e.key === "3") setSeg(3);
-      else if (e.key.toLowerCase() === "e") setErasing((v) => !v);
-      else if (e.key.toLowerCase() === "p") setTool((v) => (v === "brush" ? "pencil" : "brush"));
-      else if (e.key.toLowerCase() === "l") setLocked((v) => !v);
-      else if (e.key === "Enter") { e.preventDefault(); commitOutline(); }
-      else if (e.key === "Escape") {
-        outline.current = []; pencilPlane.current = null; setOutlineTick((n) => n + 1); drawAll();
-      }
-      else if (e.key === "[") setBrush((b) => Math.max(1, b - 1));
-      else if (e.key === "]") setBrush((b) => Math.min(20, b + 1));
-      else if (["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight",
-                "PageUp", "PageDown"].includes(e.key)) {
-        if (!vol) return;
-        e.preventDefault();
-        const ax = vol.axes[activePlane].slice;
-        const depth = vol.dims[ax];
-        const big = e.key.startsWith("Page") ? 10 : 1;
-        const dir = (e.key === "ArrowUp" || e.key === "ArrowRight" || e.key === "PageUp") ? 1 : -1;
-        setCursor((c) => setAxis(c, ax, Math.min(depth - 1, Math.max(0, axisVal(c, ax) + dir * big))));
-      }
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [undo, redo, commitOutline, drawAll, vol, activePlane]);
+    } catch {
+      toast.error("Error deleting mask");
+    } finally {
+      setDeletingMask(false);
+    }
+  };
 
   // ---- save ------------------------------------------------------------
-  const save = async () => {
+  const save = useCallback(async () => {
     if (!labels) return;
     const total = counts[0] + counts[1] + counts[2];
     if (total === 0) {
+      toast.error("Cannot save empty annotation: No voxels annotated yet.");
       setStatus("Cannot save empty annotation: No voxels annotated yet.");
       return;
     }
@@ -660,43 +683,61 @@ export default function Viewer({ caseId, onSaved }: { caseId: string; onSaved?: 
         ? `Saved — recorded as annotated by ${me}`
         : "Saved to disk (not recorded: database unreachable)");
       setDirty(false);
+      setSavedSuccess(true);
+      setTimeout(() => setSavedSuccess(false), 2000);
+      toast.success(`Saved 3D mask for ${caseId}`);
       onSaved?.();
     } catch (e) {
-      setStatus(e instanceof Error ? e.message : "save failed");
+      const msg = e instanceof Error ? e.message : "save failed";
+      setStatus(msg);
+      toast.error(msg);
     } finally {
       setSaving(false);
     }
-  };
+  }, [labels, counts, caseId, onSaved, session]);
 
-  const clearMask = useCallback(() => {
-    if (!labels) return;
-    pushUndo();
-    labels.fill(0);
-    setCounts([0, 0, 0]);
-    drawAll();
-    setDirty(true);
-    toast.info("Cleared 3D canvas mask");
-  }, [labels, pushUndo, drawAll]);
-
-  const deleteMask = async () => {
-    if (!confirm(`Delete saved 3D mask for ${caseId}?`)) return;
-    setDeletingMask(true);
-    try {
-      const res = await fetch(`/api/cases/${encodeURIComponent(caseId)}/mask`, {
-        method: "DELETE",
-      });
-      if (res.ok) {
-        clearMask();
-        toast.success(`Deleted saved 3D mask for ${caseId}`);
-      } else {
-        toast.error("Failed to delete mask from server");
+  // ---- keyboard shortcuts (identical to 2D) ------------------------------
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return;
+      const mod = e.ctrlKey || e.metaKey;
+      if (mod && e.key.toLowerCase() === "z" && !e.shiftKey) { e.preventDefault(); undo(); return; }
+      if (mod && (e.key.toLowerCase() === "y" || (e.key.toLowerCase() === "z" && e.shiftKey))) {
+        e.preventDefault(); redo(); return;
       }
-    } catch {
-      toast.error("Error deleting mask");
-    } finally {
-      setDeletingMask(false);
-    }
-  };
+      if (mod && e.key.toLowerCase() === "s") {
+        e.preventDefault();
+        save();
+        return;
+      }
+      if (mod) return;
+      if (e.key === "1") { setSeg(1); setErasing(false); }
+      else if (e.key === "2") { setSeg(2); setErasing(false); }
+      else if (e.key === "3") { setSeg(3); setErasing(false); }
+      else if (e.key === "4" || e.key.toLowerCase() === "b") { setTool("brush"); setErasing(false); }
+      else if (e.key === "5" || e.key.toLowerCase() === "p") { setTool("pencil"); setErasing(false); }
+      else if (e.key === "0" || e.key.toLowerCase() === "e") setErasing((v) => !v);
+      else if (e.key.toLowerCase() === "l") setLocked((v) => !v);
+      else if (e.key === "Enter") { e.preventDefault(); commitOutline(); }
+      else if (e.key === "Escape") {
+        outline.current = []; pencilPlane.current = null; setOutlineTick((n) => n + 1); drawAll();
+      }
+      else if (e.key === "[") setBrush((b) => Math.max(1, b - 1));
+      else if (e.key === "]") setBrush((b) => Math.min(20, b + 1));
+      else if (["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight",
+                "PageUp", "PageDown"].includes(e.key)) {
+        if (!vol) return;
+        e.preventDefault();
+        const ax = vol.axes[activePlane].slice;
+        const depth = vol.dims[ax];
+        const big = e.key.startsWith("Page") ? 10 : 1;
+        const dir = (e.key === "ArrowUp" || e.key === "ArrowRight" || e.key === "PageUp") ? 1 : -1;
+        setCursor((c) => setAxis(c, ax, Math.min(depth - 1, Math.max(0, axisVal(c, ax) + dir * big))));
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [undo, redo, commitOutline, drawAll, vol, activePlane, save]);
 
   if (busy) {
     return (
@@ -711,101 +752,330 @@ export default function Viewer({ caseId, onSaved }: { caseId: string; onSaved?: 
 
   return (
     <div className="space-y-2">
-      {/* toolbar */}
-      <div className="flex flex-wrap items-center gap-2 rounded-lg border border-border bg-card p-2">
-        {SEGMENTS.map((s, i) => (
-          <button key={s.value}
-            onClick={() => { setSeg(s.value); setErasing(false); }}
-            title={`${s.label}  (key ${i + 1})`}
-            className={`inline-flex items-center gap-2 rounded-md border px-3 py-1.5 text-sm font-medium ${
-              seg === s.value && !erasing ? "border-primary bg-accent" : "border-border"
-            }`}>
-            <span className="h-3 w-3 rounded-sm" style={{ background: s.color }} />
-            {s.label}
-            <span className="tabular-nums text-xs text-muted-foreground">
-              {counts[s.value - 1].toLocaleString()}
+      {/* 3D Toolbar - Compact Bar vs Full Toolbar */}
+      {toolbarCollapsed ? (
+        <div className="flex items-center justify-between gap-2 rounded-lg border border-border bg-card p-2 overflow-x-auto py-1.5">
+          <div className="flex items-center gap-1.5 shrink-0">
+            {/* Compact Segment Pickers */}
+            <div className="flex items-center gap-1 bg-background/80 rounded-md border border-border p-0.5">
+              {SEGMENTS.map((s, i) => (
+                <button
+                  key={s.value}
+                  onClick={() => { setSeg(s.value); setErasing(false); }}
+                  title={`${s.label} (Key ${i + 1}) - ${counts[s.value - 1].toLocaleString()} voxels`}
+                  className={`p-1 rounded transition cursor-pointer ${
+                    seg === s.value && !erasing ? "bg-primary/20 ring-1 ring-primary" : "hover:bg-muted"
+                  }`}
+                >
+                  <span className="block h-3 w-3 rounded-full" style={{ backgroundColor: s.color }} />
+                </button>
+              ))}
+            </div>
+
+            <div className="h-4 w-px bg-border" />
+
+            {/* Tools */}
+            <button
+              type="button"
+              onClick={() => { setTool("brush"); setErasing(false); }}
+              title="Brush mode (Key 4 or B)"
+              className={`p-1.5 rounded transition border cursor-pointer ${
+                tool === "brush" && !erasing ? "bg-primary text-primary-foreground border-primary font-medium" : "border-border bg-background text-muted-foreground hover:text-foreground"
+              }`}
+            >
+              <Paintbrush className="h-3.5 w-3.5" />
+            </button>
+            <button
+              type="button"
+              onClick={() => { setTool("pencil"); setErasing(false); }}
+              title="Pencil mode (Key 5 or P)"
+              className={`p-1.5 rounded transition border cursor-pointer ${
+                tool === "pencil" && !erasing ? "bg-primary text-primary-foreground border-primary font-medium" : "border-border bg-background text-muted-foreground hover:text-foreground"
+              }`}
+            >
+              <Lasso className="h-3.5 w-3.5" />
+            </button>
+            <button
+              type="button"
+              onClick={() => setLocked((v) => !v)}
+              title={locked ? "Views locked: click to link (Key L)" : "Views linked: click to lock (Key L)"}
+              className={`p-1.5 rounded transition border cursor-pointer ${
+                !locked ? "border-primary bg-primary/20 text-primary" : "border-border bg-background text-muted-foreground hover:text-foreground"
+              }`}
+            >
+              {locked ? <Link2Off className="h-3.5 w-3.5" /> : <Link2 className="h-3.5 w-3.5" />}
+            </button>
+            <button
+              type="button"
+              onClick={() => setErasing((e) => !e)}
+              title="Eraser (Key 0 or E)"
+              className={`p-1.5 rounded transition border cursor-pointer ${
+                erasing ? "border-destructive bg-destructive/10 text-destructive ring-1 ring-destructive" : "border-border bg-background text-muted-foreground hover:text-foreground"
+              }`}
+            >
+              <Eraser className="h-3.5 w-3.5" />
+            </button>
+
+            <div className="h-4 w-px bg-border" />
+
+            {/* Undo / Redo */}
+            <button
+              type="button"
+              onClick={undo}
+              title="Undo (Ctrl+Z)"
+              className="p-1.5 rounded border border-border bg-background text-muted-foreground hover:text-foreground transition cursor-pointer"
+            >
+              <RotateCcw className="h-3.5 w-3.5" />
+            </button>
+            <button
+              type="button"
+              onClick={redo}
+              title="Redo (Ctrl+Y)"
+              className="p-1.5 rounded border border-border bg-background text-muted-foreground hover:text-foreground transition cursor-pointer"
+            >
+              <RotateCw className="h-3.5 w-3.5" />
+            </button>
+          </div>
+
+          {/* Compact Right Actions */}
+          <div className="flex items-center gap-1.5 shrink-0">
+            <button
+              onClick={clearMask}
+              title="Clear current 3D mask"
+              className="p-1.5 rounded border border-border bg-background text-muted-foreground hover:text-destructive transition cursor-pointer"
+            >
+              <Trash2 className="h-3.5 w-3.5" />
+            </button>
+            <button
+              type="button"
+              onClick={deleteMask}
+              disabled={deletingMask}
+              title="Delete saved 3D mask permanently"
+              className="p-1.5 rounded border border-destructive/40 bg-destructive/10 text-destructive hover:bg-destructive/20 transition cursor-pointer"
+            >
+              <XCircle className="h-3.5 w-3.5" />
+            </button>
+            <button
+              type="button"
+              onClick={startCollaboration}
+              disabled={startingCollab}
+              title={collabToken ? "Collab Panel" : "Start Collaboration"}
+              className="p-1.5 rounded border border-blue-500/40 bg-blue-500/10 text-blue-400 hover:bg-blue-500/20 transition cursor-pointer"
+            >
+              <Users className="h-3.5 w-3.5" />
+            </button>
+            <button
+              onClick={save}
+              disabled={saving || !dirty}
+              title="Save 3D Mask (Ctrl+S)"
+              className={`inline-flex items-center gap-1 rounded-md px-2.5 py-1 text-xs font-medium transition cursor-pointer ${
+                savedSuccess ? "bg-emerald-600 text-white" : "bg-primary text-primary-foreground hover:bg-primary/90 disabled:opacity-40"
+              }`}
+            >
+              {saving ? <Loader2 className="h-3 w-3 animate-spin" /> : savedSuccess ? <Check className="h-3 w-3" /> : <Save className="h-3 w-3" />}
+              <span>{savedSuccess ? "Saved!" : dirty ? "Save" : "Saved"}</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => setToolbarCollapsed(false)}
+              title="Expand full toolbar"
+              className="p-1.5 rounded border border-border bg-background text-muted-foreground hover:text-foreground transition cursor-pointer ml-1"
+            >
+              <ChevronDown className="h-3.5 w-3.5" />
+            </button>
+          </div>
+        </div>
+      ) : (
+        <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-border bg-card p-2.5">
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="text-xs font-semibold uppercase tracking-wider text-muted-foreground mr-1">
+              Label:
             </span>
-          </button>
-        ))}
+            {SEGMENTS.map((s, i) => (
+              <button
+                key={s.value}
+                onClick={() => { setSeg(s.value); setErasing(false); }}
+                title={`${s.label} (Key ${i + 1})`}
+                className={`inline-flex items-center gap-1.5 rounded-md px-2.5 py-1 text-xs font-medium border transition cursor-pointer ${
+                  seg === s.value && !erasing
+                    ? `${s.badge} ring-1 ring-primary`
+                    : "border-border bg-background text-muted-foreground hover:text-foreground"
+                }`}
+              >
+                <span className="h-2 w-2 rounded-full" style={{ backgroundColor: s.color }} />
+                {s.label}
+                <span className="text-[10px] opacity-60 tabular-nums">
+                  ({counts[s.value - 1].toLocaleString()})
+                </span>
+              </button>
+            ))}
 
-        <div className="mx-1 h-6 w-px bg-border" />
+            <div className="mx-1 h-5 w-px bg-border" />
 
-        <div className="inline-flex overflow-hidden rounded-md border border-border">
-          <button onClick={() => setTool("brush")} title="Brush  (P toggles)"
-            className={`inline-flex items-center gap-1.5 px-2.5 py-1.5 text-sm ${
-              tool === "brush" ? "bg-accent" : ""}`}>
-            <Paintbrush className="h-4 w-4" /> Brush
-          </button>
-          <button onClick={() => setTool("pencil")} title="Pencil — trace an outline, the inside fills  (P)"
-            className={`inline-flex items-center gap-1.5 border-l border-border px-2.5 py-1.5 text-sm ${
-              tool === "pencil" ? "bg-accent" : ""}`}>
-            <Lasso className="h-4 w-4" /> Pencil
-          </button>
+            {/* Tool Mode: Brush vs Pencil */}
+            <div className="inline-flex overflow-hidden rounded-md border border-border">
+              <button
+                type="button"
+                onClick={() => { setTool("brush"); setErasing(false); }}
+                title="Brush mode (Key 4 or B)"
+                className={`inline-flex items-center gap-1.5 px-2.5 py-1 text-xs transition cursor-pointer ${
+                  tool === "brush" ? "bg-primary text-primary-foreground font-medium" : "bg-background text-muted-foreground hover:text-foreground"
+                }`}
+              >
+                <Paintbrush className="h-3 w-3" /> Brush <span className="text-[10px] opacity-60">(4)</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => { setTool("pencil"); setErasing(false); }}
+                title="Pencil mode — trace an outline, the inside auto-fills (Key 5 or P)"
+                className={`inline-flex items-center gap-1.5 border-l border-border px-2.5 py-1 text-xs transition cursor-pointer ${
+                  tool === "pencil" ? "bg-primary text-primary-foreground font-medium" : "bg-background text-muted-foreground hover:text-foreground"
+                }`}
+              >
+                <Lasso className="h-3 w-3" /> Pencil <span className="text-[10px] opacity-60">(5)</span>
+              </button>
+            </div>
+
+            <button
+              onClick={() => setErasing((e) => !e)}
+              title="Toggle eraser mode (Key 0 or E)"
+              className={`inline-flex items-center gap-1.5 rounded-md px-2.5 py-1 text-xs font-medium border transition cursor-pointer ${
+                erasing
+                  ? "border-destructive bg-destructive/10 text-destructive ring-1 ring-destructive"
+                  : "border-border bg-background text-muted-foreground hover:text-foreground"
+              }`}
+            >
+              <Eraser className="h-3.5 w-3.5" /> Eraser <span className="text-[10px] opacity-60">(0)</span>
+            </button>
+
+            <label className="flex items-center gap-1.5 text-xs text-muted-foreground cursor-pointer select-none ml-1">
+              <input
+                type="checkbox"
+                checked={maskInside}
+                onChange={(e) => setMaskInside(e.target.checked)}
+                className="rounded border-border accent-primary h-3.5 w-3.5"
+              />
+              <span>Only inside bone</span>
+            </label>
+
+            <button
+              type="button"
+              onClick={() => setLocked((v) => !v)}
+              title={locked ? "Views locked: painting leaves other slices unchanged (Key L)" : "Views linked: clicking moves crosshair across all planes (Key L)"}
+              className={`inline-flex items-center gap-1.5 rounded-md border px-2 py-1 text-xs transition cursor-pointer ${
+                locked ? "border-border bg-background text-muted-foreground hover:text-foreground" : "border-primary bg-primary/20 text-primary font-medium"
+              }`}
+            >
+              {locked ? <Link2Off className="h-3 w-3" /> : <Link2 className="h-3 w-3" />}
+              <span>{locked ? "Locked" : "Linked"}</span>
+            </button>
+          </div>
+
+          <div className="flex items-center gap-3">
+            {tool === "brush" && (
+              <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
+                <Paintbrush className="h-3.5 w-3.5" />
+                <span>Size: {brush}px</span>
+                <input
+                  type="range"
+                  min={1}
+                  max={20}
+                  value={brush}
+                  onChange={(e) => setBrush(Number(e.target.value))}
+                  className="w-20 accent-primary"
+                />
+              </div>
+            )}
+
+            {/* Undo & Redo */}
+            <div className="inline-flex overflow-hidden rounded-md border border-border">
+              <button
+                type="button"
+                onClick={undo}
+                title="Undo (Ctrl+Z)"
+                className="inline-flex items-center gap-1 bg-background px-2 py-1 text-xs text-muted-foreground hover:text-foreground hover:bg-muted transition cursor-pointer"
+              >
+                <RotateCcw className="h-3 w-3" /> Undo
+              </button>
+              <button
+                type="button"
+                onClick={redo}
+                title="Redo (Ctrl+Y)"
+                className="inline-flex items-center gap-1 border-l border-border bg-background px-2 py-1 text-xs text-muted-foreground hover:text-foreground hover:bg-muted transition cursor-pointer"
+              >
+                <RotateCw className="h-3 w-3" /> Redo
+              </button>
+            </div>
+
+            {/* Collaboration Button */}
+            <button
+              type="button"
+              onClick={startCollaboration}
+              disabled={startingCollab}
+              className="inline-flex items-center gap-1.5 rounded-md border border-blue-500/40 bg-blue-500/10 px-2.5 py-1 text-xs font-semibold text-blue-400 hover:bg-blue-500/20 transition-all cursor-pointer"
+            >
+              <Users className="h-3.5 w-3.5" />
+              <span>{collabToken ? "Collab Panel" : "Start Collaboration"}</span>
+            </button>
+
+            {/* Clear Mask Button */}
+            <button
+              onClick={clearMask}
+              title="Clear current 3D canvas mask"
+              className="inline-flex items-center gap-1 rounded border border-border bg-background px-2 py-1 text-xs text-muted-foreground hover:text-destructive transition cursor-pointer"
+            >
+              <Trash2 className="h-3 w-3" />
+            </button>
+
+            {/* Delete Saved Mask */}
+            <button
+              type="button"
+              onClick={deleteMask}
+              disabled={deletingMask}
+              title="Delete saved 3D mask permanently from server"
+              className="inline-flex items-center gap-1 rounded border border-destructive/40 bg-destructive/10 px-2 py-1 text-xs text-destructive hover:bg-destructive/20 transition cursor-pointer"
+            >
+              <XCircle className="h-3 w-3" />
+              <span className="hidden sm:inline">Delete Mask</span>
+            </button>
+
+            {/* Save Mask */}
+            <button
+              onClick={save}
+              disabled={saving || !dirty}
+              title="Save 3D Mask (Ctrl+S)"
+              className={`inline-flex items-center gap-1.5 rounded-md px-3 py-1 text-xs font-medium transition cursor-pointer ${
+                savedSuccess
+                  ? "bg-emerald-600 text-white"
+                  : "bg-primary text-primary-foreground hover:bg-primary/90 disabled:opacity-40"
+              }`}
+            >
+              {saving ? (
+                <Loader2 className="h-3.5 w-3.5 animate-spin" />
+              ) : savedSuccess ? (
+                <Check className="h-3.5 w-3.5" />
+              ) : (
+                <Save className="h-3.5 w-3.5" />
+              )}
+              {savedSuccess ? "Saved!" : dirty ? "Save Mask" : "Saved"}
+            </button>
+
+            {/* Collapse Toolbar Toggle */}
+            <button
+              type="button"
+              onClick={() => setToolbarCollapsed(true)}
+              title="Collapse to compact toolbar"
+              className="p-1 rounded border border-border bg-background text-muted-foreground hover:text-foreground transition cursor-pointer"
+            >
+              <ChevronUp className="h-3.5 w-3.5" />
+            </button>
+          </div>
         </div>
-
-        <button onClick={() => setErasing((e) => !e)} title="Toggle erase  (E)"
-          className={`inline-flex items-center gap-1.5 rounded-md border px-3 py-1.5 text-sm ${
-            erasing ? "border-primary bg-accent" : "border-border"
-          }`}>
-          <Eraser className="h-4 w-4" />
-          {erasing ? "Erasing" : "Erase"}
-        </button>
-
-        <label className="flex items-center gap-2 text-sm text-muted-foreground" title="[ and ]">
-          Brush
-          <input type="range" min={1} max={20} value={brush}
-            onChange={(e) => setBrush(Number(e.target.value))} className="w-24" />
-          <span className="w-6 tabular-nums">{brush}</span>
-        </label>
-
-        <label className="flex items-center gap-2 text-sm text-muted-foreground">
-          <input type="checkbox" checked={maskInside}
-            onChange={(e) => setMaskInside(e.target.checked)} />
-          Only inside bone
-        </label>
-
-        <button onClick={() => setLocked((v) => !v)}
-          title={locked
-            ? "Views locked: painting leaves the other two slices where they are"
-            : "Views linked: clicking moves the crosshair and the other two follow"}
-          className={`inline-flex items-center gap-1.5 rounded-md border px-2.5 py-1.5 text-sm ${
-            locked ? "border-border" : "border-primary bg-accent"}`}>
-          {locked ? <Link2Off className="h-4 w-4" /> : <Link2 className="h-4 w-4" />}
-          {locked ? "Views locked" : "Views linked"}
-        </button>
-
-        <div className="ml-auto flex items-center gap-2">
-          <button onClick={undo} title="Undo  (Ctrl+Z)"
-            className="inline-flex items-center gap-1.5 rounded-md border border-border px-2.5 py-1.5 text-sm">
-            <RotateCcw className="h-4 w-4" />
-          </button>
-          <button onClick={redo} title="Redo  (Ctrl+Y)"
-            className="inline-flex items-center gap-1.5 rounded-md border border-border px-2.5 py-1.5 text-sm">
-            <Redo2 className="h-4 w-4" />
-          </button>
-          <button
-            onClick={startCollaboration}
-            disabled={startingCollab}
-            className="inline-flex items-center gap-1.5 rounded-md border border-blue-500/40 bg-blue-500/10 px-3 py-1.5 text-sm font-semibold text-blue-400 hover:bg-blue-500/20 transition-all"
-          >
-            <Users className="h-4 w-4" />
-            {collabToken ? "Collaboration Panel" : "Start Collaboration"}
-          </button>
-          <button onClick={save} disabled={saving || !dirty}
-            className="inline-flex items-center gap-1.5 rounded-md bg-primary px-3 py-1.5 text-sm font-medium text-primary-foreground disabled:opacity-40">
-            {saving ? <Loader2 className="h-4 w-4 animate-spin" /> : <Save className="h-4 w-4" />}
-            {dirty ? "Save" : "Saved"}
-          </button>
-        </div>
-      </div>
+      )}
 
       {/* Four-Up: three orthogonal views plus an info panel, as in Slicer */}
       <div
-        className="grid gap-1.5 lg:grid-cols-2 lg:grid-rows-2"
-        // Fit the four views in the viewport rather than forcing square tiles,
-        // which pushed the bottom two below the fold and made checking a lesion
-        // across planes a scrolling exercise.
-        style={{ height: "min(calc(100vh - 215px), 1100px)", minHeight: 440 }}
+        className="grid gap-2 grid-cols-1 md:grid-cols-2 lg:grid-rows-2 min-h-0 lg:h-[min(calc(100vh-215px),1100px)]"
       >
         {PLANES.map((p) => {
           const g = planeGeom(p, vol);

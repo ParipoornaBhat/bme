@@ -99,7 +99,7 @@ const participantKeys = new Map<string, string>();
 // Built from bytes rather than Buffer#toString("hex"), which does not
 // typecheck against this package's @types/node (see generateSessionToken).
 function randomSecret(bytes = 24): string {
-  return Array.from(crypto.randomBytes(bytes), (b) => b.toString(16).padStart(2, "0")).join("");
+  return randomBytes(bytes).toString("hex");
 }
 
 export function generateSessionToken(): string {

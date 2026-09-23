@@ -5,6 +5,10 @@ import {
   AlertTriangle,
   Check,
   CheckCircle2,
+  ChevronDown,
+  ChevronLeft,
+  ChevronRight,
+  ChevronUp,
   Eraser,
   Flag,
   Hand,
@@ -21,6 +25,7 @@ import {
   RotateCw,
   Save,
   Search,
+  SlidersHorizontal,
   Trash2,
   Users,
   X,
@@ -236,6 +241,27 @@ export default function Painter2D({
         DOWNLOAD: false,
       };
 
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+  const [toolbarCollapsed, setToolbarCollapsed] = useState(false);
+
+  // Restore active collaboration session on reload / tab switch
+  useEffect(() => {
+    try {
+      const savedToken = sessionStorage.getItem("bme_active_collab_token");
+      const savedHostKey = sessionStorage.getItem("bme_active_collab_host_key");
+      if (savedToken && !collabToken && !isCollaborator) {
+        setCollabToken(savedToken);
+        setCollabHostKey(savedHostKey || null);
+        const baseOrigin =
+          process.env.NEXT_PUBLIC_APP_URL &&
+          !process.env.NEXT_PUBLIC_APP_URL.includes("localhost")
+            ? process.env.NEXT_PUBLIC_APP_URL.replace(/\/$/, "")
+            : window.location.origin;
+        setShareUrl(`${baseOrigin}/collaborate/${savedToken}`);
+      }
+    } catch { /* ignore */ }
+  }, [collabToken, isCollaborator]);
+
   const startCollaboration = async () => {
     if (collabToken) {
       setShowMasterPanel(true);
@@ -282,6 +308,10 @@ export default function Painter2D({
         setCollabToken(data.token);
         setShareUrl(shareUrl);
         setShowMasterPanel(true);
+        try {
+          sessionStorage.setItem("bme_active_collab_token", data.token);
+          if (data.hostKey) sessionStorage.setItem("bme_active_collab_host_key", data.hostKey);
+        } catch { /* ignore */ }
       }
     } catch (err) {
       console.error("Failed to start 2D collaboration:", err);
@@ -1700,23 +1730,57 @@ export default function Painter2D({
         />
       )}
 
-      <div className={`grid gap-3 ${(!isCollaborator || permissions.SLICE_CONTROL) ? "lg:grid-cols-[270px_minmax(0,1fr)]" : "grid-cols-1"} h-[calc(100vh-115px)]`}>
-        {/* Left sidebar: Slice list */}
+      {/* Mobile/Tablet Floating Bar for Controls */}
+      <div className="flex lg:hidden items-center justify-between gap-2 bg-card/90 backdrop-blur p-2 rounded-lg border border-border">
         {(!isCollaborator || permissions.SLICE_CONTROL) && (
+          <button
+            type="button"
+            onClick={() => setSidebarCollapsed(!sidebarCollapsed)}
+            className="inline-flex items-center gap-1.5 rounded-md border border-border bg-background px-2.5 py-1.5 text-xs font-semibold text-foreground hover:bg-muted transition shadow-sm cursor-pointer"
+          >
+            <Layers className="h-3.5 w-3.5 text-primary" />
+            <span>{sidebarCollapsed ? `Show Slices (${slices.length})` : "Hide Slices"}</span>
+            {sidebarCollapsed ? <ChevronRight className="h-3.5 w-3.5" /> : <ChevronLeft className="h-3.5 w-3.5" />}
+          </button>
+        )}
+        <button
+          type="button"
+          onClick={() => setToolbarCollapsed(!toolbarCollapsed)}
+          className="inline-flex items-center gap-1.5 rounded-md border border-border bg-background px-2.5 py-1.5 text-xs font-semibold text-foreground hover:bg-muted transition shadow-sm cursor-pointer"
+        >
+          <SlidersHorizontal className="h-3.5 w-3.5 text-primary" />
+          <span>{toolbarCollapsed ? "Show Full Tools" : "Compact Tools"}</span>
+          {toolbarCollapsed ? <ChevronDown className="h-3.5 w-3.5" /> : <ChevronUp className="h-3.5 w-3.5" />}
+        </button>
+      </div>
+
+      <div className={`grid gap-3 ${(!isCollaborator || permissions.SLICE_CONTROL) && !sidebarCollapsed ? "lg:grid-cols-[270px_minmax(0,1fr)]" : "grid-cols-1"} min-h-[calc(100vh-140px)] lg:h-[calc(100vh-115px)]`}>
+        {/* Left sidebar: Slice list */}
+        {(!isCollaborator || permissions.SLICE_CONTROL) && !sidebarCollapsed && (
           <div className="flex flex-col gap-2 rounded-lg border border-border bg-card p-2.5 h-full overflow-hidden">
-            <div className="relative">
-              <Search className="absolute left-2.5 top-2.5 h-4 w-4 text-muted-foreground" />
-              <input
-                value={query}
-                onChange={(e) => {
-                  setQuery(e.target.value);
-                  try {
-                    localStorage.setItem("bme_painter2d_query", e.target.value);
-                  } catch { /* ignore */ }
-                }}
-                placeholder="Search 2D slices..."
-                className="w-full rounded-md border border-border bg-background py-1.5 pl-8 pr-2 text-sm"
-              />
+            <div className="flex items-center gap-1.5">
+              <div className="relative flex-1">
+                <Search className="absolute left-2.5 top-2.5 h-4 w-4 text-muted-foreground" />
+                <input
+                  value={query}
+                  onChange={(e) => {
+                    setQuery(e.target.value);
+                    try {
+                      localStorage.setItem("bme_painter2d_query", e.target.value);
+                    } catch { /* ignore */ }
+                  }}
+                  placeholder="Search 2D slices..."
+                  className="w-full rounded-md border border-border bg-background py-1.5 pl-8 pr-2 text-sm"
+                />
+              </div>
+              <button
+                type="button"
+                onClick={() => setSidebarCollapsed(true)}
+                title="Collapse slice list"
+                className="p-1.5 rounded border border-border bg-background text-muted-foreground hover:text-foreground hover:bg-muted transition cursor-pointer"
+              >
+                <ChevronLeft className="h-4 w-4" />
+              </button>
             </div>
 
             <div className="flex flex-wrap gap-1 text-xs">
@@ -1859,296 +1923,503 @@ export default function Painter2D({
 
         {/* Right side: 2D Canvas Editor */}
         <div className="flex flex-col gap-2 rounded-lg border border-border bg-card p-3 h-full overflow-hidden">
-          {/* Editor Toolbar */}
-          <div className="flex flex-wrap items-center justify-between gap-3 border-b border-border pb-3">
-            {(!isCollaborator || permissions.ANNOTATE) ? (
-              <div className="flex flex-wrap items-center gap-2">
-                <span className="text-xs font-semibold uppercase tracking-wider text-muted-foreground mr-1">
-                  Label:
-                </span>
-                {LABELS.map((l) => (
-                  <button
-                    key={l.id}
-                    onClick={() => { setActiveLabel(l.id); setIsErasing(false); }}
-                    className={`inline-flex items-center gap-1.5 rounded-md px-2.5 py-1 text-xs font-medium border transition ${
-                      !isErasing && activeLabel === l.id
-                        ? `${l.badge} ring-1 ring-primary`
-                        : "border-border bg-background text-muted-foreground hover:text-foreground"
-                    }`}
-                  >
-                    <span className="h-2 w-2 rounded-full" style={{ backgroundColor: l.stroke }} />
-                    {l.name} <span className="text-[10px] opacity-60">({l.id})</span>
-                  </button>
-                ))}
-
-                <div className="mx-1 h-5 w-px bg-border" />
-
-                {/* Tool Mode: Brush (4) vs Pencil (5) vs Hand (6) */}
-                <div className="inline-flex overflow-hidden rounded-md border border-border">
+          {/* Editor Toolbar - Compact Bar vs Full Toolbar */}
+          {toolbarCollapsed ? (
+            <div className="flex items-center justify-between gap-2 border-b border-border pb-2.5 overflow-x-auto py-1">
+              <div className="flex items-center gap-1.5 shrink-0">
+                {sidebarCollapsed && (!isCollaborator || permissions.SLICE_CONTROL) && (
                   <button
                     type="button"
-                    onClick={() => setTool("brush")}
-                    title="Brush mode (Key 4 or B)"
-                    className={`inline-flex items-center gap-1.5 px-2.5 py-1 text-xs transition ${
-                      tool === "brush" ? "bg-primary text-primary-foreground font-medium" : "bg-background text-muted-foreground hover:text-foreground"
-                    }`}
+                    onClick={() => setSidebarCollapsed(false)}
+                    title="Show slice list"
+                    className="inline-flex items-center gap-1 rounded border border-border bg-background px-2 py-1 text-xs text-muted-foreground hover:text-foreground transition cursor-pointer"
                   >
-                    <Paintbrush className="h-3 w-3" /> Brush <span className="text-[10px] opacity-60">(4)</span>
+                    <Layers className="h-3.5 w-3.5 text-primary" />
+                    <span className="hidden sm:inline">Slices</span>
                   </button>
-                  <button
-                    type="button"
-                    onClick={() => setTool("pencil")}
-                    title="Pencil mode — trace an outline, the inside auto-fills (Key 5 or P)"
-                    className={`inline-flex items-center gap-1.5 border-l border-border px-2.5 py-1 text-xs transition ${
-                      tool === "pencil" ? "bg-primary text-primary-foreground font-medium" : "bg-background text-muted-foreground hover:text-foreground"
-                    }`}
-                  >
-                    <Lasso className="h-3 w-3" /> Pencil <span className="text-[10px] opacity-60">(5)</span>
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setTool("pan")}
-                    title="Hand mode — click & drag to pan canvas (Key 6 or H)"
-                    className={`inline-flex items-center gap-1.5 border-l border-border px-2.5 py-1 text-xs transition ${
-                      tool === "pan" ? "bg-primary text-primary-foreground font-medium" : "bg-background text-muted-foreground hover:text-foreground"
-                    }`}
-                  >
-                    <Hand className="h-3 w-3" /> Hand <span className="text-[10px] opacity-60">(6)</span>
-                  </button>
-                </div>
+                )}
 
-                <button
-                  onClick={() => setIsErasing((e) => !e)}
-                  title="Toggle eraser mode (Key 0 or E)"
-                  className={`inline-flex items-center gap-1.5 rounded-md px-2.5 py-1 text-xs font-medium border transition ${
-                    isErasing
-                      ? "border-destructive bg-destructive/10 text-destructive ring-1 ring-destructive"
-                      : "border-border bg-background text-muted-foreground hover:text-foreground"
-                  }`}
-                >
-                  <Eraser className="h-3.5 w-3.5" /> Eraser <span className="text-[10px] opacity-60">(0)</span>
-                </button>
+                {(!isCollaborator || permissions.ANNOTATE) ? (
+                  <>
+                    {/* Compact Label Pickers */}
+                    <div className="flex items-center gap-1 bg-background/80 rounded-md border border-border p-0.5">
+                      {LABELS.map((l) => (
+                        <button
+                          key={l.id}
+                          onClick={() => { setActiveLabel(l.id); setIsErasing(false); }}
+                          title={`${l.name} (${l.id})`}
+                          className={`p-1 rounded transition cursor-pointer ${
+                            !isErasing && activeLabel === l.id ? "bg-primary/20 ring-1 ring-primary" : "hover:bg-muted"
+                          }`}
+                        >
+                          <span className="block h-3 w-3 rounded-full" style={{ backgroundColor: l.stroke }} />
+                        </button>
+                      ))}
+                    </div>
 
-                <label className="flex items-center gap-1.5 text-xs text-muted-foreground cursor-pointer select-none ml-1">
-                  <input
-                    type="checkbox"
-                    checked={maskInside}
-                    onChange={(e) => setMaskInside(e.target.checked)}
-                    className="rounded border-border accent-primary h-3.5 w-3.5"
-                  />
-                  <span>Only inside bone</span>
-                </label>
-              </div>
-            ) : (
-              <div className="flex items-center gap-2 rounded-md bg-blue-500/10 border border-blue-500/20 px-3 py-1 text-xs text-blue-400 font-medium">
-                <Lock className="h-3.5 w-3.5 text-blue-400" />
-                <span>Read-Only Review Mode — Drawing locked by Master</span>
-              </div>
-            )}
+                    <div className="h-4 w-px bg-border" />
 
-            <div className="flex items-center gap-3">
-              {(!isCollaborator || permissions.ANNOTATE) && tool === "brush" && (
-                <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
-                  <Paintbrush className="h-3.5 w-3.5" />
-                  <span>Size: {brushSize}px</span>
-                  <input
-                    type="range"
-                    min={2}
-                    max={50}
-                    value={brushSize}
-                    onChange={(e) => setBrushSize(Number(e.target.value))}
-                    className="w-20 accent-primary"
-                  />
-                </div>
-              )}
+                    {/* Tools */}
+                    <button
+                      type="button"
+                      onClick={() => { setTool("brush"); setIsErasing(false); }}
+                      title="Brush mode (Key 4 or B)"
+                      className={`p-1.5 rounded transition border cursor-pointer ${
+                        tool === "brush" && !isErasing ? "bg-primary text-primary-foreground border-primary font-medium" : "border-border bg-background text-muted-foreground hover:text-foreground"
+                      }`}
+                    >
+                      <Paintbrush className="h-3.5 w-3.5" />
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => { setTool("pencil"); setIsErasing(false); }}
+                      title="Pencil mode (Key 5 or P)"
+                      className={`p-1.5 rounded transition border cursor-pointer ${
+                        tool === "pencil" && !isErasing ? "bg-primary text-primary-foreground border-primary font-medium" : "border-border bg-background text-muted-foreground hover:text-foreground"
+                      }`}
+                    >
+                      <Lasso className="h-3.5 w-3.5" />
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setTool("pan")}
+                      title="Hand mode (Key 6 or H)"
+                      className={`p-1.5 rounded transition border cursor-pointer ${
+                        tool === "pan" ? "bg-primary text-primary-foreground border-primary font-medium" : "border-border bg-background text-muted-foreground hover:text-foreground"
+                      }`}
+                    >
+                      <Hand className="h-3.5 w-3.5" />
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setIsErasing((e) => !e)}
+                      title="Eraser (Key 0 or E)"
+                      className={`p-1.5 rounded transition border cursor-pointer ${
+                        isErasing ? "border-destructive bg-destructive/10 text-destructive ring-1 ring-destructive" : "border-border bg-background text-muted-foreground hover:text-foreground"
+                      }`}
+                    >
+                      <Eraser className="h-3.5 w-3.5" />
+                    </button>
 
-              {/* Zoom Controls */}
-              <div className="flex items-center gap-1 border-l border-border pl-2">
-                <button
-                  type="button"
-                  disabled={isCollaborator && !permissions.ZOOM_PAN}
-                  onClick={() => setZoom((z) => Math.max(0.4, Number((z - 0.2).toFixed(1))))}
-                  title={isCollaborator && !permissions.ZOOM_PAN ? "Zoom locked by Master" : "Zoom Out"}
-                  className="inline-flex items-center justify-center h-7 w-7 rounded border border-border bg-background text-muted-foreground hover:text-foreground disabled:opacity-40 disabled:cursor-not-allowed transition"
-                >
-                  <ZoomOut className="h-3.5 w-3.5" />
-                </button>
-                <button
-                  type="button"
-                  disabled={isCollaborator && !permissions.ZOOM_PAN}
-                  onClick={resetZoom}
-                  title="Reset Zoom to 100%"
-                  className="px-1.5 py-0.5 rounded text-xs font-mono font-medium text-muted-foreground hover:text-foreground hover:bg-muted disabled:opacity-40 disabled:cursor-not-allowed"
-                >
-                  {Math.round(zoom * 100)}%
-                </button>
-                <button
-                  type="button"
-                  disabled={isCollaborator && !permissions.ZOOM_PAN}
-                  onClick={() => setZoom((z) => Math.min(4, Number((z + 0.2).toFixed(1))))}
-                  title={isCollaborator && !permissions.ZOOM_PAN ? "Zoom locked by Master" : "Zoom In"}
-                  className="inline-flex items-center justify-center h-7 w-7 rounded border border-border bg-background text-muted-foreground hover:text-foreground disabled:opacity-40 disabled:cursor-not-allowed transition"
-                >
-                  <ZoomIn className="h-3.5 w-3.5" />
-                </button>
-                <button
-                  type="button"
-                  disabled={isCollaborator && !permissions.ZOOM_PAN}
-                  onClick={resetZoom}
-                  title="Fit / Reset"
-                  className="inline-flex items-center justify-center h-7 w-7 rounded border border-border bg-background text-muted-foreground hover:text-foreground disabled:opacity-40 disabled:cursor-not-allowed transition"
-                >
-                  <Maximize2 className="h-3.5 w-3.5" />
-                </button>
+                    <div className="h-4 w-px bg-border" />
+
+                    {/* Undo / Redo */}
+                    <button
+                      type="button"
+                      onClick={undo}
+                      title="Undo (Ctrl+Z)"
+                      className="p-1.5 rounded border border-border bg-background text-muted-foreground hover:text-foreground transition cursor-pointer"
+                    >
+                      <RotateCcw className="h-3.5 w-3.5" />
+                    </button>
+                    <button
+                      type="button"
+                      onClick={redo}
+                      title="Redo (Ctrl+Y)"
+                      className="p-1.5 rounded border border-border bg-background text-muted-foreground hover:text-foreground transition cursor-pointer"
+                    >
+                      <RotateCw className="h-3.5 w-3.5" />
+                    </button>
+                  </>
+                ) : (
+                  <div className="flex items-center gap-1.5 rounded-md bg-blue-500/10 border border-blue-500/20 px-2 py-1 text-xs text-blue-400 font-medium">
+                    <Lock className="h-3 w-3 text-blue-400" />
+                    <span className="hidden sm:inline">Review Mode</span>
+                  </div>
+                )}
               </div>
 
-              {/* Undo & Redo (only when annotation allowed) */}
-              {(!isCollaborator || permissions.ANNOTATE) && (
-                <div className="inline-flex overflow-hidden rounded-md border border-border">
-                  <button
-                    type="button"
-                    onClick={undo}
-                    title="Undo (Ctrl+Z)"
-                    className="inline-flex items-center gap-1 bg-background px-2 py-1 text-xs text-muted-foreground hover:text-foreground hover:bg-muted transition"
-                  >
-                    <RotateCcw className="h-3 w-3" /> Undo
-                  </button>
-                  <button
-                    type="button"
-                    onClick={redo}
-                    title="Redo (Ctrl+Shift+Z or Ctrl+Y)"
-                    className="inline-flex items-center gap-1 border-l border-border bg-background px-2 py-1 text-xs text-muted-foreground hover:text-foreground hover:bg-muted transition"
-                  >
-                    <RotateCw className="h-3 w-3" /> Redo
-                  </button>
-                </div>
-              )}
-
-              {/* Flag Slice button */}
-              <button
-                type="button"
-                onClick={() => {
-                  if (selected) {
-                    setFlagReason(selected.flagReason || "Not Sure");
-                    setFlagNote(selected.flagNote || "");
-                    setFlagModalOpen(true);
-                  }
-                }}
-                title={
-                  selected?.flagged
-                    ? `Flagged: ${selected.flagReason || "Not Sure"}`
-                    : "Flag this annotation for review (e.g. Not Sure)"
-                }
-                className={`inline-flex items-center gap-1.5 rounded-md px-2.5 py-1 text-xs font-medium border transition ${
-                  selected?.flagged
-                    ? "border-amber-500/50 bg-amber-500/15 text-amber-500 hover:bg-amber-500/25 ring-1 ring-amber-500/30"
-                    : "border-border bg-background text-muted-foreground hover:text-foreground"
-                }`}
-              >
-                <Flag className={`h-3.5 w-3.5 ${selected?.flagged ? "fill-amber-500 text-amber-500" : ""}`} />
-                <span>{selected?.flagged ? "Flagged" : "Flag"}</span>
-              </button>
-
-              {/* Auto Save (only when annotation allowed) */}
-              {(!isCollaborator || permissions.ANNOTATE) && (
-                <div className="flex items-center gap-1.5 border-l border-border pl-2">
-                  <label
-                    className="flex items-center gap-1.5 text-xs text-muted-foreground cursor-pointer select-none"
-                    title="Auto-save annotation mask after each stroke/edit"
-                  >
-                    <input
-                      type="checkbox"
-                      checked={autoSave}
-                      onChange={(e) => {
-                        setAutoSave(e.target.checked);
-                        try {
-                          localStorage.setItem("bme_painter2d_autosave", e.target.checked ? "true" : "false");
-                        } catch { /* ignore */ }
-                        if (e.target.checked) toast.success("Auto Save enabled");
-                        else toast.info("Auto Save disabled");
-                      }}
-                      className="rounded border-border accent-primary h-3.5 w-3.5"
-                    />
-                    <span className="font-medium">Auto Save</span>
-                  </label>
-                  {autoSaveStatus && (
-                    <span className="text-[10px] text-muted-foreground font-mono truncate max-w-[130px]">
-                      {autoSaveStatus}
-                    </span>
-                  )}
-                </div>
-              )}
-
-              {/* Collaboration Button (Master only) vs Participant Indicator (Collaborator) */}
-              {!isCollaborator ? (
-                <button
-                  type="button"
-                  onClick={startCollaboration}
-                  disabled={startingCollab}
-                  className="inline-flex items-center gap-1.5 rounded-md border border-blue-500/40 bg-blue-500/10 px-2.5 py-1 text-xs font-semibold text-blue-400 hover:bg-blue-500/20 transition-all"
-                >
-                  <Users className="h-3.5 w-3.5" />
-                  <span>{collabToken ? "Collab Panel" : "Start Collaboration"}</span>
-                </button>
-              ) : (
-                <div className="flex items-center gap-1.5 rounded-md border border-blue-500/30 bg-blue-500/10 px-2.5 py-1 text-xs font-medium text-blue-300">
-                  <Users className="h-3.5 w-3.5" />
-                  <span>Review Session ({collab.participants.length})</span>
-                </div>
-              )}
-
-              {/* Clear Mask Button (only if delete permission) */}
-              {(!isCollaborator || permissions.DELETE_ANNOTATION) && (
-                <button
-                  onClick={clearMask}
-                  title="Clear current canvas mask"
-                  className="inline-flex items-center gap-1 rounded border border-border bg-background px-2 py-1 text-xs text-muted-foreground hover:text-destructive"
-                >
-                  <Trash2 className="h-3 w-3" />
-                </button>
-              )}
-
-              {/* Delete Saved Mask (Master only or if delete permission) */}
-              {selected?.hasMask && (!isCollaborator || permissions.DELETE_ANNOTATION) && (
+              {/* Compact Right Actions */}
+              <div className="flex items-center gap-1.5 shrink-0">
+                {/* Flag Slice Button */}
                 <button
                   type="button"
                   onClick={() => {
-                    if (confirm(`Delete saved mask for ${selected.caseId} (${selected.stem})?`)) {
-                      deleteMask();
+                    if (selected) {
+                      setFlagReason(selected.flagReason || "Not Sure");
+                      setFlagNote(selected.flagNote || "");
+                      setFlagModalOpen(true);
                     }
                   }}
-                  disabled={deletingMask}
-                  title="Delete saved mask permanently from server"
-                  className="inline-flex items-center gap-1 rounded border border-destructive/40 bg-destructive/10 px-2 py-1 text-xs text-destructive hover:bg-destructive/20 transition"
-                >
-                  <XCircle className="h-3 w-3" />
-                  <span className="hidden sm:inline">Delete Mask</span>
-                </button>
-              )}
-
-              {/* Save Mask (only if annotate or edit permission) */}
-              {(!isCollaborator || permissions.ANNOTATE || permissions.EDIT_ANNOTATION) && (
-                <button
-                  onClick={saveMask}
-                  disabled={saving || !selected}
-                  className={`inline-flex items-center gap-1.5 rounded-md px-3 py-1 text-xs font-medium transition ${
-                    savedSuccess
-                      ? "bg-emerald-600 text-white"
-                      : "bg-primary text-primary-foreground hover:bg-primary/90"
+                  title={selected?.flagged ? `Flagged: ${selected.flagReason || "Not Sure"}` : "Flag slice"}
+                  className={`p-1.5 rounded border transition cursor-pointer ${
+                    selected?.flagged ? "border-amber-500/50 bg-amber-500/15 text-amber-500" : "border-border bg-background text-muted-foreground hover:text-foreground"
                   }`}
                 >
-                  {saving ? (
-                    <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                  ) : savedSuccess ? (
-                    <Check className="h-3.5 w-3.5" />
-                  ) : (
-                    <Save className="h-3.5 w-3.5" />
-                  )}
-                  {savedSuccess ? "Saved!" : "Save Mask"}
+                  <Flag className={`h-3.5 w-3.5 ${selected?.flagged ? "fill-amber-500 text-amber-500" : ""}`} />
                 </button>
-              )}
+
+                {(!isCollaborator || permissions.DELETE_ANNOTATION) && (
+                  <button
+                    onClick={clearMask}
+                    title="Clear current canvas mask"
+                    className="p-1.5 rounded border border-border bg-background text-muted-foreground hover:text-destructive transition cursor-pointer"
+                  >
+                    <Trash2 className="h-3.5 w-3.5" />
+                  </button>
+                )}
+                {selected?.hasMask && (!isCollaborator || permissions.DELETE_ANNOTATION) && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      if (confirm(`Delete saved mask for ${selected.caseId} (${selected.stem})?`)) {
+                        deleteMask();
+                      }
+                    }}
+                    disabled={deletingMask}
+                    title="Delete saved mask permanently"
+                    className="p-1.5 rounded border border-destructive/40 bg-destructive/10 text-destructive hover:bg-destructive/20 transition cursor-pointer"
+                  >
+                    <XCircle className="h-3.5 w-3.5" />
+                  </button>
+                )}
+                {!isCollaborator ? (
+                  <button
+                    type="button"
+                    onClick={startCollaboration}
+                    disabled={startingCollab}
+                    title={collabToken ? "Collab Panel" : "Start Collaboration"}
+                    className="p-1.5 rounded border border-blue-500/40 bg-blue-500/10 text-blue-400 hover:bg-blue-500/20 transition cursor-pointer"
+                  >
+                    <Users className="h-3.5 w-3.5" />
+                  </button>
+                ) : null}
+                {(!isCollaborator || permissions.ANNOTATE || permissions.EDIT_ANNOTATION) && (
+                  <button
+                    onClick={saveMask}
+                    disabled={saving || !selected}
+                    title="Save Mask (Ctrl+S)"
+                    className={`inline-flex items-center gap-1 rounded-md px-2.5 py-1 text-xs font-medium transition cursor-pointer ${
+                      savedSuccess ? "bg-emerald-600 text-white" : "bg-primary text-primary-foreground hover:bg-primary/90"
+                    }`}
+                  >
+                    {saving ? <Loader2 className="h-3 w-3 animate-spin" /> : savedSuccess ? <Check className="h-3 w-3" /> : <Save className="h-3 w-3" />}
+                    <span>{savedSuccess ? "Saved" : "Save"}</span>
+                  </button>
+                )}
+                <button
+                  type="button"
+                  onClick={() => setToolbarCollapsed(false)}
+                  title="Expand full toolbar"
+                  className="p-1.5 rounded border border-border bg-background text-muted-foreground hover:text-foreground transition cursor-pointer ml-1"
+                >
+                  <ChevronDown className="h-3.5 w-3.5" />
+                </button>
+              </div>
             </div>
-          </div>
+          ) : (
+            <div className="flex flex-wrap items-center justify-between gap-3 border-b border-border pb-3">
+              {(!isCollaborator || permissions.ANNOTATE) ? (
+                <div className="flex flex-wrap items-center gap-2">
+                  {sidebarCollapsed && (!isCollaborator || permissions.SLICE_CONTROL) && (
+                    <button
+                      type="button"
+                      onClick={() => setSidebarCollapsed(false)}
+                      title="Show slice list"
+                      className="inline-flex items-center gap-1.5 rounded-md border border-border bg-background px-2.5 py-1 text-xs font-semibold text-foreground hover:bg-muted transition mr-1 cursor-pointer"
+                    >
+                      <Layers className="h-3.5 w-3.5 text-primary" />
+                      <span>Slices ({slices.length})</span>
+                    </button>
+                  )}
+
+                  <span className="text-xs font-semibold uppercase tracking-wider text-muted-foreground mr-1">
+                    Label:
+                  </span>
+                  {LABELS.map((l) => (
+                    <button
+                      key={l.id}
+                      onClick={() => { setActiveLabel(l.id); setIsErasing(false); }}
+                      className={`inline-flex items-center gap-1.5 rounded-md px-2.5 py-1 text-xs font-medium border transition cursor-pointer ${
+                        !isErasing && activeLabel === l.id
+                          ? `${l.badge} ring-1 ring-primary`
+                          : "border-border bg-background text-muted-foreground hover:text-foreground"
+                      }`}
+                    >
+                      <span className="h-2 w-2 rounded-full" style={{ backgroundColor: l.stroke }} />
+                      {l.name} <span className="text-[10px] opacity-60">({l.id})</span>
+                    </button>
+                  ))}
+
+                  <div className="mx-1 h-5 w-px bg-border" />
+
+                  {/* Tool Mode: Brush (4) vs Pencil (5) vs Hand (6) */}
+                  <div className="inline-flex overflow-hidden rounded-md border border-border">
+                    <button
+                      type="button"
+                      onClick={() => setTool("brush")}
+                      title="Brush mode (Key 4 or B)"
+                      className={`inline-flex items-center gap-1.5 px-2.5 py-1 text-xs transition cursor-pointer ${
+                        tool === "brush" ? "bg-primary text-primary-foreground font-medium" : "bg-background text-muted-foreground hover:text-foreground"
+                      }`}
+                    >
+                      <Paintbrush className="h-3 w-3" /> Brush <span className="text-[10px] opacity-60">(4)</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setTool("pencil")}
+                      title="Pencil mode — trace an outline, the inside auto-fills (Key 5 or P)"
+                      className={`inline-flex items-center gap-1.5 border-l border-border px-2.5 py-1 text-xs transition cursor-pointer ${
+                        tool === "pencil" ? "bg-primary text-primary-foreground font-medium" : "bg-background text-muted-foreground hover:text-foreground"
+                      }`}
+                    >
+                      <Lasso className="h-3 w-3" /> Pencil <span className="text-[10px] opacity-60">(5)</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setTool("pan")}
+                      title="Hand mode — click & drag to pan canvas (Key 6 or H)"
+                      className={`inline-flex items-center gap-1.5 border-l border-border px-2.5 py-1 text-xs transition cursor-pointer ${
+                        tool === "pan" ? "bg-primary text-primary-foreground font-medium" : "bg-background text-muted-foreground hover:text-foreground"
+                      }`}
+                    >
+                      <Hand className="h-3 w-3" /> Hand <span className="text-[10px] opacity-60">(6)</span>
+                    </button>
+                  </div>
+
+                  <button
+                    onClick={() => setIsErasing((e) => !e)}
+                    title="Toggle eraser mode (Key 0 or E)"
+                    className={`inline-flex items-center gap-1.5 rounded-md px-2.5 py-1 text-xs font-medium border transition cursor-pointer ${
+                      isErasing
+                        ? "border-destructive bg-destructive/10 text-destructive ring-1 ring-destructive"
+                        : "border-border bg-background text-muted-foreground hover:text-foreground"
+                    }`}
+                  >
+                    <Eraser className="h-3.5 w-3.5" /> Eraser <span className="text-[10px] opacity-60">(0)</span>
+                  </button>
+
+                  <label className="flex items-center gap-1.5 text-xs text-muted-foreground cursor-pointer select-none ml-1">
+                    <input
+                      type="checkbox"
+                      checked={maskInside}
+                      onChange={(e) => setMaskInside(e.target.checked)}
+                      className="rounded border-border accent-primary h-3.5 w-3.5"
+                    />
+                    <span>Only inside bone</span>
+                  </label>
+                </div>
+              ) : (
+                <div className="flex items-center gap-2 rounded-md bg-blue-500/10 border border-blue-500/20 px-3 py-1 text-xs text-blue-400 font-medium">
+                  <Lock className="h-3.5 w-3.5 text-blue-400" />
+                  <span>Read-Only Review Mode — Drawing locked by Master</span>
+                </div>
+              )}
+
+              <div className="flex items-center gap-3">
+                {(!isCollaborator || permissions.ANNOTATE) && tool === "brush" && (
+                  <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
+                    <Paintbrush className="h-3.5 w-3.5" />
+                    <span>Size: {brushSize}px</span>
+                    <input
+                      type="range"
+                      min={2}
+                      max={50}
+                      value={brushSize}
+                      onChange={(e) => setBrushSize(Number(e.target.value))}
+                      className="w-20 accent-primary"
+                    />
+                  </div>
+                )}
+
+                {/* Zoom Controls */}
+                <div className="flex items-center gap-1 border-l border-border pl-2">
+                  <button
+                    type="button"
+                    disabled={isCollaborator && !permissions.ZOOM_PAN}
+                    onClick={() => setZoom((z) => Math.max(0.4, Number((z - 0.2).toFixed(1))))}
+                    title={isCollaborator && !permissions.ZOOM_PAN ? "Zoom locked by Master" : "Zoom Out"}
+                    className="inline-flex items-center justify-center h-7 w-7 rounded border border-border bg-background text-muted-foreground hover:text-foreground disabled:opacity-40 disabled:cursor-not-allowed transition cursor-pointer"
+                  >
+                    <ZoomOut className="h-3.5 w-3.5" />
+                  </button>
+                  <button
+                    type="button"
+                    disabled={isCollaborator && !permissions.ZOOM_PAN}
+                    onClick={resetZoom}
+                    title="Reset Zoom to 100%"
+                    className="px-1.5 py-0.5 rounded text-xs font-mono font-medium text-muted-foreground hover:text-foreground hover:bg-muted disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer"
+                  >
+                    {Math.round(zoom * 100)}%
+                  </button>
+                  <button
+                    type="button"
+                    disabled={isCollaborator && !permissions.ZOOM_PAN}
+                    onClick={() => setZoom((z) => Math.min(4, Number((z + 0.2).toFixed(1))))}
+                    title={isCollaborator && !permissions.ZOOM_PAN ? "Zoom locked by Master" : "Zoom In"}
+                    className="inline-flex items-center justify-center h-7 w-7 rounded border border-border bg-background text-muted-foreground hover:text-foreground disabled:opacity-40 disabled:cursor-not-allowed transition cursor-pointer"
+                  >
+                    <ZoomIn className="h-3.5 w-3.5" />
+                  </button>
+                  <button
+                    type="button"
+                    disabled={isCollaborator && !permissions.ZOOM_PAN}
+                    onClick={resetZoom}
+                    title="Fit / Reset"
+                    className="inline-flex items-center justify-center h-7 w-7 rounded border border-border bg-background text-muted-foreground hover:text-foreground disabled:opacity-40 disabled:cursor-not-allowed transition cursor-pointer"
+                  >
+                    <Maximize2 className="h-3.5 w-3.5" />
+                  </button>
+                </div>
+
+                {/* Undo & Redo (only when annotation allowed) */}
+                {(!isCollaborator || permissions.ANNOTATE) && (
+                  <div className="inline-flex overflow-hidden rounded-md border border-border">
+                    <button
+                      type="button"
+                      onClick={undo}
+                      title="Undo (Ctrl+Z)"
+                      className="inline-flex items-center gap-1 bg-background px-2 py-1 text-xs text-muted-foreground hover:text-foreground hover:bg-muted transition cursor-pointer"
+                    >
+                      <RotateCcw className="h-3 w-3" /> Undo
+                    </button>
+                    <button
+                      type="button"
+                      onClick={redo}
+                      title="Redo (Ctrl+Shift+Z or Ctrl+Y)"
+                      className="inline-flex items-center gap-1 border-l border-border bg-background px-2 py-1 text-xs text-muted-foreground hover:text-foreground hover:bg-muted transition cursor-pointer"
+                    >
+                      <RotateCw className="h-3 w-3" /> Redo
+                    </button>
+                  </div>
+                )}
+
+                {/* Flag Slice button */}
+                <button
+                  type="button"
+                  onClick={() => {
+                    if (selected) {
+                      setFlagReason(selected.flagReason || "Not Sure");
+                      setFlagNote(selected.flagNote || "");
+                      setFlagModalOpen(true);
+                    }
+                  }}
+                  title={
+                    selected?.flagged
+                      ? `Flagged: ${selected.flagReason || "Not Sure"}`
+                      : "Flag this annotation for review (e.g. Not Sure)"
+                  }
+                  className={`inline-flex items-center gap-1.5 rounded-md px-2.5 py-1 text-xs font-medium border transition cursor-pointer ${
+                    selected?.flagged
+                      ? "border-amber-500/50 bg-amber-500/15 text-amber-500 hover:bg-amber-500/25 ring-1 ring-amber-500/30"
+                      : "border-border bg-background text-muted-foreground hover:text-foreground"
+                  }`}
+                >
+                  <Flag className={`h-3.5 w-3.5 ${selected?.flagged ? "fill-amber-500 text-amber-500" : ""}`} />
+                  <span>{selected?.flagged ? "Flagged" : "Flag"}</span>
+                </button>
+
+                {/* Auto Save (only when annotation allowed) */}
+                {(!isCollaborator || permissions.ANNOTATE) && (
+                  <div className="flex items-center gap-1.5 border-l border-border pl-2">
+                    <label
+                      className="flex items-center gap-1.5 text-xs text-muted-foreground cursor-pointer select-none"
+                      title="Auto-save annotation mask after each stroke/edit"
+                    >
+                      <input
+                        type="checkbox"
+                        checked={autoSave}
+                        onChange={(e) => {
+                          setAutoSave(e.target.checked);
+                          try {
+                            localStorage.setItem("bme_painter2d_autosave", e.target.checked ? "true" : "false");
+                          } catch { /* ignore */ }
+                          if (e.target.checked) toast.success("Auto Save enabled");
+                          else toast.info("Auto Save disabled");
+                        }}
+                        className="rounded border-border accent-primary h-3.5 w-3.5"
+                      />
+                      <span className="font-medium">Auto Save</span>
+                    </label>
+                    {autoSaveStatus && (
+                      <span className="text-[10px] text-muted-foreground font-mono truncate max-w-[130px]">
+                        {autoSaveStatus}
+                      </span>
+                    )}
+                  </div>
+                )}
+
+                {/* Collaboration Button (Master only) vs Participant Indicator (Collaborator) */}
+                {!isCollaborator ? (
+                  <button
+                    type="button"
+                    onClick={startCollaboration}
+                    disabled={startingCollab}
+                    className="inline-flex items-center gap-1.5 rounded-md border border-blue-500/40 bg-blue-500/10 px-2.5 py-1 text-xs font-semibold text-blue-400 hover:bg-blue-500/20 transition-all cursor-pointer"
+                  >
+                    <Users className="h-3.5 w-3.5" />
+                    <span>{collabToken ? "Collab Panel" : "Start Collaboration"}</span>
+                  </button>
+                ) : (
+                  <div className="flex items-center gap-1.5 rounded-md border border-blue-500/30 bg-blue-500/10 px-2.5 py-1 text-xs font-medium text-blue-300">
+                    <Users className="h-3.5 w-3.5" />
+                    <span>Review Session ({collab.participants.length})</span>
+                  </div>
+                )}
+
+                {/* Clear Mask Button (only if delete permission) */}
+                {(!isCollaborator || permissions.DELETE_ANNOTATION) && (
+                  <button
+                    onClick={clearMask}
+                    title="Clear current canvas mask"
+                    className="inline-flex items-center gap-1 rounded border border-border bg-background px-2 py-1 text-xs text-muted-foreground hover:text-destructive transition cursor-pointer"
+                  >
+                    <Trash2 className="h-3 w-3" />
+                  </button>
+                )}
+
+                {/* Delete Saved Mask (Master only or if delete permission) */}
+                {selected?.hasMask && (!isCollaborator || permissions.DELETE_ANNOTATION) && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      if (confirm(`Delete saved mask for ${selected.caseId} (${selected.stem})?`)) {
+                        deleteMask();
+                      }
+                    }}
+                    disabled={deletingMask}
+                    title="Delete saved mask permanently from server"
+                    className="inline-flex items-center gap-1 rounded border border-destructive/40 bg-destructive/10 px-2 py-1 text-xs text-destructive hover:bg-destructive/20 transition cursor-pointer"
+                  >
+                    <XCircle className="h-3 w-3" />
+                    <span className="hidden sm:inline">Delete Mask</span>
+                  </button>
+                )}
+
+                {/* Save Mask (only if annotate or edit permission) */}
+                {(!isCollaborator || permissions.ANNOTATE || permissions.EDIT_ANNOTATION) && (
+                  <button
+                    onClick={saveMask}
+                    disabled={saving || !selected}
+                    className={`inline-flex items-center gap-1.5 rounded-md px-3 py-1 text-xs font-medium transition cursor-pointer ${
+                      savedSuccess
+                        ? "bg-emerald-600 text-white"
+                        : "bg-primary text-primary-foreground hover:bg-primary/90"
+                    }`}
+                  >
+                    {saving ? (
+                      <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                    ) : savedSuccess ? (
+                      <Check className="h-3.5 w-3.5" />
+                    ) : (
+                      <Save className="h-3.5 w-3.5" />
+                    )}
+                    {savedSuccess ? "Saved!" : "Save Mask"}
+                  </button>
+                )}
+
+                {/* Collapse Toolbar Toggle */}
+                <button
+                  type="button"
+                  onClick={() => setToolbarCollapsed(true)}
+                  title="Collapse to compact toolbar"
+                  className="p-1 rounded border border-border bg-background text-muted-foreground hover:text-foreground transition cursor-pointer"
+                >
+                  <ChevronUp className="h-3.5 w-3.5" />
+                </button>
+              </div>
+            </div>
+          )}
 
         {/* Flagged Slice Banner */}
         {selected?.flagged && (

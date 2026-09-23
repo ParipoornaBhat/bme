@@ -441,11 +441,11 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
           </aside>
 
           {/* Scrollable Main Content Area */}
-          <main className={`flex-1 min-w-0 flex flex-col relative ${pathname.startsWith("/annotate") ? "overflow-hidden" : "overflow-y-auto"}`}>
+          <main className={`flex-1 min-w-0 flex flex-col relative ${pathname.startsWith("/annotate") ? "overflow-y-auto lg:overflow-hidden" : "overflow-y-auto"}`}>
             <div
               className={`flex-1 w-full mx-auto relative z-10 animate-in fade-in duration-500 ${
                 pathname.startsWith("/annotate")
-                  ? "px-3 py-2 max-w-[1700px] flex flex-col h-full overflow-hidden"
+                  ? "px-2 py-2 sm:px-3 sm:py-2 max-w-[1700px] flex flex-col min-h-0 lg:h-full overflow-y-auto lg:overflow-hidden"
                   : "px-4 py-8 sm:px-6 lg:px-8 max-w-7xl"
               }`}
             >
