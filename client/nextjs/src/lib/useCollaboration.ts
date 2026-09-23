@@ -100,6 +100,9 @@ export function useCollaboration({
   // Issued by the server on join. Study data requests carry it so the server
   // can confirm they come from someone who is actually in this review.
   const [participantKey, setParticipantKey] = useState<string | null>(null);
+  // Set when the server says this session does not exist or has ended - for
+  // instance a host reloading into a session the server no longer has.
+  const [sessionInvalid, setSessionInvalid] = useState(false);
   // Bumped to re-run the connect effect. The server closes viewer sockets when
   // the host leaves, so without retrying the link stays dead until a refresh.
   const [reconnectTick, setReconnectTick] = useState(0);
@@ -164,6 +167,19 @@ export function useCollaboration({
     return `${protocol}//${host}/ws/collaborate?token=${encodeURIComponent(token)}&userId=${encodeURIComponent(uid)}&userName=${encodeURIComponent(uname)}${hostParam}`;
   }, [token, userId, userName, hostKey]);
 
+  // Everything below describes one session. Without this, ending a session
+  // and starting another on the same page carried the old one's state into it:
+  // "session ended" stayed set, and so did the flag that stops reconnecting,
+  // so the new session would never recover from a dropped connection.
+  useEffect(() => {
+    fatalRef.current = false;
+    setSessionEnded(false);
+    setRemoved(false);
+    setHostOffline(false);
+    setSessionInvalid(false);
+    setParticipantKey(null);
+  }, [token]);
+
   useEffect(() => {
     if (!token) return;
 
@@ -181,6 +197,9 @@ export function useCollaboration({
     };
 
     ws.onmessage = (evt) => {
+      // A socket that has been replaced can still deliver a last message - such
+      // as "session ended" - which must not land in the next session's state.
+      if (disposed) return;
       try {
         const data = JSON.parse(evt.data);
 
@@ -188,7 +207,10 @@ export function useCollaboration({
           // Only a session that can never become valid again stops the retry
           // loop. Routine refusals - a permission the host has not granted -
           // arrive as errors too, and must not kill the connection.
-          if (data.fatal) fatalRef.current = true;
+          if (data.fatal) {
+            fatalRef.current = true;
+            setSessionInvalid(true);
+          }
           console.warn("Collaboration error:", data.error);
         } else if (data.type === "HOST_OFFLINE") {
           setHostOffline(true);
@@ -381,6 +403,7 @@ export function useCollaboration({
     removed,
     hostOffline,
     participantKey,
+    sessionInvalid,
     updateViewpoint,
     updateCursor,
     sendMaskJoin,

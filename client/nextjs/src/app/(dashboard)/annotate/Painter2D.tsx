@@ -249,7 +249,9 @@ export default function Painter2D({
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [toolbarCollapsed, setToolbarCollapsed] = useState(false);
 
-  // Restore active collaboration session on reload / tab switch
+  // Restore an active collaboration session after a reload - once, on mount.
+  // Re-running whenever collabToken went empty is what made End Session look
+  // broken: clearing the token immediately restored it from storage.
   useEffect(() => {
     try {
       const savedToken = sessionStorage.getItem("bme_active_collab_token");
@@ -265,7 +267,34 @@ export default function Painter2D({
         setShareUrl(`${baseOrigin}/collaborate/${savedToken}`);
       }
     } catch { /* ignore */ }
-  }, [collabToken, isCollaborator]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Forget the host's session everywhere: state and the copy kept for reloads.
+  const forgetHostSession = () => {
+    try {
+      sessionStorage.removeItem("bme_active_collab_token");
+      sessionStorage.removeItem("bme_active_collab_host_key");
+    } catch { /* ignore */ }
+    setCollabToken(null);
+    setCollabHostKey(null);
+    setShowMasterPanel(false);
+  };
+
+  // The host's session can also end without this page asking: from another
+  // tab, or because the server restarted and a reload restored a token it no
+  // longer knows. Drop back to "Start Collaboration" rather than leave a panel
+  // attached to a dead session.
+  useEffect(() => {
+    if (isCollaborator || !collabToken) return;
+    if (collab.sessionInvalid) {
+      toast.info("That review session no longer exists. Start a new one to collaborate.");
+      forgetHostSession();
+    } else if (collab.sessionEnded) {
+      forgetHostSession();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [collab.sessionInvalid, collab.sessionEnded, collabToken, isCollaborator]);
 
   const startCollaboration = async () => {
     if (collabToken) {
@@ -2634,8 +2663,7 @@ export default function Painter2D({
               onRemoveUser={collab.removeUser}
               onEndSession={() => {
                 collab.endSession();
-                setCollabToken(null);
-                setShowMasterPanel(false);
+                forgetHostSession();
               }}
               onClose={() => setShowMasterPanel(false)}
             />
