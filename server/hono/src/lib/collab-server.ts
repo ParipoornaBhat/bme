@@ -1,6 +1,6 @@
 import { WebSocketServer, WebSocket } from "ws";
 import type { IncomingMessage } from "node:http";
-import { randomBytes } from "node:crypto";
+import { randomBytes, timingSafeEqual } from "node:crypto";
 
 export type ParticipantPermission = {
   VIEW: boolean;
@@ -272,7 +272,7 @@ export function initCollaborationWSServer(wss: WebSocketServer) {
     const isMaster =
       presentedHostKey.length > 0 &&
       presentedHostKey.length === session.hostKey.length &&
-      crypto.timingSafeEqual(Buffer.from(presentedHostKey), Buffer.from(session.hostKey));
+      timingSafeEqual(Buffer.from(presentedHostKey), Buffer.from(session.hostKey));
 
     if (isMaster && session.masterId !== userId) {
       // The placeholder entry created with the session belongs to the host too;
