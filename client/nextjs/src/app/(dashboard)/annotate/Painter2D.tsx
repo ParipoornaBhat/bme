@@ -233,6 +233,9 @@ export default function Painter2D({
     },
   });
 
+  const sessionViewpointRef = useRef(collab.viewpoint);
+  sessionViewpointRef.current = collab.viewpoint;
+
   // Study data routes refuse anyone who is not a signed-in team member unless
   // the request proves the caller is in a live review. A guest does that by
   // sending the session token and the key the server issued them on joining.
@@ -509,14 +512,36 @@ export default function Painter2D({
         const list: Case2DSlice[] = data.slices || [];
         setSlices(list);
 
+        if (isCollaborator) {
+          const vp = sessionViewpointRef.current;
+          let matched: Case2DSlice | undefined;
+          if (vp?.selectedStem) {
+            matched = list.find((s) => s.stem === vp.selectedStem);
+          }
+          if (!matched && vp?.selectedRelPath) {
+            matched = list.find((s) => s.relPath === vp.selectedRelPath);
+          }
+          if (!matched && vp?.selectedCaseId) {
+            matched = list.find((s) => s.caseId === vp.selectedCaseId);
+          }
+          if (matched) {
+            setSelected(matched);
+            return;
+          }
+        }
+
         const urlParams = typeof window !== "undefined" ? new URLSearchParams(window.location.search) : null;
         const targetCase = urlParams?.get("case");
         const targetStem = urlParams?.get("stem");
-        const matched = list.find(
-          (s) => (targetStem && s.stem === targetStem) || (targetCase && s.caseId === targetCase)
-        );
-        if (matched) {
-          setSelected(matched);
+        let urlMatched: Case2DSlice | undefined;
+        if (targetStem) {
+          urlMatched = list.find((s) => s.stem === targetStem);
+        }
+        if (!urlMatched && targetCase) {
+          urlMatched = list.find((s) => s.caseId === targetCase);
+        }
+        if (urlMatched) {
+          setSelected(urlMatched);
           return;
         }
 

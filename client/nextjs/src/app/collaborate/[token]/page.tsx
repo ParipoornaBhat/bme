@@ -1,8 +1,12 @@
 "use client";
 
+import dynamic from "next/dynamic";
 import { use, useEffect, useState } from "react";
 import { RefreshCw, ShieldAlert, Stethoscope } from "lucide-react";
-import Painter2D from "~/app/(dashboard)/annotate/Painter2D";
+
+const Painter2D = dynamic(() => import("~/app/(dashboard)/annotate/Painter2D"), {
+  ssr: false,
+});
 
 /**
  * Full Radiologist Collaboration Viewer Page matching /annotate.
@@ -14,6 +18,7 @@ export default function CollaborateViewerPage({
   params: Promise<{ token: string }>;
 }) {
   const { token } = use(params);
+  const [mounted, setMounted] = useState<boolean>(false);
   const [userName, setUserName] = useState<string>("");
   const [nameSubmitted, setNameSubmitted] = useState<boolean>(false);
   const [inputName, setInputName] = useState<string>("");
@@ -22,12 +27,17 @@ export default function CollaborateViewerPage({
 
   // Load saved radiologist name from localStorage on mount
   useEffect(() => {
+    setMounted(true);
     if (typeof window !== "undefined") {
-      const saved = localStorage.getItem("bme_collab_radiologist_name");
-      if (saved) {
-        setUserName(saved);
-        setInputName(saved);
-        setNameSubmitted(true);
+      try {
+        const saved = localStorage.getItem("bme_collab_radiologist_name");
+        if (saved) {
+          setUserName(saved);
+          setInputName(saved);
+          setNameSubmitted(true);
+        }
+      } catch {
+        // Storage might be unavailable or restricted
       }
     }
   }, []);
@@ -55,6 +65,18 @@ export default function CollaborateViewerPage({
     };
   }, [token]);
 
+  // Until mounted on client, render only a neutral loading screen (never the form on SSR)
+  if (!mounted) {
+    return (
+      <div className="flex h-screen w-screen flex-col items-center justify-center bg-slate-950 text-slate-100">
+        <RefreshCw className="h-8 w-8 animate-spin text-blue-500" />
+        <span className="mt-3 text-sm font-medium text-slate-400">
+          Loading...
+        </span>
+      </div>
+    );
+  }
+
   // 1. Name Sign-In Prompt Modal (if name not provided or not in localStorage)
   if (!nameSubmitted) {
     return (
@@ -75,10 +97,14 @@ export default function CollaborateViewerPage({
               e.preventDefault();
               const trimmed = inputName.trim() || `Dr. Radiologist`;
               setUserName(trimmed);
-              if (typeof window !== "undefined") {
-                localStorage.setItem("bme_collab_radiologist_name", trimmed);
-              }
               setNameSubmitted(true);
+              if (typeof window !== "undefined") {
+                try {
+                  localStorage.setItem("bme_collab_radiologist_name", trimmed);
+                } catch {
+                  // Storage might be unavailable or restricted
+                }
+              }
             }}
             className="mt-6 flex flex-col gap-4 text-left"
           >
