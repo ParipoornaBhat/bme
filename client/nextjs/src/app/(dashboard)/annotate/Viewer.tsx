@@ -41,6 +41,7 @@ import {
   OverlayControls,
 } from "~/lib/useOverlayView";
 import { useCollaboration } from "~/lib/useCollaboration";
+import { canPaint } from "~/lib/paint-rules";
 
 /**
  * Three-plane viewer with painting, modelled on 3D Slicer's Four-Up layout.
@@ -180,6 +181,15 @@ export default function Viewer({ caseId, onSaved }: { caseId: string; onSaved?: 
   // keeping the others wide for context.
   const [zoom, setZoom] = useState<Record<Plane, number>>({ axial: 1, coronal: 1, sagittal: 1 });
   const [maskInside, setMaskInside] = useState(true);
+  const [protectLesion, setProtectLesion] = useState(true);
+
+  // Hydrate protectLesion preference from localStorage
+  useEffect(() => {
+    try {
+      const saved = localStorage.getItem("bme_protect_lesion");
+      if (saved !== null) setProtectLesion(saved === "true");
+    } catch { /* ignore */ }
+  }, []);
   // Locked by default: painting should not drag the other two views around.
   // Slicer behaves the same way — the crosshair moves when you deliberately
   // move it, not as a side effect of every brush stroke.
@@ -564,22 +574,15 @@ export default function Viewer({ caseId, onSaved }: { caseId: string; onSaved?: 
         const a = hit.a + da, b = hit.b + db;
         if (a < 0 || b < 0 || a >= w || b >= h) continue;
         const i = sampleAt(p, vol, a, b, s);
-        if (erasing) {
-          labels[i] = 0;
-        } else {
-          // Editable area: inside bone_marrow. Stops a lesion being painted
-          // into muscle — the guard that makes this usable for a
-          // non-radiologist annotator.
-          if (maskInside && seg !== 1 && labels[i] !== 1 && labels[i] !== seg) continue;
-          labels[i] = seg;
-        }
+        if (!canPaint(labels[i], seg, { erasing, insideBone: maskInside, hasBone: true, protectLesion })) continue;
+        labels[i] = erasing ? 0 : seg;
       }
     }
     setDirty(true);
     // Every plane, not just this one — the label volume is shared, so a stroke
     // here changes what the other two views should be showing.
     drawAll();
-  }, [vol, labels, cursor, brush, erasing, seg, maskInside,
+  }, [vol, labels, cursor, brush, erasing, seg, maskInside, protectLesion,
       planeGeom, sampleAt, sliceOf, toVoxel, drawAll]);
 
   /**
@@ -616,15 +619,14 @@ export default function Viewer({ caseId, onSaved }: { caseId: string; onSaved?: 
         const to = Math.min(w - 1, Math.floor(xs[k + 1]));
         for (let a = from; a <= to; a++) {
           const flat = sampleAt(p, vol, a, b, s);
-          if (erasing) { labels[flat] = 0; continue; }
-          if (maskInside && seg !== 1 && labels[flat] !== 1 && labels[flat] !== seg) continue;
-          labels[flat] = seg;
+          if (!canPaint(labels[flat], seg, { erasing, insideBone: maskInside, hasBone: true, protectLesion })) continue;
+          labels[flat] = erasing ? 0 : seg;
         }
       }
     }
     setDirty(true);
     drawAll();
-  }, [vol, labels, cursor, erasing, maskInside, seg, planeGeom, sliceOf, sampleAt, drawAll]);
+  }, [vol, labels, cursor, erasing, maskInside, protectLesion, seg, planeGeom, sliceOf, sampleAt, drawAll]);
 
   const clearMask = useCallback(() => {
     if (!labels) return;
@@ -968,6 +970,21 @@ export default function Viewer({ caseId, onSaved }: { caseId: string; onSaved?: 
                 className="rounded border-border accent-primary h-3.5 w-3.5"
               />
               <span>Only inside bone</span>
+            </label>
+
+            <label className="flex items-center gap-1.5 text-xs text-muted-foreground cursor-pointer select-none ml-1">
+              <input
+                type="checkbox"
+                checked={protectLesion}
+                onChange={(e) => {
+                  setProtectLesion(e.target.checked);
+                  try {
+                    localStorage.setItem("bme_protect_lesion", String(e.target.checked));
+                  } catch {}
+                }}
+                className="rounded border-border accent-primary h-3.5 w-3.5"
+              />
+              <span>Protect lesion</span>
             </label>
 
             <button

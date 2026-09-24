@@ -56,6 +56,7 @@ import {
   renderLabels,
   OverlayControls,
 } from "~/lib/useOverlayView";
+import { canPaint } from "~/lib/paint-rules";
 
 export type Case2DSlice = {
   caseId: string;
@@ -110,6 +111,7 @@ export default function Painter2D({
   toolRef.current = tool;
   const torchRingRef = useRef<HTMLDivElement>(null);
   const [maskInside, setMaskInside] = useState(false);
+  const [protectLesion, setProtectLesion] = useState(true);
   const [activeLabel, setActiveLabel] = useState<number>(1);
   const [brushSize, setBrushSize] = useState(12);
   const [isErasing, setIsErasing] = useState(false);
@@ -517,6 +519,8 @@ export default function Painter2D({
       if (savedLabel) setActiveLabel(Number(savedLabel));
       const savedMaskInside = localStorage.getItem("bme_painter2d_mask_inside");
       if (savedMaskInside !== null) setMaskInside(savedMaskInside === "true");
+      const savedProtectLesion = localStorage.getItem("bme_protect_lesion");
+      if (savedProtectLesion !== null) setProtectLesion(savedProtectLesion === "true");
       const savedAutoSave = localStorage.getItem("bme_painter2d_autosave");
       if (savedAutoSave !== null) setAutoSave(savedAutoSave === "true");
     } catch { /* ignore */ }
@@ -1014,8 +1018,7 @@ export default function Painter2D({
       for (let x = minX; x <= maxX; x++) {
         if ((x - cx) * (x - cx) + dy2 <= r2) {
           const idx = rowOffset + x;
-          // Only inside bone guard: active only when bone marrow actually exists
-          if (maskInside && hasBone && !isErasing && activeLabel !== 1 && mask[idx] !== 1 && mask[idx] !== activeLabel) {
+          if (!canPaint(mask[idx], activeLabel, { erasing: isErasing, insideBone: maskInside, hasBone, protectLesion })) {
             continue;
           }
           mask[idx] = val;
@@ -1068,7 +1071,7 @@ export default function Painter2D({
         const rowOffset = b * w;
         for (let a = from; a <= to; a++) {
           const idx = rowOffset + a;
-          if (maskInside && hasBone && !isErasing && activeLabel !== 1 && mask[idx] !== 1 && mask[idx] !== activeLabel) {
+          if (!canPaint(mask[idx], activeLabel, { erasing: isErasing, insideBone: maskInside, hasBone, protectLesion })) {
             continue;
           }
           mask[idx] = val;
@@ -1094,7 +1097,7 @@ export default function Painter2D({
         }
       }, 400);
     }
-  }, [clearOverlay, isErasing, activeLabel, maskInside, renderMaskToCanvas, autoSave]);
+  }, [clearOverlay, isErasing, activeLabel, maskInside, protectLesion, renderMaskToCanvas, autoSave]);
 
   const triggerAutoSaveIfNeeded = useCallback(() => {
     if (!autoSave) return;
@@ -2388,6 +2391,21 @@ export default function Painter2D({
                       className="rounded border-border accent-primary h-3.5 w-3.5"
                     />
                     <span>Only inside bone</span>
+                  </label>
+
+                  <label className="flex items-center gap-1.5 text-xs text-muted-foreground cursor-pointer select-none ml-1">
+                    <input
+                      type="checkbox"
+                      checked={protectLesion}
+                      onChange={(e) => {
+                        setProtectLesion(e.target.checked);
+                        try {
+                          localStorage.setItem("bme_protect_lesion", String(e.target.checked));
+                        } catch {}
+                      }}
+                      className="rounded border-border accent-primary h-3.5 w-3.5"
+                    />
+                    <span>Protect lesion</span>
                   </label>
                   <div className="mx-1 h-5 w-px bg-border" />
                   <OverlayControls
