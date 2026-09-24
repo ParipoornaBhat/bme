@@ -18,10 +18,12 @@ import {
   Layers,
   Loader2,
   Lock,
+  LogOut,
   Maximize2,
   MessageSquare,
   Move,
   Paintbrush,
+  RefreshCw,
   RotateCcw,
   RotateCw,
   Save,
@@ -430,6 +432,19 @@ export default function Painter2D({
 
     prevConnectedMapRef.current = newMap;
   }, [collab.participants, collabToken, collab.connected, collab.currentUserId]);
+
+  // Toast notifications for the host when new viewers request admission
+  const seenRequestsRef = useRef<Set<string>>(new Set());
+  useEffect(() => {
+    if (!collabToken || isCollaborator) return;
+    const currentIds = new Set(collab.joinRequests.map((r) => r.userId));
+    collab.joinRequests.forEach((req) => {
+      if (!seenRequestsRef.current.has(req.userId)) {
+        toast.info(`🩺 ${req.name} wants to join`);
+      }
+    });
+    seenRequestsRef.current = currentIds;
+  }, [collab.joinRequests, collabToken, isCollaborator]);
 
   const [isPanning, setIsPanning] = useState(false);
   const panStartRef = useRef<{ x: number; y: number }>({ x: 0, y: 0 });
@@ -1744,6 +1759,53 @@ export default function Painter2D({
     return true;
   });
 
+  // 1. Viewer voluntarily left the review
+  if (isCollaborator && collab.admission === "left") {
+    return (
+      <div className="flex h-full w-full flex-col items-center justify-center gap-3 p-6 text-center">
+        <LogOut className="h-10 w-10 text-slate-400" />
+        <h1 className="text-lg font-semibold">You left the review</h1>
+        <p className="max-w-md text-sm text-muted-foreground">
+          You have exited the collaborative review session.
+        </p>
+        <button
+          type="button"
+          onClick={() => collab.rejoinLobby()}
+          className="mt-2 inline-flex items-center gap-1.5 rounded-xl bg-blue-600 px-4 py-2 text-xs font-semibold text-white shadow hover:bg-blue-500 transition-all cursor-pointer active:scale-95"
+        >
+          <RefreshCw className="h-3.5 w-3.5" />
+          <span>Rejoin</span>
+        </button>
+      </div>
+    );
+  }
+
+  // 2. Viewer was denied by host
+  if (isCollaborator && collab.admission === "denied") {
+    return (
+      <div className="flex h-full w-full flex-col items-center justify-center gap-3 p-6 text-center">
+        <XCircle className="h-10 w-10 text-red-500" />
+        <h1 className="text-lg font-semibold">The host declined your request</h1>
+        <p className="max-w-md text-sm text-muted-foreground">
+          The host did not admit you to this review session.
+        </p>
+      </div>
+    );
+  }
+
+  // 2b. Viewer replaced by newer tab
+  if (isCollaborator && collab.admission === "replaced") {
+    return (
+      <div className="flex h-full w-full flex-col items-center justify-center gap-3 p-6 text-center">
+        <XCircle className="h-10 w-10 text-amber-500" />
+        <h1 className="text-lg font-semibold">This review was opened in another tab</h1>
+        <p className="max-w-md text-sm text-muted-foreground">
+          This session was opened in another tab or window. It has been disconnected here.
+        </p>
+      </div>
+    );
+  }
+
   // Ending the session or revoking this participant closes their socket, but the
   // study was still rendered - with working tools - until a reload. Take it off
   // the screen the moment either happens. Both are final, so unlike the paused
@@ -1759,6 +1821,25 @@ export default function Painter2D({
           {collab.removed
             ? "The host revoked your access. This link no longer works for you."
             : "The host ended this session. This link no longer works."}
+        </p>
+      </div>
+    );
+  }
+
+  // 3. Viewer waiting for host admission in lobby
+  if (isCollaborator && collab.admission === "waiting") {
+    return (
+      <div className="flex h-full w-full flex-col items-center justify-center gap-3 p-6 text-center">
+        <Loader2 className="h-10 w-10 animate-spin text-blue-500" />
+        <h1 className="text-lg font-semibold">
+          {collab.waitingHostConnected
+            ? "Asking the host to let you in…"
+            : "Waiting for the host to start"}
+        </h1>
+        <p className="max-w-md text-sm text-muted-foreground">
+          {collab.waitingHostConnected
+            ? "Your request has been sent to the host. You will enter automatically when admitted."
+            : "The host is not connected yet. The review session will begin when the host joins."}
         </p>
       </div>
     );
@@ -1795,6 +1876,7 @@ export default function Painter2D({
           canFollowMaster={Boolean(masterId) && masterId !== collab.currentUserId}
           onToggleFollowMaster={() => setFollowUserId((curr) => (curr ? null : masterId))}
           permissions={permissions}
+          onLeave={collab.leave}
         />
       )}
 
@@ -2169,9 +2251,14 @@ export default function Painter2D({
                     onClick={startCollaboration}
                     disabled={startingCollab}
                     title={collabToken ? "Collab Panel" : "Start Collaboration"}
-                    className="p-1.5 rounded border border-blue-500/40 bg-blue-500/10 text-blue-400 hover:bg-blue-500/20 transition cursor-pointer"
+                    className="relative p-1.5 rounded border border-blue-500/40 bg-blue-500/10 text-blue-400 hover:bg-blue-500/20 transition cursor-pointer"
                   >
                     <Users className="h-3.5 w-3.5" />
+                    {collab.joinRequests.length > 0 && (
+                      <span className="absolute -top-1 -right-1 flex h-4 min-w-4 px-1 items-center justify-center rounded-full bg-red-500 text-[10px] font-bold text-white">
+                        {collab.joinRequests.length}
+                      </span>
+                    )}
                   </button>
                 ) : null}
                 {(!isCollaborator || permissions.ANNOTATE || permissions.EDIT_ANNOTATION) && (
@@ -2476,6 +2563,11 @@ export default function Painter2D({
                   >
                     <Users className="h-3.5 w-3.5" />
                     <span>{collabToken ? "Collab Panel" : "Start Collaboration"}</span>
+                    {collab.joinRequests.length > 0 && (
+                      <span className="ml-1 flex h-4 min-w-4 px-1 items-center justify-center rounded-full bg-red-500 text-[10px] font-bold text-white">
+                        {collab.joinRequests.length}
+                      </span>
+                    )}
                   </button>
                 ) : (
                   <div className="flex items-center gap-1.5 rounded-md border border-blue-500/30 bg-blue-500/10 px-2.5 py-1 text-xs font-medium text-blue-300">
@@ -2865,6 +2957,10 @@ export default function Painter2D({
                 forgetHostSession();
               }}
               onClose={() => setShowMasterPanel(false)}
+              joinRequests={collab.joinRequests}
+              leftList={collab.leftList}
+              onAdmit={collab.admit}
+              onDeny={collab.deny}
             />
           </div>
         </div>

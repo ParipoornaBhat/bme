@@ -17,7 +17,7 @@ import {
   X,
   ZoomIn,
 } from "lucide-react";
-import type { Participant, ParticipantPermission } from "~/lib/useCollaboration";
+import type { JoinRequest, LeftParticipant, Participant, ParticipantPermission } from "~/lib/useCollaboration";
 
 interface CollaborationMasterPanelProps {
   shareUrl: string;
@@ -29,6 +29,17 @@ interface CollaborationMasterPanelProps {
   onRemoveUser: (targetUserId: string) => void;
   onEndSession: () => void;
   onClose?: () => void;
+  joinRequests?: JoinRequest[];
+  leftList?: LeftParticipant[];
+  onAdmit?: (userId: string) => void;
+  onDeny?: (userId: string) => void;
+}
+
+function formatWaitingTime(since: string): string {
+  const sec = Math.max(1, Math.round((Date.now() - new Date(since).getTime()) / 1000));
+  if (sec < 60) return `waiting ${sec} s`;
+  const min = Math.floor(sec / 60);
+  return `waiting ${min}m ${sec % 60}s`;
 }
 
 export default function CollaborationMasterPanel({
@@ -41,6 +52,10 @@ export default function CollaborationMasterPanel({
   onRemoveUser,
   onEndSession,
   onClose,
+  joinRequests = [],
+  leftList = [],
+  onAdmit,
+  onDeny,
 }: CollaborationMasterPanelProps) {
   const [copied, setCopied] = useState(false);
 
@@ -92,6 +107,50 @@ export default function CollaborationMasterPanel({
           {copied ? "Copied!" : "Copy Link"}
         </button>
       </div>
+
+      {/* Waiting Section (Lobby requests) */}
+      {joinRequests && joinRequests.length > 0 && (
+        <div className="mt-5 flex flex-col">
+          <div className="flex items-center justify-between text-xs font-semibold tracking-wider text-amber-400 uppercase">
+            <span>Waiting for Admission ({joinRequests.length})</span>
+            <span className="text-[11px] text-amber-500/80 lowercase">pending host approval</span>
+          </div>
+
+          <div className="mt-2.5 space-y-2 max-h-48 overflow-y-auto pr-1">
+            {joinRequests.map((req) => (
+              <div
+                key={req.userId}
+                className="flex items-center justify-between rounded-xl border border-amber-500/30 bg-amber-500/10 p-3"
+              >
+                <div className="flex flex-col">
+                  <span className="text-sm font-semibold text-slate-100">{req.name}</span>
+                  <span className="text-[11px] text-amber-300/80">{formatWaitingTime(req.since)}</span>
+                </div>
+                <div className="flex items-center gap-2">
+                  {onAdmit && (
+                    <button
+                      type="button"
+                      onClick={() => onAdmit(req.userId)}
+                      className="rounded-lg bg-emerald-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-emerald-500 transition-all shadow active:scale-95 cursor-pointer"
+                    >
+                      Admit
+                    </button>
+                  )}
+                  {onDeny && (
+                    <button
+                      type="button"
+                      onClick={() => onDeny(req.userId)}
+                      className="rounded-lg bg-red-600/20 border border-red-500/40 px-3 py-1.5 text-xs font-semibold text-red-300 hover:bg-red-600/30 transition-all cursor-pointer"
+                    >
+                      Deny
+                    </button>
+                  )}
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
 
       {/* Participants Section */}
       <div className="mt-5 flex flex-col">
@@ -337,6 +396,25 @@ export default function CollaborationMasterPanel({
           })}
         </div>
       </div>
+
+      {/* Left List Section */}
+      {leftList && leftList.length > 0 && (
+        <div className="mt-4 flex flex-col rounded-xl border border-slate-800 bg-slate-950/40 p-3">
+          <span className="text-[11px] font-semibold tracking-wider text-slate-500 uppercase">
+            Left the Review ({leftList.length})
+          </span>
+          <div className="mt-1.5 space-y-1 max-h-24 overflow-y-auto pr-1">
+            {leftList.map((entry, idx) => (
+              <div key={idx} className="flex items-center justify-between text-xs text-slate-400">
+                <span className="truncate">{entry.name}</span>
+                <span className="text-[10px] text-slate-600 font-mono">
+                  {new Date(entry.at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
+                </span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
 
       {/* Security Note */}
       <div className="mt-4 flex items-center gap-2 rounded-lg border border-slate-800 bg-slate-950/40 p-2.5 text-slate-400 text-xs">

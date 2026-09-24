@@ -1,7 +1,7 @@
 "use client";
 
 import React from "react";
-import { Eye, Lock, Shield, Stethoscope, Unlock } from "lucide-react";
+import { Eye, Lock, LogOut, Shield, Stethoscope, Unlock } from "lucide-react";
 import type { ParticipantPermission } from "~/lib/useCollaboration";
 
 interface CollaborationViewerHeaderProps {
@@ -12,6 +12,7 @@ interface CollaborationViewerHeaderProps {
   followingName?: string | null;
   canFollowMaster?: boolean;
   onToggleFollowMaster?: () => void;
+  onLeave?: () => void;
 }
 
 export default function CollaborationViewerHeader({
@@ -22,6 +23,7 @@ export default function CollaborationViewerHeader({
   followingName = null,
   canFollowMaster = false,
   onToggleFollowMaster,
+  onLeave,
 }: CollaborationViewerHeaderProps) {
   return (
     <header className="flex w-full items-center justify-between border-b border-slate-800 bg-slate-950/90 px-5 py-3 text-slate-100 shadow-md backdrop-blur-md">
@@ -116,6 +118,18 @@ export default function CollaborationViewerHeader({
             {permissions.ANNOTATE ? <Unlock className="h-3 w-3" /> : <Lock className="h-3 w-3" />}
             Annotate
           </span>
+
+          {onLeave && (
+            <button
+              type="button"
+              onClick={onLeave}
+              title="Leave the review session"
+              className="flex items-center gap-1.5 rounded-md border border-slate-700 bg-slate-800/80 px-2.5 py-1 text-xs font-semibold text-slate-300 hover:border-red-500/40 hover:bg-red-500/10 hover:text-red-400 transition-all cursor-pointer ml-1"
+            >
+              <LogOut className="h-3 w-3" />
+              <span>Leave</span>
+            </button>
+          )}
         </div>
       </div>
     </header>

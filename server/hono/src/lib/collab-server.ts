@@ -85,6 +85,17 @@ export type CollabSession = {
   // `${caseId}::${stem}`. Every edit is applied here and numbered before it
   // is sent out, so all participants apply the same edits in the same order.
   masks: Map<string, SliceMask>;
+  pending: Map<
+    string,
+    {
+      ws: WebSocket;
+      name: string;
+      since: string;
+      onMessage?: (raw: any) => void;
+      onClose?: () => void;
+    }
+  >;
+  left: { name: string; at: string }[];
 };
 
 type SliceMask = { width: number; height: number; labels: Uint8Array; seq: number };
@@ -174,6 +185,8 @@ export function createSession(caseId: string, creatorId: string, creatorName: st
     },
     participants: new Map(),
     masks: new Map(),
+    pending: new Map(),
+    left: [],
   };
 
   // Add Master participant
@@ -271,6 +284,7 @@ function sanitizeSessionForPublic(session: CollabSession) {
     masterConnected: session.participants.get(session.masterId)?.connected ?? false,
     viewpoint: session.viewpoint,
     participants: participantsList,
+    left: session.left,
   };
 }
 
@@ -280,6 +294,357 @@ function broadcastToSession(token: string, message: any, excludeWs?: WebSocket) 
       ws.send(JSON.stringify(message));
     }
   }
+}
+
+function sendJoinRequests(session: CollabSession) {
+  const hostSockets = activeSockets.get(`${session.token}::${session.masterId}`);
+  if (!hostSockets || hostSockets.size === 0) return;
+  const pendingList = Array.from(session.pending.entries()).map(([userId, p]) => ({
+    userId,
+    name: p.name,
+    since: p.since,
+  }));
+  const payload = JSON.stringify({
+    type: "JOIN_REQUESTS",
+    pending: pendingList,
+  });
+  for (const ws of hostSockets) {
+    if (ws.readyState === WebSocket.OPEN) {
+      ws.send(payload);
+    }
+  }
+}
+
+function completeJoin(
+  ws: WebSocket,
+  session: CollabSession,
+  userId: string,
+  userName: string,
+  isMaster: boolean
+) {
+  const token = session.token;
+  socketMeta.set(ws, { token, userId });
+  const socketKey = `${token}::${userId}`;
+  const liveSockets = activeSockets.get(socketKey) ?? new Set<WebSocket>();
+  liveSockets.add(ws);
+  activeSockets.set(socketKey, liveSockets);
+
+  if (isMaster && session.masterId !== userId) {
+    const stale = session.participants.get(session.masterId);
+    if (stale && !stale.connected) session.participants.delete(session.masterId);
+    session.masterId = userId;
+  }
+  const role = isMaster ? "MASTER" : "VIEWER";
+
+  let participant = session.participants.get(userId);
+  if (!participant) {
+    participant = {
+      id: userId,
+      name: userName,
+      initials: getInitials(userName),
+      role,
+      connected: true,
+      joinedAt: new Date().toISOString(),
+      permissions: role === "MASTER" ? { ...MASTER_PERMISSIONS } : { ...DEFAULT_VIEWER_PERMISSIONS },
+    };
+    session.participants.set(userId, participant);
+  } else {
+    participant.connected = true;
+    participant.name = userName;
+    participant.initials = getInitials(userName);
+    if (isMaster) {
+      participant.role = "MASTER";
+      participant.permissions = { ...MASTER_PERMISSIONS };
+    }
+  }
+
+  let participantKey = participantKeys.get(socketKey);
+  if (!isMaster && !participantKey) {
+    participantKey = randomSecret();
+    participantKeys.set(socketKey, participantKey);
+  }
+
+  // Notify client of successful connection & initial state
+  ws.send(
+    JSON.stringify({
+      type: "SESSION_JOIN_SUCCESS",
+      role: participant.role,
+      userId: participant.id,
+      permissions: participant.permissions,
+      participantKey: isMaster ? undefined : participantKey,
+      session: sanitizeSessionForPublic(session),
+    })
+  );
+
+  const isHostConnected = session.participants.get(session.masterId)?.connected ?? false;
+  if (!isMaster && !isHostConnected) {
+    ws.send(
+      JSON.stringify({
+        type: "HOST_OFFLINE",
+        error: "The host is not connected. This review link is inactive until they rejoin.",
+      })
+    );
+  }
+
+  // Broadcast updated participant list to everyone in session
+  broadcastToSession(token, {
+    type: "PARTICIPANTS_UPDATED",
+    participants: Array.from(session.participants.values()),
+    left: session.left,
+    masterConnected: isHostConnected,
+  });
+
+  // Handle incoming messages
+  ws.on("message", (raw: string) => {
+    try {
+      const data = JSON.parse(raw.toString());
+      const { type } = data;
+
+      if (type === "ADMIT") {
+        if (!isMaster) {
+          ws.send(JSON.stringify({ type: "ERROR", error: "Only host can admit participants" }));
+          return;
+        }
+        const targetUserId = data.userId;
+        const pendingEntry = session.pending.get(targetUserId);
+        if (pendingEntry) {
+          session.pending.delete(targetUserId);
+          if (pendingEntry.onMessage) pendingEntry.ws.off("message", pendingEntry.onMessage);
+          if (pendingEntry.onClose) pendingEntry.ws.off("close", pendingEntry.onClose);
+          completeJoin(pendingEntry.ws, session, targetUserId, pendingEntry.name, false);
+          sendJoinRequests(session);
+        }
+        return;
+      }
+
+      if (type === "DENY") {
+        if (!isMaster) {
+          ws.send(JSON.stringify({ type: "ERROR", error: "Only host can deny participants" }));
+          return;
+        }
+        const targetUserId = data.userId;
+        const pendingEntry = session.pending.get(targetUserId);
+        if (pendingEntry) {
+          session.pending.delete(targetUserId);
+          if (pendingEntry.onMessage) pendingEntry.ws.off("message", pendingEntry.onMessage);
+          if (pendingEntry.onClose) pendingEntry.ws.off("close", pendingEntry.onClose);
+          pendingEntry.ws.send(
+            JSON.stringify({
+              type: "ERROR",
+              fatal: true,
+              reason: "denied",
+              error: "The host declined your request",
+            })
+          );
+          pendingEntry.ws.close(4003, "Declined by host");
+          sendJoinRequests(session);
+        }
+        return;
+      }
+
+      if (type === "LEAVE") {
+        participantKeys.delete(socketKey);
+        const p = session.participants.get(userId);
+        const leftName = p?.name || userName;
+        session.participants.delete(userId);
+        session.left.push({ name: leftName, at: new Date().toISOString() });
+        if (session.left.length > 20) session.left.shift();
+        broadcastToSession(token, {
+          type: "PARTICIPANTS_UPDATED",
+          participants: Array.from(session.participants.values()),
+          left: session.left,
+          masterConnected: session.participants.get(session.masterId)?.connected ?? false,
+        });
+        ws.close(1000, "Left");
+        return;
+      }
+
+      if (type === "VIEWPOINT_UPDATE") {
+        if (!data.viewpoint) return;
+
+        const ownsSessionView = isMaster || participant?.permissions.SLICE_CONTROL || participant?.permissions.ZOOM_PAN;
+        const viewpoint = ownsSessionView
+          ? (session.viewpoint = { ...session.viewpoint, ...data.viewpoint })
+          : { ...session.viewpoint, ...data.viewpoint };
+
+        broadcastToSession(token, {
+          type: "VIEWPOINT_UPDATED",
+          updatedBy: userId,
+          viewpoint,
+        }, ws);
+      } else if (type === "MASK_JOIN") {
+        const { caseId, stem, width, height, base } = data;
+        if (!SLICE_ID.test(String(caseId)) || !SLICE_ID.test(String(stem))) return;
+        if (!Number.isInteger(width) || !Number.isInteger(height) || width < 1 || height < 1 || width * height > 16_000_000) return;
+
+        const key = `${caseId}::${stem}`;
+        let slice = session.masks.get(key);
+        if (!slice) {
+          const canAnnotate = isMaster || participant?.permissions.ANNOTATE;
+          if (!canAnnotate || !isValidRuns(base, width * height)) return;
+          slice = { width, height, labels: new Uint8Array(width * height), seq: 0 };
+          applyRuns(slice.labels, base);
+          session.masks.set(key, slice);
+        }
+
+        broadcastToSession(token, {
+          type: "MASK_SNAPSHOT",
+          caseId, stem,
+          width: slice.width,
+          height: slice.height,
+          seq: slice.seq,
+          runs: nonZeroRuns(slice.labels),
+        });
+      } else if (type === "CURSOR_UPDATE") {
+        if (data.cursor && participant) {
+          participant.cursor = data.cursor;
+          broadcastToSession(token, {
+            type: "CURSOR_UPDATED",
+            userId,
+            name: participant.name,
+            initials: participant.initials,
+            cursor: data.cursor,
+          }, ws);
+        }
+      } else if (type === "MASK_OP") {
+        const canAnnotate = isMaster || participant?.permissions.ANNOTATE;
+        if (!canAnnotate) {
+          ws.send(JSON.stringify({ type: "ERROR", error: "Permission denied: drawing locked by Master" }));
+          return;
+        }
+        const { caseId, stem, opId, runs } = data;
+        const slice = session.masks.get(`${caseId}::${stem}`);
+        if (!slice || !isValidRuns(runs, slice.width * slice.height) || typeof opId !== "string") return;
+
+        applyRuns(slice.labels, runs);
+        slice.seq += 1;
+        broadcastToSession(token, {
+          type: "MASK_OP_APPLIED",
+          caseId, stem, opId, runs,
+          seq: slice.seq,
+          userId,
+        });
+      } else if (type === "PERMISSION_UPDATE") {
+        if (!isMaster) {
+          ws.send(JSON.stringify({ type: "ERROR", error: "Only Master can update permissions" }));
+          return;
+        }
+
+        const { targetUserId, permissions } = data;
+        const target = session.participants.get(targetUserId);
+        if (target && target.role !== "MASTER") {
+          target.permissions = {
+            ...target.permissions,
+            ...permissions,
+          };
+
+          broadcastToSession(token, {
+            type: "PERMISSION_UPDATED",
+            targetUserId,
+            permissions: target.permissions,
+            participants: Array.from(session.participants.values()),
+            left: session.left,
+          });
+        }
+      } else if (type === "REMOVE_USER") {
+        if (!isMaster) {
+          ws.send(JSON.stringify({ type: "ERROR", error: "Only Master can remove users" }));
+          return;
+        }
+
+        const { targetUserId } = data;
+        if (targetUserId !== session.masterId) {
+          session.participants.delete(targetUserId);
+          participantKeys.delete(`${token}::${targetUserId}`);
+
+          for (const [sWs, sMeta] of socketMeta.entries()) {
+            if (sMeta.token === token && sMeta.userId === targetUserId) {
+              sWs.send(JSON.stringify({ type: "USER_REMOVED", reason: "Removed by Master" }));
+              sWs.close(4001, "Removed by Master");
+              socketMeta.delete(sWs);
+            }
+          }
+
+          broadcastToSession(token, {
+            type: "PARTICIPANTS_UPDATED",
+            participants: Array.from(session.participants.values()),
+            left: session.left,
+          });
+        }
+      } else if (type === "END_SESSION") {
+        if (!isMaster) {
+          ws.send(JSON.stringify({ type: "ERROR", error: "Only Master can end session" }));
+          return;
+        }
+
+        session.active = false;
+        broadcastToSession(token, {
+          type: "SESSION_ENDED",
+          reason: "Session closed by Master",
+        });
+
+        // Close all admitted sockets
+        for (const [sWs, sMeta] of socketMeta.entries()) {
+          if (sMeta.token === token) {
+            sWs.close(1000, "Session ended");
+            socketMeta.delete(sWs);
+          }
+        }
+        // Close all pending sockets
+        for (const [_, p] of session.pending) {
+          p.ws.send(JSON.stringify({ type: "SESSION_ENDED", reason: "Session closed by Master" }));
+          p.ws.close(1000, "Session ended");
+        }
+        session.pending.clear();
+        sessions.delete(token);
+        for (const mapKey of [...participantKeys.keys()]) {
+          if (mapKey.startsWith(`${token}::`)) participantKeys.delete(mapKey);
+        }
+      }
+    } catch (err: any) {
+      console.error("Collab WS Error parsing message:", err);
+    }
+  });
+
+  ws.on("close", () => {
+    socketMeta.delete(ws);
+
+    const remaining = activeSockets.get(socketKey);
+    remaining?.delete(ws);
+    if (remaining && remaining.size > 0) return;
+    activeSockets.delete(socketKey);
+
+    if (participant) {
+      participant.connected = false;
+      if (isMaster) {
+        session.masterDisconnectedAt = new Date().toISOString();
+        for (const [sWs, sMeta] of socketMeta.entries()) {
+          if (sMeta.token === token && sMeta.userId !== userId && sWs.readyState === WebSocket.OPEN) {
+            sWs.send(
+              JSON.stringify({
+                type: "HOST_OFFLINE",
+                error: "The host left the review session.",
+              })
+            );
+          }
+        }
+        for (const [_, p] of session.pending) {
+          if (p.ws.readyState === WebSocket.OPEN) {
+            p.ws.send(JSON.stringify({ type: "JOIN_PENDING", hostConnected: false }));
+          }
+        }
+      } else {
+        session.participants.delete(userId);
+      }
+    }
+
+    broadcastToSession(token, {
+      type: "PARTICIPANTS_UPDATED",
+      participants: Array.from(session.participants.values()),
+      left: session.left,
+      masterConnected: session.participants.get(session.masterId)?.connected ?? false,
+    });
+  });
 }
 
 export function initCollaborationWSServer(wss: WebSocketServer) {
@@ -302,293 +667,105 @@ export function initCollaborationWSServer(wss: WebSocketServer) {
       return;
     }
 
-    socketMeta.set(ws, { token, userId });
-    const socketKey = `${token}::${userId}`;
-    const liveSockets = activeSockets.get(socketKey) ?? new Set<WebSocket>();
-    liveSockets.add(ws);
-    activeSockets.set(socketKey, liveSockets);
-
-    // The host is whoever presents the session's host key. Matching on user id
-    // or on a "master_" prefix let anyone claim the role by choosing their own
-    // id - including while the real host was away.
     const presentedHostKey = url.searchParams.get("hostKey") || "";
     const isMaster =
       presentedHostKey.length > 0 &&
       presentedHostKey.length === session.hostKey.length &&
       timingSafeEqual(Buffer.from(presentedHostKey), Buffer.from(session.hostKey));
 
-    if (isMaster && session.masterId !== userId) {
-      // The placeholder entry created with the session belongs to the host too;
-      // drop it so it is not left behind as a second, permanently offline host.
-      const stale = session.participants.get(session.masterId);
-      if (stale && !stale.connected) session.participants.delete(session.masterId);
-      session.masterId = userId;
-    }
-    const role = isMaster ? "MASTER" : "VIEWER";
-
-    // A shared link is only live while the host is in the room. Without this a
-    // viewer could open the link at any time, unsupervised, and keep the scan
-    // on screen for as long as they liked.
-    if (!isMaster && !session.participants.get(session.masterId)?.connected) {
-      ws.send(JSON.stringify({
-        type: "HOST_OFFLINE",
-        error: "The host is not connected. This review link is inactive until they rejoin.",
-      }));
-      ws.close(1008, "Host offline");
-      socketMeta.delete(ws);
-      activeSockets.get(socketKey)?.delete(ws);
+    if (isMaster) {
+      completeJoin(ws, session, userId, userName, true);
+      sendJoinRequests(session);
+      for (const [sWs, sMeta] of socketMeta.entries()) {
+        if (sMeta.token === token && sMeta.userId !== userId && sWs.readyState === WebSocket.OPEN) {
+          sWs.send(JSON.stringify({ type: "HOST_BACK" }));
+        }
+      }
+      for (const [_, p] of session.pending) {
+        if (p.ws.readyState === WebSocket.OPEN) {
+          p.ws.send(JSON.stringify({ type: "JOIN_PENDING", hostConnected: true }));
+        }
+      }
       return;
     }
 
-    let participant = session.participants.get(userId);
-    if (!participant) {
-      participant = {
-        id: userId,
-        name: userName,
-        initials: getInitials(userName),
-        role,
-        connected: true,
-        joinedAt: new Date().toISOString(),
-        permissions: role === "MASTER" ? { ...MASTER_PERMISSIONS } : { ...DEFAULT_VIEWER_PERMISSIONS },
-      };
-      session.participants.set(userId, participant);
-    } else {
-      participant.connected = true;
-      participant.name = userName;
-      participant.initials = getInitials(userName);
-      if (isMaster) {
-        participant.role = "MASTER";
-        participant.permissions = { ...MASTER_PERMISSIONS };
-      }
-    }
-
-    // Stable for the life of the session, so a reconnect does not invalidate
-    // image URLs the viewer already has on screen. Useless while disconnected:
-    // checkCollabAccess also requires a live socket.
-    let participantKey = participantKeys.get(socketKey);
-    if (!isMaster && !participantKey) {
-      participantKey = randomSecret();
-      participantKeys.set(socketKey, participantKey);
-    }
-
-    // Notify client of successful connection & initial state
-    ws.send(
-      JSON.stringify({
-        type: "SESSION_JOIN_SUCCESS",
-        role: participant.role,
-        userId: participant.id,
-        permissions: participant.permissions,
-        // Only ever sent to its owner, on their own socket. The host reads data
-        // through their signed-in session and does not need one.
-        participantKey: isMaster ? undefined : participantKey,
-        session: sanitizeSessionForPublic(session),
-      })
+    const socketKey = `${token}::${userId}`;
+    const presentedRejoinKey = url.searchParams.get("rejoinKey") || "";
+    const existingKey = participantKeys.get(socketKey);
+    const isValidRejoin = Boolean(
+      presentedRejoinKey &&
+      existingKey &&
+      presentedRejoinKey.length === existingKey.length &&
+      timingSafeEqual(Buffer.from(presentedRejoinKey), Buffer.from(existingKey))
     );
 
-    // Broadcast updated participant list to everyone in session
-    broadcastToSession(token, {
-      type: "PARTICIPANTS_UPDATED",
-      participants: Array.from(session.participants.values()),
-    });
+    if (isValidRejoin) {
+      completeJoin(ws, session, userId, userName, false);
+      return;
+    }
 
-    // Handle incoming messages
-    ws.on("message", (raw: string) => {
+    if (session.pending.size >= 20 && !session.pending.has(userId)) {
+      ws.send(JSON.stringify({ type: "ERROR", fatal: true, error: "Lobby full" }));
+      ws.close(1008, "Lobby full");
+      return;
+    }
+
+    const existingPending = session.pending.get(userId);
+    if (existingPending) {
+      if (existingPending.onMessage) existingPending.ws.off("message", existingPending.onMessage);
+      if (existingPending.onClose) existingPending.ws.off("close", existingPending.onClose);
+      try {
+        existingPending.ws.send(
+          JSON.stringify({
+            type: "ERROR",
+            fatal: true,
+            reason: "replaced",
+            error: "This review was opened in another tab",
+          })
+        );
+        existingPending.ws.close(1000, "Replaced by newer connection");
+      } catch { /* ignore */ }
+      session.pending.delete(userId);
+    }
+
+    const pendingMessageHandler = (raw: string) => {
       try {
         const data = JSON.parse(raw.toString());
-        const { type } = data;
-
-        if (type === "VIEWPOINT_UPDATE") {
-          if (!data.viewpoint) return;
-
-          // Anyone may publish where they are looking: a viewpoint is only
-          // acted on by participants who have chosen to follow that person, so
-          // publishing it controls nobody. The session's own viewpoint — what
-          // a late joiner opens on — stays owned by the Master and by viewers
-          // the Master has given slice control to.
-          const ownsSessionView = isMaster || participant?.permissions.SLICE_CONTROL || participant?.permissions.ZOOM_PAN;
-          const viewpoint = ownsSessionView
-            ? (session.viewpoint = { ...session.viewpoint, ...data.viewpoint })
-            : { ...session.viewpoint, ...data.viewpoint };
-
-          broadcastToSession(token, {
-            type: "VIEWPOINT_UPDATED",
-            updatedBy: userId,
-            viewpoint,
-          }, ws);
-        } else if (type === "MASK_JOIN") {
-          // A client has opened a slice and wants the live state. The first
-          // participant allowed to annotate seeds it with what they have on
-          // screen, so their unsaved work is not lost; everyone after that gets
-          // the server's copy.
-          const { caseId, stem, width, height, base } = data;
-          if (!SLICE_ID.test(String(caseId)) || !SLICE_ID.test(String(stem))) return;
-          if (!Number.isInteger(width) || !Number.isInteger(height) || width < 1 || height < 1 || width * height > 16_000_000) return;
-
-          const key = `${caseId}::${stem}`;
-          let slice = session.masks.get(key);
-          if (!slice) {
-            const canAnnotate = isMaster || participant?.permissions.ANNOTATE;
-            if (!canAnnotate || !isValidRuns(base, width * height)) return;
-            slice = { width, height, labels: new Uint8Array(width * height), seq: 0 };
-            applyRuns(slice.labels, base);
-            session.masks.set(key, slice);
-          }
-
-          // Sent to everyone: a viewer already on this slice, who could not
-          // seed it, is waiting for exactly this.
-          broadcastToSession(token, {
-            type: "MASK_SNAPSHOT",
-            caseId, stem,
-            width: slice.width,
-            height: slice.height,
-            seq: slice.seq,
-            runs: nonZeroRuns(slice.labels),
-          });
-        } else if (type === "CURSOR_UPDATE") {
-          if (data.cursor && participant) {
-            participant.cursor = data.cursor;
-            broadcastToSession(token, {
-              type: "CURSOR_UPDATED",
-              userId,
-              name: participant.name,
-              initials: participant.initials,
-              cursor: data.cursor,
-            }, ws);
-          }
-        } else if (type === "MASK_OP") {
-          const canAnnotate = isMaster || participant?.permissions.ANNOTATE;
-          if (!canAnnotate) {
-            ws.send(JSON.stringify({ type: "ERROR", error: "Permission denied: drawing locked by Master" }));
-            return;
-          }
-          const { caseId, stem, opId, runs } = data;
-          const slice = session.masks.get(`${caseId}::${stem}`);
-          if (!slice || !isValidRuns(runs, slice.width * slice.height) || typeof opId !== "string") return;
-
-          // Applied and numbered here, then sent to everyone including the
-          // author, so every screen applies edits in this one order.
-          applyRuns(slice.labels, runs);
-          slice.seq += 1;
-          broadcastToSession(token, {
-            type: "MASK_OP_APPLIED",
-            caseId, stem, opId, runs,
-            seq: slice.seq,
-            userId,
-          });
-        } else if (type === "PERMISSION_UPDATE") {
-          if (!isMaster) {
-            ws.send(JSON.stringify({ type: "ERROR", error: "Only Master can update permissions" }));
-            return;
-          }
-
-          const { targetUserId, permissions } = data;
-          const target = session.participants.get(targetUserId);
-          if (target && target.role !== "MASTER") {
-            target.permissions = {
-              ...target.permissions,
-              ...permissions,
-            };
-
-            // Notify target user directly & broadcast
-            broadcastToSession(token, {
-              type: "PERMISSION_UPDATED",
-              targetUserId,
-              permissions: target.permissions,
-              participants: Array.from(session.participants.values()),
-            });
-          }
-        } else if (type === "REMOVE_USER") {
-          if (!isMaster) {
-            ws.send(JSON.stringify({ type: "ERROR", error: "Only Master can remove users" }));
-            return;
-          }
-
-          const { targetUserId } = data;
-          if (targetUserId !== session.masterId) {
-            session.participants.delete(targetUserId);
-            participantKeys.delete(`${token}::${targetUserId}`);
-
-            // Disconnect target socket if connected
-            for (const [sWs, sMeta] of socketMeta.entries()) {
-              if (sMeta.token === token && sMeta.userId === targetUserId) {
-                sWs.send(JSON.stringify({ type: "USER_REMOVED", reason: "Removed by Master" }));
-                sWs.close(4001, "Removed by Master");
-                socketMeta.delete(sWs);
-              }
-            }
-
-            broadcastToSession(token, {
-              type: "PARTICIPANTS_UPDATED",
-              participants: Array.from(session.participants.values()),
-            });
-          }
-        } else if (type === "END_SESSION") {
-          if (!isMaster) {
-            ws.send(JSON.stringify({ type: "ERROR", error: "Only Master can end session" }));
-            return;
-          }
-
-          session.active = false;
-          broadcastToSession(token, {
-            type: "SESSION_ENDED",
-            reason: "Session closed by Master",
-          });
-
-          // Close all sockets
-          for (const [sWs, sMeta] of socketMeta.entries()) {
-            if (sMeta.token === token) {
-              sWs.close(1000, "Session ended");
-              socketMeta.delete(sWs);
-            }
-          }
-          sessions.delete(token);
-          for (const mapKey of [...participantKeys.keys()]) {
-            if (mapKey.startsWith(`${token}::`)) participantKeys.delete(mapKey);
-          }
+        if (data.type === "LEAVE") {
+          session.pending.delete(userId);
+          sendJoinRequests(session);
+          ws.close(1000, "Left lobby");
         }
-      } catch (err: any) {
-        console.error("Collab WS Error parsing message:", err);
+      } catch { /* ignore */ }
+    };
+
+    const pendingCloseHandler = () => {
+      const currPending = session.pending.get(userId);
+      if (currPending && currPending.ws === ws) {
+        session.pending.delete(userId);
+        sendJoinRequests(session);
       }
+    };
+
+    ws.on("message", pendingMessageHandler);
+    ws.on("close", pendingCloseHandler);
+
+    session.pending.set(userId, {
+      ws,
+      name: userName,
+      since: new Date().toISOString(),
+      onMessage: pendingMessageHandler,
+      onClose: pendingCloseHandler,
     });
 
-    ws.on("close", () => {
-      socketMeta.delete(ws);
+    const hostConnected = session.participants.get(session.masterId)?.connected ?? false;
+    ws.send(JSON.stringify({
+      type: "JOIN_PENDING",
+      hostConnected,
+    }));
 
-      // A client that reconnects (page refresh, React re-mount) opens its new
-      // socket before the old one finishes closing, and a second tab is a
-      // legitimate extra socket. Only tear the participant down once none of
-      // their sockets remain.
-      const remaining = activeSockets.get(socketKey);
-      remaining?.delete(ws);
-      if (remaining && remaining.size > 0) return;
-      activeSockets.delete(socketKey);
-
-      if (participant) {
-        participant.connected = false;
-        if (isMaster) {
-          session.masterDisconnectedAt = new Date().toISOString();
-          // Close the room behind the host rather than leaving viewers holding
-          // an unattended scan.
-          for (const [sWs, sMeta] of socketMeta.entries()) {
-            if (sMeta.token === token && sMeta.userId !== userId && sWs.readyState === WebSocket.OPEN) {
-              sWs.send(JSON.stringify({
-                type: "HOST_OFFLINE",
-                error: "The host left the review session.",
-              }));
-              sWs.close(1000, "Host offline");
-            }
-          }
-        } else {
-          // Remove disconnected non-master viewers so stale reconnect profiles don't accumulate
-          session.participants.delete(userId);
-        }
-      }
-
-      broadcastToSession(token, {
-        type: "PARTICIPANTS_UPDATED",
-        participants: Array.from(session.participants.values()),
-        masterConnected: session.participants.get(session.masterId)?.connected ?? false,
-      });
-    });
+    if (hostConnected) {
+      sendJoinRequests(session);
+    }
   });
 }

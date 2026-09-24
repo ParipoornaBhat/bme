@@ -48,6 +48,10 @@ export type MaskRuns = number[];
 export type MaskSnapshot = { caseId: string; stem: string; width: number; height: number; seq: number; runs: MaskRuns };
 export type MaskOpApplied = { caseId: string; stem: string; opId: string; runs: MaskRuns; seq: number; userId: string };
 
+export type AdmissionState = "connecting" | "waiting" | "admitted" | "denied" | "left" | "replaced";
+export type JoinRequest = { userId: string; name: string; since: string };
+export type LeftParticipant = { name: string; at: string };
+
 export type UseCollaborationOptions = {
   token: string;
   userId?: string;
@@ -103,6 +107,10 @@ export function useCollaboration({
   // Set when the server says this session does not exist or has ended - for
   // instance a host reloading into a session the server no longer has.
   const [sessionInvalid, setSessionInvalid] = useState(false);
+  const [admission, setAdmission] = useState<AdmissionState>("connecting");
+  const [waitingHostConnected, setWaitingHostConnected] = useState(true);
+  const [joinRequests, setJoinRequests] = useState<JoinRequest[]>([]);
+  const [leftList, setLeftList] = useState<LeftParticipant[]>([]);
   // Bumped to re-run the connect effect. The server closes viewer sockets when
   // the host leaves, so without retrying the link stays dead until a refresh.
   const [reconnectTick, setReconnectTick] = useState(0);
@@ -160,12 +168,27 @@ export function useCollaboration({
         }
       } catch { /* fallback */ }
     }
+    let rejoinKey = "";
+    if (typeof window !== "undefined") {
+      try {
+        rejoinKey = localStorage.getItem(`bme_collab_key_${token}`) || "";
+      } catch { /* fallback */ }
+    }
     const uid = userId || defaultUid || `user_${Math.random().toString(36).substring(2, 9)}`;
     const uname = userName || `Dr. ${uid.slice(-4)}`;
 
     const hostParam = hostKey ? `&hostKey=${encodeURIComponent(hostKey)}` : "";
-    return `${protocol}//${host}/ws/collaborate?token=${encodeURIComponent(token)}&userId=${encodeURIComponent(uid)}&userName=${encodeURIComponent(uname)}${hostParam}`;
+    const rejoinParam = rejoinKey ? `&rejoinKey=${encodeURIComponent(rejoinKey)}` : "";
+    return `${protocol}//${host}/ws/collaborate?token=${encodeURIComponent(token)}&userId=${encodeURIComponent(uid)}&userName=${encodeURIComponent(uname)}${hostParam}${rejoinParam}`;
   }, [token, userId, userName, hostKey]);
+
+  const clearStoredKey = useCallback(() => {
+    if (typeof window !== "undefined") {
+      try {
+        localStorage.removeItem(`bme_collab_key_${token}`);
+      } catch { /* ignore */ }
+    }
+  }, [token]);
 
   // Everything below describes one session. Without this, ending a session
   // and starting another on the same page carried the old one's state into it:
@@ -178,6 +201,10 @@ export function useCollaboration({
     setHostOffline(false);
     setSessionInvalid(false);
     setParticipantKey(null);
+    setAdmission("connecting");
+    setWaitingHostConnected(true);
+    setJoinRequests([]);
+    setLeftList([]);
   }, [token]);
 
   useEffect(() => {
@@ -209,14 +236,36 @@ export function useCollaboration({
           // arrive as errors too, and must not kill the connection.
           if (data.fatal) {
             fatalRef.current = true;
-            setSessionInvalid(true);
+            if (data.reason === "denied") {
+              setAdmission("denied");
+              clearStoredKey();
+            } else if (data.reason === "replaced") {
+              setAdmission("replaced");
+              clearStoredKey();
+            } else {
+              setSessionInvalid(true);
+              clearStoredKey();
+            }
           }
           console.warn("Collaboration error:", data.error);
+        } else if (data.type === "JOIN_PENDING") {
+          setAdmission("waiting");
+          setWaitingHostConnected(Boolean(data.hostConnected));
+        } else if (data.type === "JOIN_REQUESTS") {
+          setJoinRequests(data.pending || []);
         } else if (data.type === "HOST_OFFLINE") {
           setHostOffline(true);
+        } else if (data.type === "HOST_BACK") {
+          setHostOffline(false);
         } else if (data.type === "SESSION_JOIN_SUCCESS") {
+          setAdmission("admitted");
           setHostOffline(false);
           setParticipantKey(data.participantKey ?? null);
+          if (data.participantKey && typeof window !== "undefined") {
+            try {
+              localStorage.setItem(`bme_collab_key_${token}`, data.participantKey);
+            } catch { /* ignore */ }
+          }
           setRole(data.role);
           currentUserIdRef.current = data.userId;
           setCurrentUserId(data.userId);
@@ -225,6 +274,7 @@ export function useCollaboration({
             setCaseId(data.session.caseId);
             setViewpoint(data.session.viewpoint);
             setParticipants(data.session.participants);
+            if (data.session.left) setLeftList(data.session.left);
           }
         } else if (data.type === "VIEWPOINT_UPDATED") {
           if (data.viewpoint) {
@@ -246,9 +296,15 @@ export function useCollaboration({
           if (data.participants) {
             setParticipants(data.participants);
           }
+          if (data.left) {
+            setLeftList(data.left);
+          }
         } else if (data.type === "PARTICIPANTS_UPDATED") {
           if (data.participants) {
             setParticipants(data.participants);
+          }
+          if (data.left) {
+            setLeftList(data.left);
           }
         } else if (data.type === "MASK_SNAPSHOT") {
           if (callbacksRef.current.onMaskSnapshot) {
@@ -261,12 +317,14 @@ export function useCollaboration({
         } else if (data.type === "USER_REMOVED") {
           setRemoved(true);
           fatalRef.current = true;
+          clearStoredKey();
           if (callbacksRef.current.onUserRemoved) {
             callbacksRef.current.onUserRemoved();
           }
         } else if (data.type === "SESSION_ENDED") {
           setSessionEnded(true);
           fatalRef.current = true;
+          clearStoredKey();
           if (callbacksRef.current.onSessionEnded) {
             callbacksRef.current.onSessionEnded();
           }
@@ -391,6 +449,34 @@ export function useCollaboration({
     );
   }, []);
 
+  const admit = useCallback((targetUserId: string) => {
+    if (!socketRef.current || socketRef.current.readyState !== WebSocket.OPEN) return;
+    socketRef.current.send(JSON.stringify({ type: "ADMIT", userId: targetUserId }));
+  }, []);
+
+  const deny = useCallback((targetUserId: string) => {
+    if (!socketRef.current || socketRef.current.readyState !== WebSocket.OPEN) return;
+    socketRef.current.send(JSON.stringify({ type: "DENY", userId: targetUserId }));
+  }, []);
+
+  const leave = useCallback(() => {
+    if (socketRef.current && socketRef.current.readyState === WebSocket.OPEN) {
+      socketRef.current.send(JSON.stringify({ type: "LEAVE" }));
+    }
+    clearStoredKey();
+    setParticipantKey(null);
+    setAdmission("left");
+    fatalRef.current = true;
+  }, [clearStoredKey]);
+
+  const rejoinLobby = useCallback(() => {
+    clearStoredKey();
+    fatalRef.current = false;
+    setAdmission("connecting");
+    setSessionInvalid(false);
+    setReconnectTick((t) => t + 1);
+  }, [clearStoredKey]);
+
   return {
     connected,
     role,
@@ -404,6 +490,14 @@ export function useCollaboration({
     hostOffline,
     participantKey,
     sessionInvalid,
+    admission,
+    waitingHostConnected,
+    joinRequests,
+    leftList,
+    admit,
+    deny,
+    leave,
+    rejoinLobby,
     updateViewpoint,
     updateCursor,
     sendMaskJoin,
