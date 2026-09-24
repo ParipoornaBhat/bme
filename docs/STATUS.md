@@ -4,7 +4,7 @@
 If you are picking this project up cold (new chat, new teammate, new machine), read this
 file first, then [SUMMARY.md](SUMMARY.md) for the full picture, then [PRD.md](PRD.md).
 
-Last updated: **2026-09-23**
+Last updated: **2026-09-24**
 
 ---
 
@@ -45,7 +45,7 @@ Phases are defined in [PRD.md](PRD.md) §8.
 | — | Annotation viewer: Four-Up, crosshair sync, pencil fill, 3D surface | ✅ save round-trip verified |
 | — | Web app: annotate / training / results / storage | ✅ built and API-verified |
 | — | Full pseudonymisation of every filename | ✅ 108 archives + 121 images renamed |
-| **1** | **Annotation pipeline** | 🟡 **0 cases done. The critical path.** |
+| **1** | **Annotation pipeline** | 🟡 **0 cases done. The critical path.** Tooling ready: 2D/3D annotation + live collaborative review. |
 | — | nnU-Net dataset builder + training wrapper | ✅ **verified** against synthetic Slicer-format .seg.nrrd — geometry, splits, leak checks all pass |
 | 2 | Stage B — bone/marrow segmentation | ⬜ blocked on Phase 1 |
 | 3 | Stage C — BME segmentation | ⬜ |
@@ -59,6 +59,19 @@ Phases are defined in [PRD.md](PRD.md) §8.
 ## Do this next
 
 In order. Each step's output is the next step's input.
+
+0. **Review and annotation tool suite complete (2026-09-24, branch `collaborative-radiologist-view`).**
+   All 5 collaborative review and annotation tasks are implemented:
+   - **Name prompt fix:** The server renders no form until the page has mounted, so a click before the JS loads can't reload the page; storage writes are try-wrapped.
+   - **Host lobby, rejoin and leave:** Host admission lobby with messages `JOIN_PENDING` / `JOIN_REQUESTS` / `ADMIT` / `DENY` / `LEAVE` / `HOST_BACK`, 20-guest cap, guest rejoin via session `rejoinKey`, and replacement of older duplicate pending sockets.
+   - **Views and opacity:** Label views: Both / Red / Green / None (key V), opacity 0–100%, local to each screen, in 2D painter, 3D multi-planar viewer, and 3D surface render.
+   - **Protect lesion:** Pure `canPaint` helper prevents the green bone brush (label 1) from overwriting existing red BME lesions (label 2) across both 2D and 3D brush and pencil fill loops, controlled by a "Protect lesion" toggle (default on, persisted as `bme_protect_lesion`).
+   - **3D Torch:** Torch tool (key `7`) and hold-`T` peek in the 3D viewer (`Viewer.tsx`) with a thin dual-tone radius ring, skipping label blending over raw scan pixels without altering the volume label buffer.
+
+   **Not verified (plainly needed on real hardware/data):**
+   - Live lobby (admit/deny/rejoin/leave) needs a signed-in host.
+   - 3D tab (views, opacity, protect lesion, torch) needs a machine with `data/nifti` volumes.
+   - Torch + opacity together in the browser.
 
 00. **Every `/api` route now requires auth (2026-09-23, branch
    `collaborative-radiologist-view`).** Until then none checked who was asking:
@@ -220,6 +233,11 @@ Carried from [PRD.md](PRD.md) §10, updated with what the data answered.
 | 3 scanners, 2 vendors | Raw intensities not comparable | Normalization in PRD §4.1 is mandatory. |
 | **A live Supabase password was committed in `.env.example`** on `collaborative-radiologist-view` | It was public on GitHub. Scrubbed from the branch history by force-push on 2026-09-23, but anyone who fetched earlier still has it, and GitHub keeps orphaned commits reachable by hash for a while | **Rotate the password in Supabase.** The scrub does not make the old one safe. |
 | ~~API served patient data with no auth; host role claimable by a `master_` user id; sign-up as `admin@thunder.com` auto-granted admin; `seed-trial` route minted that account~~ | **Fixed 2026-09-23** | Middleware, per-session host key, per-participant guest keys; backdoor hook and route removed. |
+| ~~Guest asked name twice on `/collaborate/[token]`; anyone with link joined review automatically without host review~~ | **Fixed 2026-09-24** | The server renders no form until the page has mounted, so a click before the JS loads can't reload the page; storage writes are try-wrapped. Host admission lobby (`JOIN_PENDING` / `JOIN_REQUESTS` / `ADMIT` / `DENY` / `LEAVE` / `HOST_BACK`), rejoin via `rejoinKey`, and replacement of older duplicate pending sockets. |
+| ~~Green bone brush overwrote red lesion boundaries in 2D and 3D~~ | **Fixed 2026-09-24** | Unified `canPaint` rule with "Protect lesion" toggle (on by default) across brush and pencil in 2D and 3D. |
+| ~~3D viewer lacked under-annotation peek capability~~ | **Fixed 2026-09-24** | Added 3D Torch tool (key 7) and hold-`T` peek with radius ring, non-destructive to volume label buffer. |
+| Five 2D masks saved before the canvas-noise fix contain flipped pixels (worst: NBME-2D-002_s000, 84; also BME-2D-005_s000, BME-2D-009_s001/s002/s003) | Label noise in training data | Repair pending: back up, dry-run, revert only pixels that differ from all 8 neighbours. |
+| Two machines serve the same tunnel hostname | Guests land on either machine at random; sessions/logins don't carry across | Run the tunnel on one machine only. Use pnpm build + pnpm start for guest sessions. |
 | Review sessions live in server memory | A restart of the API ends every open review | Acceptable for a demo tool; persist them if reviews ever need to survive restarts. |
 | `/api/collaborate/session/<token>` answers without auth | Anyone holding a token sees participant names | Minor; it serves no study data. Trim the response if it matters. |
 
