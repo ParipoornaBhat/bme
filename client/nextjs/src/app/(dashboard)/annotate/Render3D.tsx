@@ -28,17 +28,19 @@ type Quad = { z: number; pts: [number, number][]; shade: number; color: string }
 type SegDef = { value: number; label: string; color: string };
 
 export default function Render3D({
-  labels, dims, spacing, segments,
+  labels, dims, spacing, segments, hidden: controlledHidden,
 }: {
   labels: Uint8Array | null;
   dims: [number, number, number];
   spacing: [number, number, number];
   segments: ReadonlyArray<SegDef>;
+  hidden?: Set<number>;
 }) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const [built, setBuilt] = useState<Array<{ value: number; quads: P3[][] }> | null>(null);
   const [counts, setCounts] = useState<Record<number, number>>({});
-  const [hidden, setHidden] = useState<Set<number>>(new Set());
+  const [internalHidden, setInternalHidden] = useState<Set<number>>(new Set());
+  const hidden = controlledHidden !== undefined ? controlledHidden : internalHidden;
   const [building, setBuilding] = useState(false);
   const [yaw, setYaw] = useState(0.7);
   const [pitch, setPitch] = useState(-0.32);
@@ -256,9 +258,23 @@ export default function Render3D({
             {built.map((g) => {
               const def = segments.find((s) => s.value === g.value)!;
               const off = hidden.has(g.value);
+              if (controlledHidden !== undefined) {
+                return (
+                  <span
+                    key={g.value}
+                    title={off ? "Hidden by view filter" : def.label}
+                    className={`inline-flex items-center gap-1 ${off ? "opacity-35" : ""}`}
+                  >
+                    <span className="h-2 w-2 rounded-sm" style={{ background: def.color }} />
+                    <span className="tabular-nums">
+                      {def.label}: {((counts[g.value] ?? 0) * voxel).toFixed(0)} mm&sup3;
+                    </span>
+                  </span>
+                );
+              }
               return (
                 <button key={g.value}
-                  onClick={() => setHidden((h) => {
+                  onClick={() => setInternalHidden((h) => {
                     const n = new Set(h);
                     if (n.has(g.value)) n.delete(g.value); else n.add(g.value);
                     return n;

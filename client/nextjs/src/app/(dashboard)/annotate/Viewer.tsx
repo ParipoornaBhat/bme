@@ -33,6 +33,13 @@ import { toast } from "sonner";
 import { useSession } from "~/lib/auth-client";
 import Render3D from "./Render3D";
 import CollaborationMasterPanel from "~/components/collaborate/CollaborationMasterPanel";
+import {
+  useOverlayView,
+  isLabelVisible,
+  blendLabel,
+  hiddenLabelsForView,
+  OverlayControls,
+} from "~/lib/useOverlayView";
 import { useCollaboration } from "~/lib/useCollaboration";
 
 /**
@@ -184,6 +191,9 @@ export default function Viewer({ caseId, onSaved }: { caseId: string; onSaved?: 
   const [dirty, setDirty] = useState(false);
   const [saving, setSaving] = useState(false);
   const [counts, setCounts] = useState<[number, number, number]>([0, 0, 0]);
+  const { opacity, view, setOpacity, setView, cycleView } = useOverlayView();
+  const cycleViewRef = useRef(cycleView);
+  cycleViewRef.current = cycleView;
 
   // Collaboration States
   const [collabToken, setCollabToken] = useState<string | null>(null);
@@ -434,14 +444,15 @@ export default function Viewer({ caseId, onSaved }: { caseId: string; onSaved?: 
         let g = Math.round(((Math.min(Math.max(v, lo), hi) - lo) / range) * 255);
         let r = g, bl = g;
         const lv = labels[flat];
-        if (lv) {
-          const c = SEGMENTS.find((x) => x.value === lv)!.color;
-          const cr = parseInt(c.slice(1, 3), 16),
-            cg = parseInt(c.slice(3, 5), 16),
-            cb = parseInt(c.slice(5, 7), 16);
-          r = Math.round(g * 0.45 + cr * 0.55);
-          g = Math.round(g * 0.45 + cg * 0.55);
-          bl = Math.round(bl * 0.45 + cb * 0.55);
+        if (lv && isLabelVisible(lv, view)) {
+          const segDef = SEGMENTS.find((x) => x.value === lv);
+          if (segDef) {
+            const c = segDef.color;
+            const cr = parseInt(c.slice(1, 3), 16),
+              cg = parseInt(c.slice(3, 5), 16),
+              cb = parseInt(c.slice(5, 7), 16);
+            [r, g, bl] = blendLabel(g, [cr, cg, cb], opacity);
+          }
         }
         const o = ((h - 1 - b) * w + a) * 4; // flip so anatomy is upright
         img.data[o] = r; img.data[o + 1] = g; img.data[o + 2] = bl; img.data[o + 3] = 255;
@@ -479,7 +490,7 @@ export default function Viewer({ caseId, onSaved }: { caseId: string; onSaved?: 
       ctx.stroke();
       ctx.restore();
     }
-  }, [vol, labels, cursor, seg, outlineTick, planeGeom, sampleAt, cursorInPlane, sliceOf]);
+  }, [vol, labels, cursor, seg, outlineTick, planeGeom, sampleAt, cursorInPlane, sliceOf, view, opacity]);
 
   const drawAll = useCallback(() => { PLANES.forEach(draw); }, [draw]);
   useEffect(() => { drawAll(); }, [drawAll]);
@@ -717,6 +728,7 @@ export default function Viewer({ caseId, onSaved }: { caseId: string; onSaved?: 
       else if (e.key === "4" || e.key.toLowerCase() === "b") { setTool("brush"); setErasing(false); }
       else if (e.key === "5" || e.key.toLowerCase() === "p") { setTool("pencil"); setErasing(false); }
       else if (e.key === "0" || e.key.toLowerCase() === "e") setErasing((v) => !v);
+      else if (e.key.toLowerCase() === "v") cycleViewRef.current();
       else if (e.key.toLowerCase() === "l") setLocked((v) => !v);
       else if (e.key === "Enter") { e.preventDefault(); commitOutline(); }
       else if (e.key === "Escape") {
@@ -987,6 +999,14 @@ export default function Viewer({ caseId, onSaved }: { caseId: string; onSaved?: 
               </div>
             )}
 
+            {/* Overlay View and Opacity Controls */}
+            <OverlayControls
+              view={view}
+              setView={setView}
+              opacity={opacity}
+              setOpacity={setOpacity}
+            />
+
             {/* Undo & Redo */}
             <div className="inline-flex overflow-hidden rounded-md border border-border">
               <button
@@ -1189,6 +1209,7 @@ export default function Viewer({ caseId, onSaved }: { caseId: string; onSaved?: 
             dims={vol.dims}
             spacing={vol.spacing}
             segments={SEGMENTS}
+            hidden={hiddenLabelsForView(view)}
           />
 
           <div className="rounded-lg border border-border bg-card p-3 text-xs">

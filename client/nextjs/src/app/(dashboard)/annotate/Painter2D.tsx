@@ -51,6 +51,11 @@ import {
   type ViewpointState,
 } from "~/lib/useCollaboration";
 import { MaskSync, type MaskSyncIO } from "~/lib/mask-sync";
+import {
+  useOverlayView,
+  renderLabels,
+  OverlayControls,
+} from "~/lib/useOverlayView";
 
 export type Case2DSlice = {
   caseId: string;
@@ -138,6 +143,11 @@ export default function Painter2D({
   const applyViewpointRef = useRef<(vp: ViewpointState) => void>(() => {});
   const [counts, setCounts] = useState<{ bone: number; bme: number; uncertain: number }>({ bone: 0, bme: 0, uncertain: 0 });
   const countsRef = useRef<{ bone: number; bme: number; uncertain: number }>({ bone: 0, bme: 0, uncertain: 0 });
+  const { opacity, view, setOpacity, setView, cycleView } = useOverlayView();
+  const viewRef = useRef(view);
+  viewRef.current = view;
+  const cycleViewRef = useRef(cycleView);
+  cycleViewRef.current = cycleView;
 
   const [zoom, setZoom] = useState<number>(1);
   const [pan, setPan] = useState<{ x: number; y: number }>({ x: 0, y: 0 });
@@ -592,41 +602,8 @@ export default function Painter2D({
     if (!ctx) return;
 
     const imgData = ctx.createImageData(w, h);
-    const data = imgData.data;
-
-    let bCount = 0, lCount = 0, uCount = 0;
-
-    for (let i = 0; i < mask.length; i++) {
-      const v = mask[i];
-      const p = i * 4;
-      if (v === 1) {
-        // Bone: Green
-        data[p] = 16;
-        data[p + 1] = 185;
-        data[p + 2] = 129;
-        data[p + 3] = 165;
-        bCount++;
-      } else if (v === 2) {
-        // BME: Red
-        data[p] = 239;
-        data[p + 1] = 68;
-        data[p + 2] = 68;
-        data[p + 3] = 185;
-        lCount++;
-      } else if (v === 3) {
-        // Uncertain: Amber
-        data[p] = 245;
-        data[p + 1] = 158;
-        data[p + 2] = 11;
-        data[p + 3] = 175;
-        uCount++;
-      } else {
-        data[p + 3] = 0;
-      }
-    }
-
+    const { counts: newCounts } = renderLabels(mask, w, h, viewRef.current, imgData.data);
     ctx.putImageData(imgData, 0, 0);
-    const newCounts = { bone: bCount, bme: lCount, uncertain: uCount };
     setCounts(newCounts);
     countsRef.current = newCounts;
 
@@ -718,6 +695,18 @@ export default function Painter2D({
   // on it would restart the in-flight load each time a participant moves.
   const renderMaskRef = useRef(renderMaskToCanvas);
   renderMaskRef.current = renderMaskToCanvas;
+
+  // Re-render canvas when view filter changes
+  useEffect(() => {
+    renderMaskRef.current();
+  }, [view]);
+
+  // Synchronize CSS opacity on mask canvas with opacity state
+  useEffect(() => {
+    if (maskCanvasRef.current) {
+      maskCanvasRef.current.style.opacity = String(opacity / 100);
+    }
+  }, [opacity]);
 
 
   applyViewpointRef.current = (vp) => {
@@ -1716,6 +1705,7 @@ export default function Painter2D({
       else if (e.key === "z" && (e.ctrlKey || e.metaKey) && !e.shiftKey) { e.preventDefault(); undo(); }
       else if (((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "y") || ((e.ctrlKey || e.metaKey) && e.shiftKey && e.key.toLowerCase() === "z")) { e.preventDefault(); redo(); }
       else if (e.key === "s" && (e.ctrlKey || e.metaKey)) { e.preventDefault(); saveMask(); }
+      else if (e.key.toLowerCase() === "v" && !e.ctrlKey && !e.metaKey && !e.altKey) { cycleViewRef.current(); }
       else if (e.key === "[") {
         if (torchActiveRef.current) setTorchSize((t) => Math.max(8, t - 8));
         else setBrushSize((b) => Math.max(2, b - 4));
@@ -2180,6 +2170,13 @@ export default function Painter2D({
                     >
                       <RotateCw className="h-3.5 w-3.5" />
                     </button>
+                    <OverlayControls
+                      view={view}
+                      setView={setView}
+                      opacity={opacity}
+                      setOpacity={setOpacity}
+                      compact={true}
+                    />
                   </>
                 ) : (
                   <div className="flex items-center gap-1.5">
@@ -2188,15 +2185,22 @@ export default function Painter2D({
                       <span className="hidden sm:inline">Review Mode</span>
                     </div>
                     <button
-                    type="button"
-                    onClick={() => setTool((t) => (t === "torch" ? "pan" : "torch"))}
-                    title="Torch - see the scan under the annotation. Nothing is changed. (Key 7, or hold T)"
-                    className={`inline-flex items-center gap-1.5 rounded-md px-2.5 py-1 text-xs font-medium border transition cursor-pointer ${
-                      tool === "torch" ? "bg-primary text-primary-foreground border-primary" : "border-border bg-background text-muted-foreground hover:text-foreground"
-                    }`}
-                  >
-                    <Flashlight className="h-3 w-3" /> Torch
-                  </button>
+                      type="button"
+                      onClick={() => setTool((t) => (t === "torch" ? "pan" : "torch"))}
+                      title="Torch - see the scan under the annotation. Nothing is changed. (Key 7, or hold T)"
+                      className={`inline-flex items-center gap-1.5 rounded-md px-2.5 py-1 text-xs font-medium border transition cursor-pointer ${
+                        tool === "torch" ? "bg-primary text-primary-foreground border-primary" : "border-border bg-background text-muted-foreground hover:text-foreground"
+                      }`}
+                    >
+                      <Flashlight className="h-3 w-3" /> Torch
+                    </button>
+                    <OverlayControls
+                      view={view}
+                      setView={setView}
+                      opacity={opacity}
+                      setOpacity={setOpacity}
+                      compact={true}
+                    />
                   </div>
                 )}
               </div>
@@ -2385,6 +2389,13 @@ export default function Painter2D({
                     />
                     <span>Only inside bone</span>
                   </label>
+                  <div className="mx-1 h-5 w-px bg-border" />
+                  <OverlayControls
+                    view={view}
+                    setView={setView}
+                    opacity={opacity}
+                    setOpacity={setOpacity}
+                  />
                 </div>
               ) : (
                 <div className="flex items-center gap-2">
@@ -2402,6 +2413,13 @@ export default function Painter2D({
                   >
                     <Flashlight className="h-3.5 w-3.5" /> Torch
                   </button>
+                  <div className="mx-1 h-5 w-px bg-border" />
+                  <OverlayControls
+                    view={view}
+                    setView={setView}
+                    opacity={opacity}
+                    setOpacity={setOpacity}
+                  />
                 </div>
               )}
 
@@ -2739,7 +2757,7 @@ export default function Painter2D({
               // re-applies it on the render that follows setImgDim, and
               // assigning canvas.width wipes the canvas - so the mask is
               // cleared a second time, after it has already been drawn.
-              style={{ width: "100%", height: "100%", touchAction: "none" }}
+              style={{ width: "100%", height: "100%", touchAction: "none", opacity: opacity / 100 }}
               onMouseDown={handleMouseDown}
               onMouseMove={handleMouseMove}
               onMouseUp={handleMouseUp}
