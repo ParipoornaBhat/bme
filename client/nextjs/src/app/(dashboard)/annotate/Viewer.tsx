@@ -9,6 +9,7 @@ import {
   ChevronUp,
   Eraser,
   Flag,
+  Flashlight,
   Hand,
   Lasso,
   Link2,
@@ -42,6 +43,7 @@ import {
 } from "~/lib/useOverlayView";
 import { useCollaboration } from "~/lib/useCollaboration";
 import { canPaint } from "~/lib/paint-rules";
+import { isInTorch, type TorchState } from "~/lib/torch";
 
 /**
  * Three-plane viewer with painting, modelled on 3D Slicer's Four-Up layout.
@@ -174,7 +176,18 @@ export default function Viewer({ caseId, onSaved }: { caseId: string; onSaved?: 
   const [seg, setSeg] = useState<number>(1);
   const [brush, setBrush] = useState(6);
   const [erasing, setErasing] = useState(false);
-  const [tool, setTool] = useState<"brush" | "pencil">("brush");
+  const [tool, setTool] = useState<"brush" | "pencil" | "torch">("brush");
+  const [torchSize, setTorchSize] = useState(48);
+  const [torchHeld, setTorchHeld] = useState(false);
+  const torchActive = tool === "torch" || torchHeld;
+  const torchActiveRef = useRef(torchActive);
+  torchActiveRef.current = torchActive;
+  const torchSizeRef = useRef(torchSize);
+  torchSizeRef.current = torchSize;
+  const torchRef = useRef<TorchState | null>(null);
+  const lastPointerPosRef = useRef<{ plane: Plane; a: number; b: number } | null>(null);
+  const torchRafRef = useRef<number | null>(null);
+
   const outline = useRef<[number, number][]>([]);
   const [outlineTick, setOutlineTick] = useState(0);
   // Zoom is per view: you often want a lesion magnified in one plane while
@@ -183,11 +196,16 @@ export default function Viewer({ caseId, onSaved }: { caseId: string; onSaved?: 
   const [maskInside, setMaskInside] = useState(true);
   const [protectLesion, setProtectLesion] = useState(true);
 
-  // Hydrate protectLesion preference from localStorage
+  // Hydrate preferences from localStorage
   useEffect(() => {
     try {
       const saved = localStorage.getItem("bme_protect_lesion");
       if (saved !== null) setProtectLesion(saved === "true");
+      const savedTorch = localStorage.getItem("bme_viewer_torch_size");
+      if (savedTorch) {
+        const n = Number(savedTorch);
+        if (!isNaN(n) && n >= 8 && n <= 240) setTorchSize(n);
+      }
     } catch { /* ignore */ }
   }, []);
   // Locked by default: painting should not drag the other two views around.
@@ -446,6 +464,7 @@ export default function Viewer({ caseId, onSaved }: { caseId: string; onSaved?: 
     if (!ctx) return;
     const img = ctx.createImageData(w, h);
     const range = hi - lo || 1;
+    const currentTorch = torchRef.current;
 
     for (let b = 0; b < h; b++) {
       for (let a = 0; a < w; a++) {
@@ -454,7 +473,7 @@ export default function Viewer({ caseId, onSaved }: { caseId: string; onSaved?: 
         let g = Math.round(((Math.min(Math.max(v, lo), hi) - lo) / range) * 255);
         let r = g, bl = g;
         const lv = labels[flat];
-        if (lv && isLabelVisible(lv, view)) {
+        if (lv && !isInTorch(a, b, p, currentTorch) && isLabelVisible(lv, view)) {
           const segDef = SEGMENTS.find((x) => x.value === lv);
           if (segDef) {
             const c = segDef.color;
@@ -500,10 +519,76 @@ export default function Viewer({ caseId, onSaved }: { caseId: string; onSaved?: 
       ctx.stroke();
       ctx.restore();
     }
+
+    // Torch ring on the plane being viewed with torch
+    if (currentTorch && currentTorch.plane === p) {
+      const cy = h - 1 - currentTorch.b;
+      ctx.save();
+      // Outer dark ring
+      ctx.beginPath();
+      ctx.arc(currentTorch.a, cy, currentTorch.radius, 0, Math.PI * 2);
+      ctx.strokeStyle = "rgba(0, 0, 0, 0.75)";
+      ctx.lineWidth = 2.5;
+      ctx.stroke();
+
+      // Inner white ring
+      ctx.beginPath();
+      ctx.arc(currentTorch.a, cy, currentTorch.radius, 0, Math.PI * 2);
+      ctx.strokeStyle = "rgba(255, 255, 255, 0.95)";
+      ctx.lineWidth = 1.2;
+      ctx.stroke();
+      ctx.restore();
+    }
   }, [vol, labels, cursor, seg, outlineTick, planeGeom, sampleAt, cursorInPlane, sliceOf, view, opacity]);
 
   const drawAll = useCallback(() => { PLANES.forEach(draw); }, [draw]);
   useEffect(() => { drawAll(); }, [drawAll]);
+
+  const scheduleTorchRedraw = useCallback((p: Plane) => {
+    if (torchRafRef.current !== null) return;
+    torchRafRef.current = requestAnimationFrame(() => {
+      torchRafRef.current = null;
+      draw(p);
+    });
+  }, [draw]);
+
+  useEffect(() => {
+    return () => {
+      if (torchRafRef.current !== null) {
+        cancelAnimationFrame(torchRafRef.current);
+      }
+    };
+  }, []);
+
+  // Synchronize torch visibility when tool or torchHeld changes
+  useEffect(() => {
+    if (tool === "torch" || torchHeld) {
+      const lp = lastPointerPosRef.current;
+      if (lp) {
+        torchRef.current = {
+          plane: lp.plane,
+          a: lp.a,
+          b: lp.b,
+          radius: torchSizeRef.current / 2,
+        };
+        draw(lp.plane);
+      }
+    } else {
+      if (torchRef.current) {
+        const p = torchRef.current.plane;
+        torchRef.current = null;
+        draw(p);
+      }
+    }
+  }, [tool, torchHeld, draw]);
+
+  // Synchronize torch radius changes
+  useEffect(() => {
+    if (torchActiveRef.current && torchRef.current) {
+      torchRef.current.radius = torchSize / 2;
+      draw(torchRef.current.plane);
+    }
+  }, [torchSize, draw]);
 
   const recount = useCallback(() => {
     if (!labels) return;
@@ -729,6 +814,8 @@ export default function Viewer({ caseId, onSaved }: { caseId: string; onSaved?: 
       else if (e.key === "3") { setSeg(3); setErasing(false); }
       else if (e.key === "4" || e.key.toLowerCase() === "b") { setTool("brush"); setErasing(false); }
       else if (e.key === "5" || e.key.toLowerCase() === "p") { setTool("pencil"); setErasing(false); }
+      else if (e.key === "7") { setTool("torch"); setErasing(false); }
+      else if (e.key.toLowerCase() === "t" && !e.ctrlKey && !e.metaKey && !e.altKey) { setTorchHeld(true); }
       else if (e.key === "0" || e.key.toLowerCase() === "e") setErasing((v) => !v);
       else if (e.key.toLowerCase() === "v") cycleViewRef.current();
       else if (e.key.toLowerCase() === "l") setLocked((v) => !v);
@@ -736,8 +823,28 @@ export default function Viewer({ caseId, onSaved }: { caseId: string; onSaved?: 
       else if (e.key === "Escape") {
         outline.current = []; pencilPlane.current = null; setOutlineTick((n) => n + 1); drawAll();
       }
-      else if (e.key === "[") setBrush((b) => Math.max(1, b - 1));
-      else if (e.key === "]") setBrush((b) => Math.min(20, b + 1));
+      else if (e.key === "[") {
+        if (torchActiveRef.current) {
+          setTorchSize((t) => {
+            const next = Math.max(8, t - 8);
+            try { localStorage.setItem("bme_viewer_torch_size", String(next)); } catch {}
+            return next;
+          });
+        } else {
+          setBrush((b) => Math.max(1, b - 1));
+        }
+      }
+      else if (e.key === "]") {
+        if (torchActiveRef.current) {
+          setTorchSize((t) => {
+            const next = Math.min(240, t + 8);
+            try { localStorage.setItem("bme_viewer_torch_size", String(next)); } catch {}
+            return next;
+          });
+        } else {
+          setBrush((b) => Math.min(20, b + 1));
+        }
+      }
       else if (["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight",
                 "PageUp", "PageDown"].includes(e.key)) {
         if (!vol) return;
@@ -749,8 +856,19 @@ export default function Viewer({ caseId, onSaved }: { caseId: string; onSaved?: 
         setCursor((c) => setAxis(c, ax, Math.min(depth - 1, Math.max(0, axisVal(c, ax) + dir * big))));
       }
     };
+    const onKeyUp = (e: KeyboardEvent) => {
+      if (e.key.toLowerCase() === "t") setTorchHeld(false);
+    };
+    const onBlur = () => setTorchHeld(false);
+
     window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
+    window.addEventListener("keyup", onKeyUp);
+    window.addEventListener("blur", onBlur);
+    return () => {
+      window.removeEventListener("keydown", onKey);
+      window.removeEventListener("keyup", onKeyUp);
+      window.removeEventListener("blur", onBlur);
+    };
   }, [undo, redo, commitOutline, drawAll, vol, activePlane, save]);
 
   if (busy) {
@@ -808,6 +926,16 @@ export default function Viewer({ caseId, onSaved }: { caseId: string; onSaved?: 
               }`}
             >
               <Lasso className="h-3.5 w-3.5" />
+            </button>
+            <button
+              type="button"
+              onClick={() => { setTool("torch"); setErasing(false); }}
+              title="Torch — see scan under annotation (Key 7, or hold T)"
+              className={`p-1.5 rounded transition border cursor-pointer ${
+                tool === "torch" && !erasing ? "bg-primary text-primary-foreground border-primary font-medium" : "border-border bg-background text-muted-foreground hover:text-foreground"
+              }`}
+            >
+              <Flashlight className="h-3.5 w-3.5" />
             </button>
             <button
               type="button"
@@ -926,7 +1054,7 @@ export default function Viewer({ caseId, onSaved }: { caseId: string; onSaved?: 
 
             <div className="mx-1 h-5 w-px bg-border" />
 
-            {/* Tool Mode: Brush vs Pencil */}
+            {/* Tool Mode: Brush vs Pencil vs Torch */}
             <div className="inline-flex overflow-hidden rounded-md border border-border">
               <button
                 type="button"
@@ -947,6 +1075,16 @@ export default function Viewer({ caseId, onSaved }: { caseId: string; onSaved?: 
                 }`}
               >
                 <Lasso className="h-3 w-3" /> Pencil <span className="text-[10px] opacity-60">(5)</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => { setTool("torch"); setErasing(false); }}
+                title="Torch — see the scan under the annotation (Key 7, or hold T)"
+                className={`inline-flex items-center gap-1.5 border-l border-border px-2.5 py-1 text-xs transition cursor-pointer ${
+                  tool === "torch" ? "bg-primary text-primary-foreground font-medium" : "bg-background text-muted-foreground hover:text-foreground"
+                }`}
+              >
+                <Flashlight className="h-3 w-3" /> Torch <span className="text-[10px] opacity-60">(7)</span>
               </button>
             </div>
 
@@ -1011,6 +1149,25 @@ export default function Viewer({ caseId, onSaved }: { caseId: string; onSaved?: 
                   max={20}
                   value={brush}
                   onChange={(e) => setBrush(Number(e.target.value))}
+                  className="w-20 accent-primary"
+                />
+              </div>
+            )}
+            {tool === "torch" && (
+              <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
+                <Flashlight className="h-3.5 w-3.5" />
+                <span>Torch: {torchSize}px</span>
+                <input
+                  type="range"
+                  min={8}
+                  max={240}
+                  step={4}
+                  value={torchSize}
+                  onChange={(e) => {
+                    const s = Number(e.target.value);
+                    setTorchSize(s);
+                    try { localStorage.setItem("bme_viewer_torch_size", String(s)); } catch {}
+                  }}
                   className="w-20 accent-primary"
                 />
               </div>
@@ -1154,7 +1311,7 @@ export default function Viewer({ caseId, onSaved }: { caseId: string; onSaved?: 
                 style={{ transform: `scale(${zoom[p]})`, transformOrigin: "center" }}>
               <canvas
                 ref={(el) => { canvases.current[p] = el; }}
-                className="cursor-crosshair rounded"
+                className={`${tool === "torch" ? "cursor-none" : "cursor-crosshair"} rounded`}
                 style={{
                   imageRendering: "auto",
                   // Fill the square tile while keeping true physical proportions.
@@ -1163,6 +1320,7 @@ export default function Viewer({ caseId, onSaved }: { caseId: string; onSaved?: 
                   margin: "0 auto", display: "block",
                 }}
                 onMouseDown={(e) => {
+                  if (tool === "torch") return; // Pitfall-1: mouse down with torch tool does nothing
                   const hit = toVoxel(p, e);
                   if (!hit) return;
                   if (e.shiftKey) { moveCursor(p, hit.a, hit.b); return; }
@@ -1180,9 +1338,21 @@ export default function Viewer({ caseId, onSaved }: { caseId: string; onSaved?: 
                   }
                 }}
                 onMouseMove={(e) => {
+                  const hit = toVoxel(p, e);
+                  if (hit) {
+                    lastPointerPosRef.current = { plane: p, a: hit.a, b: hit.b };
+                    if (torchActiveRef.current) {
+                      torchRef.current = {
+                        plane: p,
+                        a: hit.a,
+                        b: hit.b,
+                        radius: torchSizeRef.current / 2,
+                      };
+                      scheduleTorchRedraw(p);
+                    }
+                  }
                   if (!painting.current) return;
                   if (tool === "pencil") {
-                    const hit = toVoxel(p, e);
                     if (!hit) return;
                     const last = outline.current[outline.current.length - 1];
                     // Skip duplicate points so the polygon stays cheap to fill.
@@ -1190,7 +1360,7 @@ export default function Viewer({ caseId, onSaved }: { caseId: string; onSaved?: 
                       outline.current.push([hit.a, hit.b]);
                       setOutlineTick((n) => n + 1);
                     }
-                  } else {
+                  } else if (tool === "brush") {
                     paintAt(p, e);
                   }
                 }}
@@ -1202,7 +1372,13 @@ export default function Viewer({ caseId, onSaved }: { caseId: string; onSaved?: 
                   painting.current = false;
                   drawAll();
                 }}
-                onMouseLeave={() => { painting.current = false; }}
+                onMouseLeave={() => {
+                  painting.current = false;
+                  if (torchRef.current?.plane === p) {
+                    torchRef.current = null;
+                    draw(p);
+                  }
+                }}
                 // Deliberately no onWheel. Scrolling stepped the slice, which
                 // fought with page scrolling and moved the image out from under
                 // the brush mid-stroke. Arrow keys step slices instead.
