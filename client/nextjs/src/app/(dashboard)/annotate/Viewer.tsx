@@ -94,6 +94,7 @@ type Vol = {
   spacing: [number, number, number];
   /** Which array axis each anatomical plane slices along, and how to lay it out. */
   axes: Record<Plane, PlaneAxes>;
+  orient: [AxisEnds, AxisEnds, AxisEnds];
   lo: number; hi: number;
 };
 
@@ -104,6 +105,33 @@ type Vol = {
  * axes. Flips put superior/anterior at the top of the image.
  */
 type PlaneAxes = { slice: 0 | 1 | 2; h: 0 | 1 | 2; v: 0 | 1 | 2; flipH: boolean; flipV: boolean };
+
+/** Letter on the low-index face and the high-index face of one array axis. */
+export type AxisEnds = { atZero: string; atMax: string };
+
+/**
+ * RAS: +x right, +y anterior, +z superior. Each array axis gets the letter of
+ * the direction it actually points, so a sagittal acquisition is not labelled
+ * as if it were axial.
+ */
+function orientationEnds(affine: number[][]): [AxisEnds, AxisEnds, AxisEnds] {
+  const pos = ["R", "A", "S"];
+  const neg = ["L", "P", "I"];
+  const ends: AxisEnds[] = [];
+  for (let a = 0; a < 3; a++) {
+    let w = 0;
+    let best = -1;
+    for (let r = 0; r < 3; r++) {
+      const v = Math.abs(affine[r]?.[a] ?? 0);
+      if (v > best) { best = v; w = r; }
+    }
+    const sign = Math.sign(affine[w]?.[a] ?? 1) || 1;
+    ends.push(sign > 0
+      ? { atZero: neg[w], atMax: pos[w] }
+      : { atZero: pos[w], atMax: neg[w] });
+  }
+  return ends as [AxisEnds, AxisEnds, AxisEnds];
+}
 
 /**
  * Work out which array axis corresponds to which anatomical direction.
@@ -193,12 +221,61 @@ async function fetchSavedLabels(
   return { labels: buf, warnings };
 }
 
+function SegmentMeasures({
+  counts, spacing,
+}: {
+  counts: [number, number, number];
+  spacing: [number, number, number];
+}) {
+  const voxel = spacing[0] * spacing[1] * spacing[2];
+  const rows = SEGMENTS.map((s, i) => {
+    const n = counts[i] ?? 0;
+    const mm3 = n * voxel;
+    return { ...s, n, mm3, cm3: mm3 / 1000 };
+  }).filter((r) => r.n > 0);
+  return (
+    <div className="rounded-lg border border-border bg-card p-3 text-xs">
+      <div className="mb-2 font-semibold">Annotated region</div>
+      {rows.length === 0 ? (
+        <p className="text-muted-foreground">Nothing painted yet.</p>
+      ) : (
+        <table className="w-full tabular-nums">
+          <thead>
+            <tr className="text-left text-muted-foreground">
+              <th className="pb-1 font-medium">Segment</th>
+              <th className="pb-1 text-right font-medium">Voxels</th>
+              <th className="pb-1 text-right font-medium">mm³</th>
+              <th className="pb-1 text-right font-medium">cm³</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((r) => (
+              <tr key={r.value}>
+                <td className="py-0.5">
+                  <span className="mr-1.5 inline-block h-2 w-2 rounded-sm" style={{ background: r.color }} />
+                  {r.label}
+                </td>
+                <td className="py-0.5 text-right">{r.n.toLocaleString()}</td>
+                <td className="py-0.5 text-right">{r.mm3.toFixed(1)}</td>
+                <td className="py-0.5 text-right">{r.cm3.toFixed(2)}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+    </div>
+  );
+}
+
 export default function Viewer({ caseId, onSaved }: { caseId: string; onSaved?: () => void }) {
   const { data: session } = useSession();
   const [vol, setVol] = useState<Vol | null>(null);
   const [labels, setLabels] = useState<Uint8Array | null>(null);
   const [status, setStatus] = useState("Loading scan…");
   const [busy, setBusy] = useState(true);
+  const [seriesChoices, setSeriesChoices] = useState<{ id: string; label: string }[]>([]);
+  const [annotatedSeries, setAnnotatedSeries] = useState("");
+  const [seriesId, setSeriesId] = useState("");
   const [seg, setSeg] = useState<number>(1);
   const [brush, setBrush] = useState(6);
   const [erasing, setErasing] = useState(false);
@@ -376,7 +453,23 @@ export default function Viewer({ caseId, onSaved }: { caseId: string; onSaved?: 
     (async () => {
       try {
         const nifti = await import("nifti-reader-js");
-        const res = await fetch(`/api/volume/${caseId}`);
+        const listed = await fetch(`/api/volume/${caseId}?list=1`, { cache: "no-store" });
+        const catalog = listed.ok
+          ? await listed.json() as { annotated?: string; series?: { id: string; label: string }[] }
+          : { annotated: "", series: [] };
+        if (cancelled) return;
+        const choices = catalog.series ?? [];
+        setSeriesChoices(choices);
+        setAnnotatedSeries(catalog.annotated ?? "");
+        const pick = seriesId && choices.some((s) => s.id === seriesId)
+          ? seriesId
+          : (catalog.annotated || choices[0]?.id || "");
+        if (pick && pick !== seriesId) {
+          setSeriesId(pick);
+          return;
+        }
+        const query = pick && pick !== "primary" ? `?series=${encodeURIComponent(pick)}` : "";
+        const res = await fetch(`/api/volume/${caseId}${query}`);
         if (!res.ok) throw new Error((await res.json()).error ?? "load failed");
         let buf = await res.arrayBuffer();
         if (nifti.isCompressed(buf)) buf = nifti.decompress(buf) as ArrayBuffer;
@@ -418,18 +511,24 @@ export default function Viewer({ caseId, onSaved }: { caseId: string; onSaved?: 
           (hdr as unknown as { affine?: number[][] }).affine ??
           [[1, 0, 0, 0], [0, 1, 0, 0], [0, 0, 1, 0], [0, 0, 0, 1]];
         const axes = deriveAxes(aff);
+        const orient = orientationEnds(aff);
 
         if (cancelled) return;
         setStatus("Loading saved annotation…");
         let initial: Uint8Array = new Uint8Array(n);
         let note = "";
         let loadError: string | null = null;
+        const edemaHere = !pick || pick === (catalog.annotated || "primary");
         try {
-          const saved = await fetchSavedLabels(caseId, n);
-          if (saved.labels) {
-            initial = saved.labels;
-            note = " · saved annotation loaded";
-            for (const w of saved.warnings) toast.warning(w);
+          if (!edemaHere) {
+            note = ` · edema is on ${catalog.annotated || "the other scan"}`;
+          } else {
+            const saved = await fetchSavedLabels(caseId, n);
+            if (saved.labels) {
+              initial = saved.labels;
+              note = " · saved annotation loaded";
+              for (const w of saved.warnings) toast.warning(w);
+            }
           }
         } catch (e) {
           loadError = e instanceof Error ? e.message : "could not load the saved annotation";
@@ -439,7 +538,7 @@ export default function Viewer({ caseId, onSaved }: { caseId: string; onSaved?: 
 
         if (cancelled) return;
         setSavedLoadError(loadError);
-        setVol({ data, dims, spacing, axes, lo, hi });
+        setVol({ data, dims, spacing, axes, orient, lo, hi });
         setLabels(initial);
         setCursor({
           i: Math.floor(dims[0] / 2), j: Math.floor(dims[1] / 2), k: Math.floor(dims[2] / 2),
@@ -454,7 +553,7 @@ export default function Viewer({ caseId, onSaved }: { caseId: string; onSaved?: 
       }
     })();
     return () => { cancelled = true; };
-  }, [caseId]);
+  }, [caseId, seriesId]);
 
   // ---- geometry --------------------------------------------------------
   /**
@@ -994,6 +1093,24 @@ export default function Viewer({ caseId, onSaved }: { caseId: string; onSaved?: 
 
   return (
     <div className="space-y-2">
+      {seriesChoices.length > 1 && (
+        <div className="flex flex-wrap items-center gap-1.5">
+          {seriesChoices.map((s) => (
+            <button
+              key={s.id}
+              type="button"
+              onClick={() => setSeriesId(s.id)}
+              className={`rounded-md border px-2.5 py-1 text-xs font-medium ${
+                seriesId === s.id
+                  ? "border-primary bg-primary text-primary-foreground"
+                  : "border-border bg-card text-muted-foreground hover:text-foreground"
+              }`}
+            >
+              {s.label}{s.id === annotatedSeries ? " · edema" : ""}
+            </button>
+          ))}
+        </div>
+      )}
       <input
         ref={importInput}
         type="file"
@@ -1542,9 +1659,11 @@ export default function Viewer({ caseId, onSaved }: { caseId: string; onSaved?: 
             labels={labels}
             dims={vol.dims}
             spacing={vol.spacing}
+            orient={vol.orient}
             segments={SEGMENTS}
             hidden={hiddenLabelsForView(view)}
           />
+          <SegmentMeasures counts={counts} spacing={vol.spacing} />
 
           <div className="rounded-lg border border-border bg-card p-3 text-xs">
             <div className="mb-2 flex items-baseline justify-between">

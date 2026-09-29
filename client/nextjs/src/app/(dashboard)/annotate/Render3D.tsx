@@ -27,12 +27,16 @@ type P3 = [number, number, number];
 type Quad = { z: number; pts: [number, number][]; shade: number; color: string };
 type SegDef = { value: number; label: string; color: string };
 
+type AxisEnds = { atZero: string; atMax: string };
+
 export default function Render3D({
-  labels, dims, spacing, segments, hidden: controlledHidden,
+  labels, dims, spacing, orient, segments, hidden: controlledHidden,
 }: {
   labels: Uint8Array | null;
   dims: [number, number, number];
   spacing: [number, number, number];
+  /** Letter at the low and high end of array axes i, j, k. From the scan affine. */
+  orient: [AxisEnds, AxisEnds, AxisEnds];
   segments: ReadonlyArray<SegDef>;
   hidden?: Set<number>;
 }) {
@@ -136,7 +140,8 @@ export default function Render3D({
       const rx = dx * cosY - dz * sinY;
       const rz = dx * sinY + dz * cosY;
       const ry = dy * cosP - rz * sinP;
-      return { sx: W / 2 + rx * scale, sy: H / 2 + ry * scale, depth: dy * sinP + rz * cosP };
+      // Canvas Y grows downward. Negate so superior is up, as in Slicer's 3D view.
+      return { sx: W / 2 + rx * scale, sy: H / 2 - ry * scale, depth: dy * sinP + rz * cosP };
     };
 
     // volume bounds
@@ -163,10 +168,11 @@ export default function Render3D({
     ctx.font = "600 12px ui-sans-serif, system-ui";
     ctx.textAlign = "center";
     ctx.textBaseline = "middle";
+    const [ei, ej, ek] = orient;
     for (const [pt, letter] of [
-      [[mm[0] / 2, mm[1] / 2, mm[2]], "S"], [[mm[0] / 2, mm[1] / 2, 0], "I"],
-      [[mm[0] / 2, 0, mm[2] / 2], "A"], [[mm[0] / 2, mm[1], mm[2] / 2], "P"],
-      [[0, mm[1] / 2, mm[2] / 2], "R"], [[mm[0], mm[1] / 2, mm[2] / 2], "L"],
+      [[mm[0] / 2, mm[1] / 2, mm[2]], ek.atMax], [[mm[0] / 2, mm[1] / 2, 0], ek.atZero],
+      [[mm[0] / 2, 0, mm[2] / 2], ej.atZero], [[mm[0] / 2, mm[1], mm[2] / 2], ej.atMax],
+      [[0, mm[1] / 2, mm[2] / 2], ei.atZero], [[mm[0], mm[1] / 2, mm[2] / 2], ei.atMax],
     ] as Array<[P3, string]>) {
       const q = project(pt);
       ctx.fillText(letter, q.sx, q.sy);
@@ -205,7 +211,7 @@ export default function Render3D({
       ctx.fillStyle = `rgb(${Math.round(r * t.shade)},${Math.round(g * t.shade)},${Math.round(b * t.shade)})`;
       ctx.fill();
     }
-  }, [built, hidden, yaw, pitch, zoom, fit, mm, segments]);
+  }, [built, hidden, yaw, pitch, zoom, fit, mm, segments, orient]);
 
   const voxel = spacing[0] * spacing[1] * spacing[2];
   const totalFaces = (built ?? []).reduce((n, g) => n + g.quads.length, 0);
@@ -232,15 +238,21 @@ export default function Render3D({
         <canvas ref={canvasRef} width={460} height={460}
           className="cursor-grab rounded active:cursor-grabbing"
           style={{ maxWidth: "100%", maxHeight: "100%" }}
-          onMouseDown={(e) => { drag.current = { x: e.clientX, y: e.clientY }; }}
-          onMouseMove={(e) => {
-            if (!drag.current) return;
-            setYaw((v) => v + (e.clientX - drag.current!.x) * 0.01);
-            setPitch((v) => Math.max(-1.45, Math.min(1.45, v + (e.clientY - drag.current!.y) * 0.01)));
+          onPointerDown={(e) => {
             drag.current = { x: e.clientX, y: e.clientY };
+            e.currentTarget.setPointerCapture(e.pointerId);
           }}
-          onMouseUp={() => { drag.current = null; }}
-          onMouseLeave={() => { drag.current = null; }}
+          onPointerMove={(e) => {
+            const start = drag.current;
+            if (!start) return;
+            const dx = e.clientX - start.x;
+            const dy = e.clientY - start.y;
+            drag.current = { x: e.clientX, y: e.clientY };
+            setYaw((v) => v + dx * 0.01);
+            setPitch((v) => Math.max(-1.45, Math.min(1.45, v + dy * 0.01)));
+          }}
+          onPointerUp={() => { drag.current = null; }}
+          onPointerCancel={() => { drag.current = null; }}
           onWheel={(e) => setZoom((z) => Math.max(0.4, Math.min(8, z * (e.deltaY > 0 ? 0.9 : 1.1))))}
         />
         {!built && (

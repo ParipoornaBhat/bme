@@ -68,7 +68,13 @@ export default function StoragePage() {
       </div>
     );
   }
-  if (!data) return null;
+  if (!data) {
+    return (
+      <div className="rounded-lg border border-dashed p-10 text-center text-sm text-muted-foreground">
+        Could not measure storage.
+      </div>
+    );
+  }
 
   const usedPct = data.disk ? ((data.disk.total - data.disk.free) / data.disk.total) * 100 : null;
 

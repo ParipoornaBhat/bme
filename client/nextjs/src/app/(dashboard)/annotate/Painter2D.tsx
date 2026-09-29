@@ -1977,7 +1977,9 @@ export default function Painter2D({
                   Loading 2D slices...
                 </div>
               ) : filtered.length === 0 ? (
-                <div className="py-12 text-center text-xs text-muted-foreground">No slices match.</div>
+                <div className="py-12 text-center text-xs text-muted-foreground">
+                  {slices.length === 0 ? "No 2D slices on disk yet." : "No slices match this filter."}
+                </div>
               ) : (
                 filtered.map((s) => {
                   const active = selected?.relPath === s.relPath;

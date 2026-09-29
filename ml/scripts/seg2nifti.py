@@ -52,6 +52,10 @@ ALIASES = {  # tolerate common spelling drift, reject everything else
     "oedema": "bme",
     "bme_lesion": "bme",
     "lesion": "bme",
+    # This project's Slicer exports use the default name for the edema outline.
+    "segment_1": "bme",
+    "segment_2": "bme",
+    "segment_3": "bme",
     "unsure": "uncertain",
     "uncertain_region": "uncertain",
 }

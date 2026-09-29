@@ -31,14 +31,13 @@ export default function AnnotatePage() {
   const [ledger, setLedger] = useState<Record<string, { annotator: string | null; at: string; localFile: boolean }>>({});
   const [needFrom, setNeedFrom] = useState<string[]>([]);
   const [caseListCollapsed, setCaseListCollapsed] = useState(false);
+  const [casesState, setCasesState] = useState<"loading" | "ready" | "error">("loading");
 
   // Restore tab and filters from localStorage
   useEffect(() => {
     try {
       const savedTab = localStorage.getItem("bme_annotate_tab") as "2d" | "3d" | null;
       if (savedTab === "2d" || savedTab === "3d") setTab(savedTab);
-      const savedSelected = localStorage.getItem("bme_annotate_3d_selected");
-      if (savedSelected) setSelected(savedSelected);
       const savedWho = localStorage.getItem("bme_annotate_3d_who");
       if (savedWho) setWho(savedWho);
       const savedQ = localStorage.getItem("bme_annotate_3d_q");
@@ -79,12 +78,25 @@ export default function AnnotatePage() {
 
 
   const load = async () => {
+    try {
     const res = await fetch("/api/cases", { cache: "no-store" });
-    if (!res.ok) return;
+    if (!res.ok) throw new Error("cases unavailable");
     const j = await res.json();
-    setCases(j.cases);
-    setAnnotators(j.annotators);
-    setShowNames(j.showSourceNames);
+    const list: Case[] = j.cases ?? [];
+    setCases(list);
+    setAnnotators(j.annotators ?? []);
+    setShowNames(Boolean(j.showSourceNames));
+    setSelected((prev) => {
+      const want = prev ?? localStorage.getItem("bme_annotate_3d_selected");
+      return want && list.some((c) => c.id === want) ? want : null;
+    });
+    setCasesState("ready");
+    } catch {
+      setCases([]);
+      setSelected(null);
+      setCasesState("error");
+      return;
+    }
 
     // The shared ledger says who annotated what. A case recorded here but
     // missing locally is one a teammate holds — that is the cue to ask them
@@ -257,7 +269,18 @@ export default function AnnotatePage() {
                     />
                   </button>
                 ))}
-                {visible.length === 0 && (
+                {casesState === "loading" && (
+                  <p className="p-4 text-center text-xs text-muted-foreground">Loading cases…</p>
+                )}
+                {casesState === "error" && (
+                  <p className="p-4 text-center text-xs text-destructive">Could not load the case list.</p>
+                )}
+                {casesState === "ready" && cases.length === 0 && (
+                  <p className="p-4 text-center text-xs text-muted-foreground">
+                    No 3D cases yet. Add folders under data/newbme and run pnpm data:process.
+                  </p>
+                )}
+                {casesState === "ready" && cases.length > 0 && visible.length === 0 && (
                   <p className="p-4 text-center text-xs text-muted-foreground">
                     No cases match.
                   </p>
@@ -289,7 +312,19 @@ export default function AnnotatePage() {
                 </button>
               </div>
             )}
-            {selected ? (
+            {casesState === "loading" ? (
+              <div className="flex h-96 items-center justify-center gap-2 rounded-lg border border-dashed border-border text-sm text-muted-foreground">
+                Loading cases…
+              </div>
+            ) : casesState === "error" ? (
+              <div className="flex h-96 items-center justify-center rounded-lg border border-dashed border-border px-6 text-center text-sm text-muted-foreground">
+                Could not load the case list. Refresh the page once the server is up.
+              </div>
+            ) : cases.length === 0 ? (
+              <div className="flex h-96 items-center justify-center rounded-lg border border-dashed border-border px-6 text-center text-sm text-muted-foreground">
+                No 3D cases yet. Put one folder per patient in data/newbme, then run pnpm data:process.
+              </div>
+            ) : selected ? (
               <Viewer key={selected} caseId={selected} onSaved={load} />
             ) : (
               <div className="flex h-96 items-center justify-center rounded-lg border border-dashed border-border text-sm text-muted-foreground">

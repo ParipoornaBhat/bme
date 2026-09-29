@@ -14,6 +14,32 @@ export const dynamic = "force-dynamic";
 
 const ID = /^(BME|NBME)-\d{3}$/;
 
+function seriesList(dir: string, caseId: string) {
+  const primary = path.join(dir, `${caseId}_primary.nii.gz`);
+  let annotated = "";
+  let series: { id: string; label: string }[] = [];
+  const meta = path.join(dir, "series.json");
+  if (fs.existsSync(meta)) {
+    try {
+      const parsed = JSON.parse(fs.readFileSync(meta, "utf8")) as {
+        annotated?: string;
+        series?: { id: string; label: string }[];
+      };
+      annotated = parsed.annotated ?? "";
+      series = (parsed.series ?? []).filter((s) =>
+        fs.existsSync(path.join(dir, `${caseId}_${s.id}.nii.gz`)),
+      );
+    } catch {
+      series = [];
+    }
+  }
+  if (!series.length && fs.existsSync(primary)) {
+    series = [{ id: "primary", label: caseId }];
+    annotated = "primary";
+  }
+  return { annotated, series };
+}
+
 export async function GET(
   _req: NextRequest,
   { params }: { params: Promise<{ caseId: string }> },
@@ -26,7 +52,18 @@ export async function GET(
   }
 
   const root = path.resolve(process.cwd(), "..", "..");
-  const file = path.join(root, "data", "nifti", caseId, `${caseId}_primary.nii.gz`);
+  const dir = path.join(root, "data", "nifti", caseId);
+  const listOnly = _req.nextUrl.searchParams.get("list") === "1";
+  if (listOnly) {
+    return NextResponse.json(seriesList(dir, caseId));
+  }
+
+  const asked = _req.nextUrl.searchParams.get("series") ?? "";
+  const series = /^[a-z0-9-]{1,32}$/.test(asked) ? asked : "";
+  const named = series ? path.join(dir, `${caseId}_${series}.nii.gz`) : "";
+  const file = named && fs.existsSync(named)
+    ? named
+    : path.join(dir, `${caseId}_primary.nii.gz`);
 
   if (!fs.existsSync(file)) {
     return NextResponse.json(
