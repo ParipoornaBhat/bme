@@ -874,7 +874,10 @@ export default function Painter2D({
       undoStackRef.current = [];
       redoStackRef.current = [];
       isDirtyRef.current = false;
-      if (autoSaveTimeoutRef.current) clearTimeout(autoSaveTimeoutRef.current);
+      // Let an auto save already waiting for the previous slice finish: it
+      // carries its own copy of that slice's mask. Dropping the handle only
+      // stops the next stroke here from cancelling it.
+      autoSaveTimeoutRef.current = null;
 
       // Try to load existing mask.
       //
@@ -1086,8 +1089,7 @@ export default function Painter2D({
       const pixelSnapshot = maskDataRef.current ? new Uint8Array(maskDataRef.current) : null;
       const dimSnapshot = { ...imgDimRef.current };
       autoSaveTimeoutRef.current = setTimeout(() => {
-        const c = countsRef.current;
-        if (c.bone + c.bme + c.uncertain > 0 && targetSlice && pixelSnapshot) {
+        if (targetSlice && pixelSnapshot && pixelSnapshot.some((v) => v !== 0)) {
           saveMaskInternal({
             isAuto: true,
             targetSlice,
@@ -1106,9 +1108,7 @@ export default function Painter2D({
     const pixelSnapshot = maskDataRef.current ? new Uint8Array(maskDataRef.current) : null;
     const dimSnapshot = { ...imgDimRef.current };
     autoSaveTimeoutRef.current = setTimeout(() => {
-      const c = countsRef.current;
-      const total = c.bone + c.bme + c.uncertain;
-      if (total > 0 && isDirtyRef.current && targetSlice && pixelSnapshot) {
+      if (targetSlice && pixelSnapshot && pixelSnapshot.some((v) => v !== 0)) {
         saveMaskInternal({
           isAuto: true,
           targetSlice,
@@ -1501,11 +1501,11 @@ export default function Painter2D({
     const pixels = pixelData || (maskDataRef.current ? new Uint8Array(maskDataRef.current) : null);
 
     if (!sliceToSave || !pixels || dims.w === 0 || dims.h === 0) return;
-    const c = countsRef.current;
-    const totalPixels = c.bone + c.bme + c.uncertain;
 
-    // Bug fix: if user didn't annotate (0 pixels), never mark as saved & annotated
-    if (totalPixels === 0) {
+    // Bug fix: if user didn't annotate (0 pixels), never mark as saved & annotated.
+    // Counted from the pixels being saved, not the slice on screen: a pending
+    // auto save can land after the user has moved to another slice.
+    if (!pixels.some((v) => v !== 0)) {
       if (!isAuto) {
         if (sliceToSave.hasMask) {
           if (confirm("This annotation is currently blank. Would you like to delete the saved mask?")) {
@@ -1542,7 +1542,7 @@ export default function Painter2D({
       if (res.ok) {
         const now = new Date();
         const timeStr = now.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
-        isDirtyRef.current = false;
+        if (loadedSliceRef.current?.relPath === sliceToSave.relPath) isDirtyRef.current = false;
         if (isAuto) {
           setAutoSaveStatus(`Auto-saved ${timeStr}`);
         } else {
@@ -1988,24 +1988,6 @@ export default function Painter2D({
                       key={s.relPath}
                       onClick={() => {
                         if (s.relPath === selected?.relPath) return;
-
-                        // Flush any pending auto-save for currently loaded slice
-                        if (autoSaveTimeoutRef.current) {
-                          clearTimeout(autoSaveTimeoutRef.current);
-                          autoSaveTimeoutRef.current = null;
-                        }
-
-                        if (autoSave && isDirtyRef.current) {
-                          const c = countsRef.current;
-                          if (c.bone + c.bme + c.uncertain > 0 && loadedSliceRef.current && maskDataRef.current) {
-                            saveMaskInternal({
-                              isAuto: true,
-                              targetSlice: loadedSliceRef.current,
-                              pixelData: new Uint8Array(maskDataRef.current),
-                              dimensions: { ...imgDimRef.current },
-                            });
-                          }
-                        }
                         setSelected(s);
                         if (isCollaborator && permissions.SLICE_CONTROL && collabToken && collab.connected) {
                           collab.updateViewpoint({
