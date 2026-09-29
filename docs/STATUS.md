@@ -4,7 +4,7 @@
 If you are picking this project up cold (new chat, new teammate, new machine), read this
 file first, then [SUMMARY.md](SUMMARY.md) for the full picture, then [PRD.md](PRD.md).
 
-Last updated: **2026-09-29**
+Last updated: **2026-09-30**
 
 ---
 
@@ -59,6 +59,16 @@ Phases are defined in [PRD.md](PRD.md) §8.
 ## Do this next
 
 In order. Each step's output is the next step's input.
+
+0. **3D annotate tab now matches 2D (2026-09-30).** Hand/pan per view (6 / H), pencil fills
+   on release, Auto Save, flag a case for review (stored in `data/annotations3d_flags.json`,
+   with the view and slice it was raised on), case list filters (bme / annotated / flagged…),
+   remembered tool settings. "Only inside bone" no longer blocks edema on a slice with no bone.
+   **Live 3D review:** Start Collaboration on a 3D case gives a link that opens the volume
+   viewer; the host admits guests, grants permissions, and everyone sees the same edits,
+   pointers and view (follow mode). A 3D review link opens only its own case. 2D and 3D share
+   the host-session hook (`lib/useHostSession.ts`), guest screens and the flag dialog.
+   2D no longer saves when you switch slices; a pending Auto Save still finishes.
 
 0. **3D data commands (2026-09-29).** Three pnpm scripts. They only touch 3D files. 2D slices, masks, and results stay. Patient names go to gitignored maps (`data/deid_map.csv` or `Non BME/new/<n>/name.json`), never into the chat or the repo.
 
@@ -247,6 +257,7 @@ Carried from [PRD.md](PRD.md) §10, updated with what the data answered.
 | 18 BME patients is the whole 2D positive pool | 3–4 positives per validation fold; the per-fold spread is wider than most effects | Always report mean ± std with n stated. Never quote one fold. |
 | **3D set is 55 BME-positive cases, no negatives** | A segmenter trained only on positives has never seen a knee without edema; FP rate on normal scans is unmeasured | Get non-BME scans into the Slicer export, or keep the old NBME cases' volumes |
 | **3D Slicer cases have BME but no bone marrow** | `seg2nifti.py` rejects them until bone is painted | Paint bone in the 3D tab with Protect lesion on |
+| **2D review links are not limited to one case** | A 2D guest can read any 2D slice while admitted; 3D links are checked against their case | Needs a 2D session to name its case; left as it was |
 | **Every case filename carries a patient name** | PHI exposure | Fixed by step 1. Data is gitignored, so nothing has leaked. |
 | 23 cases have full PHI in DICOM headers | PHI exposure | Fixed by step 1. |
 | Burned-in pixel text unchecked | Anonymisers do not touch pixels | `deid.py` reports the `BurnedInAnnotation` flag; still spot-check visually. |
