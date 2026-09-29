@@ -26,12 +26,15 @@ from seg2nifti import LABELS, build_labelmap, read_segmentation, to_volume_grid 
 
 
 def main():
-    if len(sys.argv) != 5:
+    if len(sys.argv) < 5:
         sys.exit(__doc__)
     base, case_id = Path(sys.argv[1]), sys.argv[2]
     seg_path, out_path = Path(sys.argv[3]), Path(sys.argv[4])
+    series = sys.argv[5] if len(sys.argv) > 5 else ""
 
-    vol_path = base / "data" / "nifti" / case_id / f"{case_id}_primary.nii.gz"
+    folder = base / "data" / "nifti" / case_id
+    named = folder / f"{case_id}_{series}.nii.gz" if series and series != "primary" else None
+    vol_path = named if named is not None and named.exists() else folder / f"{case_id}_primary.nii.gz"
     if not vol_path.exists():
         sys.exit(f"no converted volume for {case_id} — run convert.py first")
 

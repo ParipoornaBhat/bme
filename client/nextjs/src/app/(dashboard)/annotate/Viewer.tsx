@@ -204,8 +204,10 @@ const setAxis = (c: Cursor, ax: 0 | 1 | 2, v: number): Cursor =>
 async function fetchSavedLabels(
   caseId: string,
   n: number,
+  series = "",
 ): Promise<{ labels: Uint8Array | null; warnings: string[] }> {
-  const res = await fetch(`/api/annotation/${caseId}/labels`, { cache: "no-store" });
+  const q = series && series !== "primary" ? `?series=${encodeURIComponent(series)}` : "";
+  const res = await fetch(`/api/annotation/${caseId}/labels${q}`, { cache: "no-store" });
   if (res.status === 404) return { labels: null, warnings: [] };
   if (!res.ok) {
     const j = await res.json().catch(() => ({}));
@@ -526,7 +528,7 @@ export default function Viewer({ caseId, onSaved }: { caseId: string; onSaved?: 
           if (!edemaHere) {
             note = ` · edema is on ${catalog.annotated || "the other scan"}`;
           } else {
-            const saved = await fetchSavedLabels(caseId, n);
+            const saved = await fetchSavedLabels(caseId, n, pick);
             if (saved.labels) {
               initial = saved.labels;
               note = " · saved annotation loaded";
@@ -933,7 +935,15 @@ export default function Viewer({ caseId, onSaved }: { caseId: string; onSaved?: 
 
     try {
       const me = session?.user?.name || session?.user?.email || "unknown";
-      const res = await fetch(`/api/annotation/${caseId}?by=${encodeURIComponent(me)}`, {
+      if (annotatedSeries && seriesId && seriesId !== annotatedSeries && seriesId !== "primary") {
+        const ok = confirm(`Edema is stored on ${annotatedSeries}. Saving on ${seriesId} replaces that outline with this scan. Continue?`);
+        if (!ok) {
+          setSaving(false);
+          return;
+        }
+      }
+      const seriesQ = seriesId && seriesId !== "primary" ? `&series=${encodeURIComponent(seriesId)}` : "";
+      const res = await fetch(`/api/annotation/${caseId}?by=${encodeURIComponent(me)}${seriesQ}`, {
         method: "POST",
         headers: { "Content-Type": "application/octet-stream" },
         body: new Uint8Array(labels),
@@ -958,6 +968,7 @@ export default function Viewer({ caseId, onSaved }: { caseId: string; onSaved?: 
         ? `Saved — recorded as annotated by ${me}`
         : "Saved to disk (not recorded: database unreachable)");
       setDirty(false);
+      if (seriesId) setAnnotatedSeries(seriesId);
       setSavedSuccess(true);
       setTimeout(() => setSavedSuccess(false), 2000);
       toast.success(`Saved 3D mask for ${caseId}`);
@@ -969,7 +980,7 @@ export default function Viewer({ caseId, onSaved }: { caseId: string; onSaved?: 
     } finally {
       setSaving(false);
     }
-  }, [labels, counts, caseId, onSaved, session, savedLoadError]);
+  }, [labels, counts, caseId, onSaved, session, savedLoadError, seriesId, annotatedSeries]);
 
   // ---- import from 3D Slicer ---------------------------------------------
   const importSlicer = async (file: File) => {

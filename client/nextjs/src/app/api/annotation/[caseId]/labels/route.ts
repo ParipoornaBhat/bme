@@ -37,6 +37,8 @@ export async function GET(
 ) {
   const { caseId } = await params;
   if (!ID.test(caseId)) return NextResponse.json({ error: "bad case id" }, { status: 400 });
+  const series = _req.nextUrl.searchParams.get("series") ?? "";
+  const seriesArg = /^[a-z0-9-]{1,32}$/.test(series) ? [series] : [];
 
   const seg = path.join(root(), "data", "annotations", caseId, `${caseId}.seg.nrrd`);
   if (!fs.existsSync(seg)) return NextResponse.json({ exists: false }, { status: 404 });
@@ -45,7 +47,7 @@ export async function GET(
   try {
     const { stdout } = await exec(
       pythonPath(),
-      [path.join(root(), "ml", "scripts", "read_seg.py"), root(), caseId, seg, tmp],
+      [path.join(root(), "ml", "scripts", "read_seg.py"), root(), caseId, seg, tmp, ...seriesArg],
       { cwd: root(), timeout: 120_000 },
     );
     const buf = fs.readFileSync(tmp);

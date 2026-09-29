@@ -217,6 +217,12 @@ const nextConfig = {
   // aliasing the extension makes the same source resolve here.
   transpilePackages: ["@bme/db"],
   allowedDevOrigins,
+  // A 3D labelmap is one byte per voxel. A 624×768×22 scan is already ~10.1 MB,
+  // and the middleware default drops anything past 10 MB, which makes write_seg
+  // reject the save as a size mismatch.
+  experimental: {
+    middlewareClientMaxBodySize: "256mb",
+  },
 
   // Keep database drivers external to the server bundle so webpack does not
   // crawl optional native bindings or external directory trees during build.

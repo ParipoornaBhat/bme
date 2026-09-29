@@ -17,6 +17,7 @@ Called by the web editor's save endpoint. Safe to run by hand.
 
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
 
@@ -31,13 +32,40 @@ SEGMENTS = [
 ]
 
 
+def volume_path(base: Path, case_id: str, series: str) -> Path:
+    folder = base / "data" / "nifti" / case_id
+    if series and series != "primary":
+        named = folder / f"{case_id}_{series}.nii.gz"
+        if named.exists():
+            return named
+    return folder / f"{case_id}_primary.nii.gz"
+
+
+def remember_series(base: Path, case_id: str, series: str):
+    if not series or series == "primary":
+        return
+    meta = base / "data" / "nifti" / case_id / "series.json"
+    if not meta.exists():
+        return
+    try:
+        doc = json.loads(meta.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return
+    doc["annotated"] = series
+    meta.write_text(json.dumps(doc, indent=2), encoding="utf-8")
+
+
 def main():
     if len(sys.argv) < 4:
         sys.exit(__doc__)
     base, case_id, raw_path = Path(sys.argv[1]), sys.argv[2], Path(sys.argv[3])
-    annotator = sys.argv[4] if len(sys.argv) > 4 else ""
+    series, annotator = "", ""
+    rest = sys.argv[4:]
+    if rest[:1] == ["--series"] and len(rest) >= 2:
+        series, rest = rest[1], rest[2:]
+    annotator = rest[0] if rest else ""
 
-    vol_path = base / "data" / "nifti" / case_id / f"{case_id}_primary.nii.gz"
+    vol_path = volume_path(base, case_id, series)
     if not vol_path.exists():
         sys.exit(f"no volume: {vol_path}")
 
@@ -105,6 +133,7 @@ def main():
     nrrd.write(str(out), lab, header)
     written.append(out)
 
+    remember_series(base, case_id, series)
     counts = "  ".join(f"{n}={present[v]}" for n, v, _ in SEGMENTS if present[v])
     for w in written:
         print(f"wrote {w}")
