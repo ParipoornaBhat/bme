@@ -87,16 +87,20 @@ function launchTunnelIfNeeded(phase) {
     return;
   }
 
-  const isOptedOut =
-    process.env.ENABLE_TUNNEL === "false" ||
-    process.env.NO_TUNNEL === "true" ||
-    process.env.NO_TUNNEL === "1";
+  // Tunneling is opt-in: only launch when ENABLE_TUNNEL or TUNNEL is explicitly true
+  const isTunnelRequested =
+    process.env.ENABLE_TUNNEL === "true" ||
+    process.env.ENABLE_TUNNEL === "1" ||
+    process.env.TUNNEL === "true" ||
+    process.env.TUNNEL === "1";
 
   if (
-    typeof process !== "undefined" &&
-    !isOptedOut &&
-    !process.env.__CLOUDFLARE_TUNNEL_ACTIVE
+    !isTunnelRequested ||
+    typeof process === "undefined" ||
+    process.env.__CLOUDFLARE_TUNNEL_ACTIVE
   ) {
+    return;
+  }
     process.env.__CLOUDFLARE_TUNNEL_ACTIVE = "true";
     const token = process.env.CLOUDFLARE_TUNNEL_TOKEN;
     const args = token
@@ -160,7 +164,7 @@ function launchTunnelIfNeeded(phase) {
       process.exit(0);
     });
   }
-}
+
 
 function attachWsProxyIfNeeded(phase) {
   if (phase !== PHASE_DEVELOPMENT_SERVER && phase !== PHASE_PRODUCTION_SERVER) {
