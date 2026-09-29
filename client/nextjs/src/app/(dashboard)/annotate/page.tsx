@@ -1,7 +1,8 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import { AlertTriangle, Boxes, CheckCircle2, ChevronLeft, ChevronRight, Circle, Download, Layers, Search, Users } from "lucide-react";
+import { Boxes, CheckCircle2, ChevronLeft, ChevronRight, Circle, Download, Flag, Layers, Search, Users } from "lucide-react";
+import type { FlagRecord } from "~/lib/flag-store";
 import Viewer from "./Viewer";
 import Painter2D from "./Painter2D";
 
@@ -18,7 +19,20 @@ type Case = {
   annotated: boolean;
   savedAt: string | null;
   sourceName: string | null;
+  flag: FlagRecord | null;
 };
+
+const FILTERS = ["all", "bme", "non_bme", "annotated", "unannotated", "flagged"] as const;
+type Filter = (typeof FILTERS)[number];
+
+function matchesFilter(c: Case, f: Filter) {
+  if (f === "bme") return c.cls === "bme";
+  if (f === "non_bme") return c.cls === "non_bme";
+  if (f === "annotated") return c.annotated;
+  if (f === "unannotated") return !c.annotated;
+  if (f === "flagged") return Boolean(c.flag);
+  return true;
+}
 
 export default function AnnotatePage() {
   const [tab, setTab] = useState<"2d" | "3d">("2d");
@@ -26,6 +40,7 @@ export default function AnnotatePage() {
   const [annotators, setAnnotators] = useState<string[]>([]);
   const [who, setWho] = useState("");
   const [q, setQ] = useState("");
+  const [filter, setFilter] = useState<Filter>("all");
   const [selected, setSelected] = useState<string | null>(null);
   const [showNames, setShowNames] = useState(false);
   const [ledger, setLedger] = useState<Record<string, { annotator: string | null; at: string; localFile: boolean }>>({});
@@ -42,6 +57,8 @@ export default function AnnotatePage() {
       if (savedWho) setWho(savedWho);
       const savedQ = localStorage.getItem("bme_annotate_3d_q");
       if (savedQ) setQ(savedQ);
+      const savedFilter = localStorage.getItem("bme_annotate_3d_filter") as Filter | null;
+      if (savedFilter && FILTERS.includes(savedFilter)) setFilter(savedFilter);
     } catch { /* ignore */ }
   }, []);
 
@@ -66,6 +83,13 @@ export default function AnnotatePage() {
     setWho(val);
     try {
       localStorage.setItem("bme_annotate_3d_who", val);
+    } catch { /* ignore */ }
+  };
+
+  const handleFilterChange = (val: Filter) => {
+    setFilter(val);
+    try {
+      localStorage.setItem("bme_annotate_3d_filter", val);
     } catch { /* ignore */ }
   };
 
@@ -120,9 +144,13 @@ export default function AnnotatePage() {
       cases.filter(
         (c) =>
           (!who || c.assignedTo === who || c.assignedTo === "ALL") &&
-          (!q || c.id.toLowerCase().includes(q.toLowerCase())),
+          matchesFilter(c, filter) &&
+          (!q ||
+            c.id.toLowerCase().includes(q.toLowerCase()) ||
+            (c.flag?.reason ?? "").toLowerCase().includes(q.toLowerCase()) ||
+            (c.flag?.note ?? "").toLowerCase().includes(q.toLowerCase())),
       ),
-    [cases, who, q],
+    [cases, who, q, filter],
   );
 
   const done = cases.filter((c) => c.annotated).length;
@@ -230,6 +258,32 @@ export default function AnnotatePage() {
                 </select>
               </div>
 
+              <div className="flex flex-wrap gap-1 text-xs">
+                {FILTERS.map((f) => {
+                  const count = f === "all" ? undefined : cases.filter((c) => matchesFilter(c, f)).length;
+                  return (
+                    <button
+                      key={f}
+                      type="button"
+                      onClick={() => handleFilterChange(f)}
+                      className={`inline-flex items-center gap-1 rounded px-2 py-1 transition cursor-pointer ${
+                        filter === f
+                          ? f === "flagged"
+                            ? "bg-amber-500 text-white font-medium"
+                            : "bg-primary text-primary-foreground font-medium"
+                          : f === "flagged" && (count ?? 0) > 0
+                          ? "bg-amber-500/15 text-amber-500 hover:bg-amber-500/25"
+                          : "bg-muted text-muted-foreground hover:text-foreground"
+                      }`}
+                    >
+                      {f === "flagged" && <Flag className="h-3 w-3 fill-current" />}
+                      <span>{f.replace("_", " ")}</span>
+                      {count !== undefined && <span className="opacity-70 text-[10px]">({count})</span>}
+                    </button>
+                  );
+                })}
+              </div>
+
               <div className="space-y-1 overflow-y-auto rounded-lg border border-border p-1"
                 style={{ maxHeight: "min(calc(100vh - 250px), 1100px)" }}>
                 {visible.map((c) => (
@@ -256,6 +310,11 @@ export default function AnnotatePage() {
                         </span>
                       )}
                     </span>
+                    {c.flag && (
+                      <span title={`Flagged: ${c.flag.reason || "Not Sure"}`}>
+                        <Flag className="h-3.5 w-3.5 shrink-0 fill-amber-400 text-amber-400" />
+                      </span>
+                    )}
                     {c.isotropic && (
                       <span className="rounded bg-muted px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
                         Iso
@@ -330,6 +389,7 @@ export default function AnnotatePage() {
                 caseId={selected}
                 onSaved={load}
                 savedOnDisk={cases.find((c) => c.id === selected)?.annotated ?? false}
+                flag={cases.find((c) => c.id === selected)?.flag ?? null}
               />
             ) : (
               <div className="flex h-96 items-center justify-center rounded-lg border border-dashed border-border text-sm text-muted-foreground">

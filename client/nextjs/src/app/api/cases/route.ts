@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import fs from "node:fs";
 import path from "node:path";
+import { readFlags } from "~/lib/flag-store";
 
 /**
  * Case list for the annotation workspace.
@@ -45,6 +46,7 @@ export async function GET() {
     deid.map((r) => [r.case_id, (r.source_archive ?? "").split("/").pop() ?? ""]),
   );
 
+  const flags = readFlags("annotations3d_flags.json");
   const cases = worklist.map((r) => {
     const id = r.case_id;
     const annDir = path.join(root, "data", "annotations", id);
@@ -71,6 +73,7 @@ export async function GET() {
       hasT1: r.has_t1 === "True",
       annotated: hasSeg,
       savedAt,
+      flag: flags[id] ?? null,
       // null unless the local flag is on
       sourceName: SHOW_NAMES ? nameFor.get(id) ?? null : null,
     };

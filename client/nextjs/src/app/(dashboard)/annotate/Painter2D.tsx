@@ -31,7 +31,6 @@ import {
   SlidersHorizontal,
   Trash2,
   Users,
-  X,
   XCircle,
   ZoomIn,
   ZoomOut,
@@ -57,6 +56,7 @@ import {
   OverlayControls,
 } from "~/lib/useOverlayView";
 import { canPaint } from "~/lib/paint-rules";
+import FlagDialog from "./FlagDialog";
 
 export type Case2DSlice = {
   caseId: string;
@@ -126,8 +126,6 @@ export default function Painter2D({
 
   // Flagging states
   const [flagModalOpen, setFlagModalOpen] = useState(false);
-  const [flagReason, setFlagReason] = useState("Not Sure");
-  const [flagNote, setFlagNote] = useState("");
   const [flagSaving, setFlagSaving] = useState(false);
   const [deletingMask, setDeletingMask] = useState(false);
 
@@ -2198,11 +2196,7 @@ export default function Painter2D({
                 <button
                   type="button"
                   onClick={() => {
-                    if (selected) {
-                      setFlagReason(selected.flagReason || "Not Sure");
-                      setFlagNote(selected.flagNote || "");
-                      setFlagModalOpen(true);
-                    }
+                    if (selected) setFlagModalOpen(true);
                   }}
                   title={selected?.flagged ? `Flagged: ${selected.flagReason || "Not Sure"}` : "Flag slice"}
                   className={`p-1.5 rounded border transition cursor-pointer ${
@@ -2522,11 +2516,7 @@ export default function Painter2D({
                 <button
                   type="button"
                   onClick={() => {
-                    if (selected) {
-                      setFlagReason(selected.flagReason || "Not Sure");
-                      setFlagNote(selected.flagNote || "");
-                      setFlagModalOpen(true);
-                    }
+                    if (selected) setFlagModalOpen(true);
                   }}
                   title={
                     selected?.flagged
@@ -2672,11 +2662,7 @@ export default function Painter2D({
             </div>
             <button
               type="button"
-              onClick={() => {
-                setFlagReason(selected.flagReason || "Not Sure");
-                setFlagNote(selected.flagNote || "");
-                setFlagModalOpen(true);
-              }}
+              onClick={() => setFlagModalOpen(true)}
               className="rounded bg-amber-500/20 px-2 py-0.5 text-[11px] font-medium text-amber-300 hover:bg-amber-500/30 transition"
             >
               Edit Flag
@@ -2815,97 +2801,19 @@ export default function Painter2D({
 
       {/* Flag Modal Dialog */}
       {flagModalOpen && selected && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-xs p-4">
-          <div className="w-full max-w-md rounded-xl border border-border bg-card p-5 shadow-2xl space-y-4">
-            <div className="flex items-center justify-between border-b border-border pb-3">
-              <div className="flex items-center gap-2">
-                <Flag className="h-4 w-4 text-amber-500 fill-amber-500" />
-                <h3 className="font-semibold text-sm">Flag Slice for Review</h3>
-              </div>
-              <button
-                type="button"
-                onClick={() => setFlagModalOpen(false)}
-                className="rounded p-1 text-muted-foreground hover:text-foreground"
-              >
-                <X className="h-4 w-4" />
-              </button>
-            </div>
-
-            <div className="text-xs text-muted-foreground">
-              Slice: <strong className="font-mono text-foreground">{selected.caseId}</strong> / {selected.stem}.png
-            </div>
-
-            <div className="space-y-2">
-              <label className="block text-xs font-semibold text-muted-foreground">Reason for flagging:</label>
-              <div className="grid grid-cols-2 gap-2">
-                {[
-                  "Not Sure",
-                  "Questionable Edema",
-                  "Needs Expert Review",
-                  "Image Artifact / Quality",
-                ].map((r) => (
-                  <button
-                    key={r}
-                    type="button"
-                    onClick={() => setFlagReason(r)}
-                    className={`rounded-md border p-2 text-left text-xs transition ${
-                      flagReason === r
-                        ? "border-amber-500 bg-amber-500/15 text-amber-500 font-semibold"
-                        : "border-border hover:bg-muted text-muted-foreground"
-                    }`}
-                  >
-                    {r}
-                  </button>
-                ))}
-              </div>
-            </div>
-
-            <div className="space-y-2">
-              <label className="block text-xs font-semibold text-muted-foreground">Optional Note / Observation:</label>
-              <textarea
-                value={flagNote}
-                onChange={(e) => setFlagNote(e.target.value)}
-                placeholder="e.g. Unclear edema boundary along lateral condyle..."
-                rows={3}
-                className="w-full rounded-md border border-border bg-background p-2 text-xs focus:border-primary focus:outline-hidden"
-              />
-            </div>
-
-            <div className="flex items-center justify-between pt-2 border-t border-border">
-              {selected.flagged ? (
-                <button
-                  type="button"
-                  onClick={handleRemoveFlag}
-                  disabled={flagSaving}
-                  className="rounded-md border border-destructive/40 bg-destructive/10 px-3 py-1.5 text-xs font-medium text-destructive hover:bg-destructive/20 transition"
-                >
-                  Remove Flag
-                </button>
-              ) : (
-                <div />
-              )}
-
-              <div className="flex gap-2">
-                <button
-                  type="button"
-                  onClick={() => setFlagModalOpen(false)}
-                  className="rounded-md border border-border px-3 py-1.5 text-xs text-muted-foreground hover:bg-muted"
-                >
-                  Cancel
-                </button>
-                <button
-                  type="button"
-                  onClick={() => handleSaveFlag(flagReason, flagNote)}
-                  disabled={flagSaving}
-                  className="inline-flex items-center gap-1.5 rounded-md bg-amber-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-amber-700 transition"
-                >
-                  {flagSaving ? <Loader2 className="h-3 w-3 animate-spin" /> : <Check className="h-3 w-3" />}
-                  Save Flag
-                </button>
-              </div>
-            </div>
-          </div>
-        </div>
+        <FlagDialog
+          title="Flag Slice for Review"
+          subject={
+            <>Slice: <strong className="font-mono text-foreground">{selected.caseId}</strong> / {selected.stem}.png</>
+          }
+          flagged={Boolean(selected.flagged)}
+          initialReason={selected.flagReason}
+          initialNote={selected.flagNote}
+          saving={flagSaving}
+          onSave={handleSaveFlag}
+          onRemove={handleRemoveFlag}
+          onClose={() => setFlagModalOpen(false)}
+        />
       )}
 
       {/* Floating Info Tooltip on Slice Hover */}

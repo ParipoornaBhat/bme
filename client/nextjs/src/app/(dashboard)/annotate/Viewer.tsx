@@ -45,6 +45,8 @@ import {
 import { useCollaboration } from "~/lib/useCollaboration";
 import { canPaint } from "~/lib/paint-rules";
 import { isInTorch, type TorchState } from "~/lib/torch";
+import type { FlagRecord } from "~/lib/flag-store";
+import FlagDialog from "./FlagDialog";
 
 /**
  * Three-plane viewer with painting, modelled on 3D Slicer's Four-Up layout.
@@ -288,11 +290,14 @@ export default function Viewer({
   caseId,
   onSaved,
   savedOnDisk = false,
+  flag: flagFromList = null,
 }: {
   caseId: string;
   onSaved?: () => void;
   /** Whether the case already has a saved .seg.nrrd, from the case list. */
   savedOnDisk?: boolean;
+  /** The case's review flag, from the case list. */
+  flag?: FlagRecord | null;
 }) {
   const { data: session } = useSession();
   const [vol, setVol] = useState<Vol | null>(null);
@@ -331,6 +336,10 @@ export default function Viewer({
   const [protectLesion, setProtectLesion] = useState(true);
   const [hasSaved, setHasSaved] = useState(savedOnDisk);
   useEffect(() => { setHasSaved(savedOnDisk); }, [savedOnDisk]);
+  const [flag, setFlag] = useState<FlagRecord | null>(flagFromList);
+  useEffect(() => { setFlag(flagFromList); }, [flagFromList]);
+  const [flagModalOpen, setFlagModalOpen] = useState(false);
+  const [flagSaving, setFlagSaving] = useState(false);
 
   // Hydrate preferences from localStorage
   const prefsLoaded = useRef(false);
@@ -1171,6 +1180,37 @@ export default function Viewer({
     autoTimer.current = setTimeout(run, 1000);
   };
 
+  // ---- review flag -----------------------------------------------------
+  // One flag per case. It notes the view and slice it was raised on, so the
+  // reviewer knows where to look.
+  const flagWhere = () => {
+    if (!vol) return "";
+    const s = sliceOf(activePlane, vol, cursor);
+    const series = seriesChoices.find((c) => c.id === seriesId)?.label;
+    return `${activePlane} ${s + 1}/${vol.dims[vol.axes[activePlane].slice]}${series ? ` (${series})` : ""}`;
+  };
+
+  const writeCaseFlag = async (body: Record<string, unknown>) => {
+    setFlagSaving(true);
+    try {
+      const res = await fetch(`/api/annotation/${caseId}/flag`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      const j = (await res.json()) as { flag?: FlagRecord | null; error?: string };
+      if (!res.ok) throw new Error(j.error ?? "could not save the flag");
+      setFlag(j.flag ?? null);
+      setFlagModalOpen(false);
+      toast.success(j.flag ? "Case flagged for review" : "Flag removed");
+      onSaved?.();
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "could not save the flag");
+    } finally {
+      setFlagSaving(false);
+    }
+  };
+
   // ---- import from 3D Slicer ---------------------------------------------
   const importSlicer = async (file: File) => {
     if (!vol) return;
@@ -1461,6 +1501,16 @@ export default function Viewer({
           <div className="flex items-center gap-1.5 shrink-0">
             <button
               type="button"
+              onClick={() => setFlagModalOpen(true)}
+              title={flag ? `Flagged: ${flag.reason || "Not Sure"}` : "Flag case"}
+              className={`p-1.5 rounded border transition cursor-pointer ${
+                flag ? "border-amber-500/50 bg-amber-500/15 text-amber-500" : "border-border bg-background text-muted-foreground hover:text-foreground"
+              }`}
+            >
+              <Flag className={`h-3.5 w-3.5 ${flag ? "fill-amber-500 text-amber-500" : ""}`} />
+            </button>
+            <button
+              type="button"
               onClick={() => importInput.current?.click()}
               disabled={importing}
               title="Import a .seg.nrrd from 3D Slicer"
@@ -1700,6 +1750,21 @@ export default function Viewer({
               </button>
             </div>
 
+            {/* Flag Case */}
+            <button
+              type="button"
+              onClick={() => setFlagModalOpen(true)}
+              title={flag ? `Flagged: ${flag.reason || "Not Sure"}` : "Flag this case for review (e.g. Not Sure)"}
+              className={`inline-flex items-center gap-1.5 rounded-md px-2.5 py-1 text-xs font-medium border transition cursor-pointer ${
+                flag
+                  ? "border-amber-500/50 bg-amber-500/15 text-amber-500 hover:bg-amber-500/25 ring-1 ring-amber-500/30"
+                  : "border-border bg-background text-muted-foreground hover:text-foreground"
+              }`}
+            >
+              <Flag className={`h-3.5 w-3.5 ${flag ? "fill-amber-500 text-amber-500" : ""}`} />
+              <span>{flag ? "Flagged" : "Flag"}</span>
+            </button>
+
             {/* Auto Save */}
             <div className="flex items-center gap-1.5 border-l border-border pl-2">
               <label
@@ -1805,6 +1870,26 @@ export default function Viewer({
               <ChevronUp className="h-3.5 w-3.5" />
             </button>
           </div>
+        </div>
+      )}
+
+      {flag && (
+        <div className="flex items-center justify-between rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-1.5 text-xs text-amber-400">
+          <div className="flex items-center gap-2">
+            <Flag className="h-3.5 w-3.5 fill-amber-400 text-amber-400 shrink-0" />
+            <span>
+              <strong>Flagged for review:</strong> {flag.reason || "Not Sure"}
+              {flag.where ? ` at ${flag.where}` : ""}
+              {flag.note ? ` — "${flag.note}"` : ""}
+            </span>
+          </div>
+          <button
+            type="button"
+            onClick={() => setFlagModalOpen(true)}
+            className="rounded bg-amber-500/20 px-2 py-0.5 text-[11px] font-medium text-amber-300 hover:bg-amber-500/30 transition"
+          >
+            Edit Flag
+          </button>
         </div>
       )}
 
@@ -1991,6 +2076,25 @@ export default function Viewer({
           </div>
         </div>
       </div>
+
+      {flagModalOpen && (
+        <FlagDialog
+          title="Flag Case for Review"
+          subject={
+            <>
+              Case: <strong className="font-mono text-foreground">{caseId}</strong>
+              {" "}&middot; {flag?.where ?? flagWhere()}
+            </>
+          }
+          flagged={Boolean(flag)}
+          initialReason={flag?.reason}
+          initialNote={flag?.note}
+          saving={flagSaving}
+          onSave={(reason, note) => writeCaseFlag({ flagged: true, reason, note, where: flagWhere() })}
+          onRemove={() => writeCaseFlag({ flagged: false })}
+          onClose={() => setFlagModalOpen(false)}
+        />
+      )}
 
       {showMasterPanel && collabToken && (
         <div
