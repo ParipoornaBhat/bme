@@ -34,6 +34,8 @@
     "data:process": "node scripts/import-newbme.js",
     "data:3d:erase": "node scripts/erase-3d.js",
     "data:3d:nonbme:process": "node scripts/nonbme-to-nrrd.js",
+    "data:nonbme:process": "node scripts/import-newnonbme.js",
+    "data:nonbme:erase": "node scripts/erase-nonbme.js",
     "migrate:generate": "pnpm --filter @bme/db db:generate --name",
     "migrate:deploy": "pnpm --filter @bme/db db:migrate",
     "clean": "node scripts/clean.js",
