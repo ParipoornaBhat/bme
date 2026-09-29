@@ -15,7 +15,8 @@ if (!fs.existsSync(python)) {
   process.exit(1);
 }
 
-const result = spawnSync(python, [script, root, "--apply", ...process.argv.slice(2)], {
+const extra = process.argv.slice(2).filter((arg) => arg !== "--");
+const result = spawnSync(python, [script, root, "--apply", ...extra], {
   cwd: root,
   stdio: "inherit",
 });
