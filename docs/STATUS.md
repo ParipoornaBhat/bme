@@ -16,7 +16,10 @@ an edema mask, all from saved checkpoints. **3D** is the segmentation system fro
 is still waiting on annotations.
 
 The web app does the whole loop in the browser: annotate, train, test a slice, inspect
-results, check storage. Every filename in the dataset is pseudonymous — no patient name
+results, check storage. Training keeps the two 2D tabs. A third tab trains a 3D U-Net
+(bone and edema together, patient-level folds, Dice + focal, sliding-window prediction).
+Results → 3D segmentation accepts one `.nrrd` and shows axial, coronal, and sagittal
+marks, edema present or not, and volume in mm³. Every filename in the dataset is pseudonymous — no patient name
 survives anywhere on disk. The critical path is unchanged: annotate more cases, measure
 inter-rater Dice, then train the bone/lesion model properly.
 

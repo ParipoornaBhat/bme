@@ -1,7 +1,8 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { CheckCircle2, ChevronDown, Circle, Info, Layers, Loader2, PenTool, Play, Square, Target, Trash2, Trophy } from "lucide-react";
+import { Boxes, CheckCircle2, ChevronDown, Circle, Info, Layers, Loader2, PenTool, Play, Square, Target, Trash2, Trophy } from "lucide-react";
+import Train3D from "./Train3D";
 import { SystemMonitor, useSystem } from "~/components/SystemMonitor";
 
 type Metric = { accuracy: number; precision: number; recall: number; f1: number; auc: number; n: number };
@@ -243,7 +244,8 @@ export default function TrainingPage() {
   const [tta, setTta] = useState(false);
   const [busy, setBusy] = useState(false);
   const [progress, setProgress] = useState<Prog | null>(null);
-  const [tab, setTab] = useState<"cls" | "seg">("cls");
+  const [tab, setTab] = useState<"cls" | "seg" | "vol">("cls");
+  const [volRunning, setVolRunning] = useState(false);
   const [seg, setSeg] = useState<SegState | null>(null);
   const [segEpochs, setSegEpochs] = useState(40);
   const [segFolds, setSegFolds] = useState(5);
@@ -254,14 +256,14 @@ export default function TrainingPage() {
   const [showWhy, setShowWhy] = useState(false);
   const [showTerms, setShowTerms] = useState(false);
   const logRef = useRef<HTMLPreElement>(null);
-  const busyNow = running || Boolean(seg?.running);
+  const busyNow = running || Boolean(seg?.running) || volRunning;
   const sys = useSystem(busyNow ? 2000 : 5000);
 
   // Restore training tab and options from localStorage
   useEffect(() => {
     try {
-      const savedTab = localStorage.getItem("bme_training_tab") as "cls" | "seg" | null;
-      if (savedTab === "cls" || savedTab === "seg") setTab(savedTab);
+      const savedTab = localStorage.getItem("bme_training_tab") as "cls" | "seg" | "vol" | null;
+      if (savedTab === "cls" || savedTab === "seg" || savedTab === "vol") setTab(savedTab);
       const savedArch = localStorage.getItem("bme_training_arch");
       if (savedArch) setArch(savedArch);
       const savedFolds = localStorage.getItem("bme_training_folds");
@@ -287,7 +289,7 @@ export default function TrainingPage() {
     } catch { /* ignore */ }
   }, []);
 
-  const handleTabChange = (newTab: "cls" | "seg") => {
+  const handleTabChange = (newTab: "cls" | "seg" | "vol") => {
     setTab(newTab);
     try { localStorage.setItem("bme_training_tab", newTab); } catch { /* ignore */ }
   };
@@ -413,9 +415,9 @@ export default function TrainingPage() {
   return (
     <div className="space-y-6">
       <div>
-        <h1 className="text-2xl font-semibold tracking-tight">2D Deep Learning Training</h1>
+        <h1 className="text-2xl font-semibold tracking-tight">Training</h1>
         <p className="mt-1 text-sm text-muted-foreground">
-          Two complementary 2D pipelines: <strong>Detection / Screening</strong> (Is BME Present?) and <strong>2D U-Net</strong> (Dual-Channel Bone &amp; Edema Segmentation).
+          The two 2D pipelines stay as they are. The third tab trains the 3D bone and edema model.
         </p>
       </div>
 
@@ -423,6 +425,7 @@ export default function TrainingPage() {
         {([
           ["cls", "1. Detection (BME Present / Absent)", Layers],
           ["seg", "2. Segmentation (2D U-Net Mark Edema)", Target],
+          ["vol", "3. 3D segmentation (bone + edema)", Boxes],
         ] as const).map(([id, label, Icon]) => (
           <button key={id} onClick={() => handleTabChange(id)}
             className={`-mb-px inline-flex items-center gap-2 border-b-2 px-4 py-2 text-sm font-medium transition ${
@@ -446,7 +449,10 @@ export default function TrainingPage() {
 
       <SystemMonitor sys={sys} />
 
-      {tab === "seg" ? (
+      {tab === "vol" ? (
+        <Train3D torch={torch} device={device} onRunning={setVolRunning}
+          onDevice={(v) => { setDevice(v); try { localStorage.setItem("bme_training_device", v); } catch { /* ignore */ } }} />
+      ) : tab === "seg" ? (
         <div className="space-y-4">
           <div className="rounded-lg border border-border border-l-4 border-l-primary bg-card p-4 text-sm text-muted-foreground">
             <div className="flex flex-wrap items-center gap-2 mb-2">

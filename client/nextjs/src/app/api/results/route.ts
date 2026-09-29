@@ -85,7 +85,10 @@ export async function GET() {
       reviewCount: Array.isArray(review2d) ? review2d.length : 0,
     },
     threeD: {
-      available: false,
+      available: Boolean(readJson("data/results3d/metrics.json")),
+      trained: fs.existsSync(path.join(projectRoot(), "data", "results3d"))
+        && fs.readdirSync(path.join(projectRoot(), "data", "results3d")).some((f) => /^fold_\d+\.pt$/.test(f)),
+      metrics: readJson("data/results3d/metrics.json"),
       annotations: countAnnotations(),
       worklist: worklistSummary(),
     },

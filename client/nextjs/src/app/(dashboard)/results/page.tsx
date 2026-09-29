@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 import { Activity, Boxes, CheckCircle2, Eye, Layers, Loader2, RefreshCw } from "lucide-react";
 import TestImage from "./TestImage";
+import Test3D from "./Test3D";
 
 /**
  * Model results, split into two independent pipelines.
@@ -37,6 +38,13 @@ type Payload = {
   };
   threeD: {
     available: boolean;
+    trained: boolean;
+    metrics: null | {
+      model: string; device: string; folds: number; epochs: number;
+      n_cases: number; n_bme: number; n_negative: number;
+      presence_correct: number; presence_n: number; note: string;
+      summary: Record<string, { mean: number; std: number } | null>;
+    };
     annotations: { total: number; cases: string[] };
     worklist: null | {
       totalCases: number;
@@ -450,10 +458,10 @@ export default function ResultsPage() {
       {tab === "3d" && (
         <div className="space-y-5">
           <div className="rounded-lg border border-border border-l-4 border-l-primary bg-card p-4 text-sm text-muted-foreground">
-            <span className="font-semibold text-foreground">What this will answer.</span>{" "}
-            Exactly where the edema is, its volume in mm³, and a 3D surface — segmenting
-            bone first, then edema only inside it. It needs annotated cases before it can
-            train.
+            <span className="font-semibold text-foreground">What this answers.</span>{" "}
+            Where the edema is on axial, coronal, and sagittal, whether it is present, and
+            its volume in mm³. Bone and edema are predicted together, and edema outside the
+            predicted bone is dropped. Upload a scan below after the 3D model has been trained.
           </div>
 
           <div className="grid gap-4 sm:grid-cols-3">
@@ -468,10 +476,49 @@ export default function ResultsPage() {
                 </span>
               </div>
               <div className="mt-1 text-xs text-muted-foreground">
-                ~10 needed before first training
+                Saved 3D segmentations available for training.
               </div>
             </div>
           </div>
+
+          {data?.threeD.metrics && (
+            <div className="rounded-lg border border-border bg-card p-4">
+              <div className="mb-3 text-xs font-semibold uppercase tracking-wider text-muted-foreground">
+                3D U-Net — {data.threeD.metrics.n_cases} volumes,{" "}
+                {data.threeD.metrics.n_bme} with edema, {data.threeD.metrics.n_negative} without
+                {" · "}{data.threeD.metrics.folds} folds, {data.threeD.metrics.epochs} epochs
+              </div>
+              <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+                {(["bone_dice", "bme_dice", "lesion_sensitivity", "fp_per_case"] as const).map((k) => {
+                  const s = data.threeD.metrics!.summary[k];
+                  const text = !s
+                    ? "—"
+                    : k === "fp_per_case"
+                      ? `${s.mean.toFixed(1)} ± ${s.std.toFixed(1)}`
+                      : `${s.mean.toFixed(3)} ± ${s.std.toFixed(3)}`;
+                  return (
+                    <div key={k} className="rounded-lg border border-border p-3">
+                      <div className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+                        {k.replace(/_/g, " ")}
+                      </div>
+                      <div className="mt-1 text-xl font-semibold tabular-nums">{text}</div>
+                    </div>
+                  );
+                })}
+              </div>
+              <p className="mt-3 text-sm">
+                Edema present or absent matched on {data.threeD.metrics.presence_correct} of{" "}
+                {data.threeD.metrics.presence_n} held-out volumes.
+              </p>
+              <p className="mt-1 text-xs text-muted-foreground">
+                Mean ± std across patient-level folds. Bone Dice and edema Dice are overlap with the
+                saved outlines. Lesion sensitivity is whether each painted patch was touched at all.
+                False positives per case counts predicted patches that do not overlap a painted one.
+              </p>
+            </div>
+          )}
+
+          <Test3D ready={Boolean(data?.threeD.trained)} />
 
           {data?.threeD.worklist && (
             <div className="rounded-lg border border-border bg-card p-4">

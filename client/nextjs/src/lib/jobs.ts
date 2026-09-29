@@ -19,11 +19,18 @@ import path from "node:path";
  * be permanently blocked by a file nobody remembers writing.
  */
 
-export type JobKind = "classifier" | "segmentation";
+export type JobKind = "classifier" | "segmentation" | "segmentation3d";
 
 const PID_FILES: Record<JobKind, string[]> = {
   classifier: ["data", "results2d", "train.pid"],
   segmentation: ["data", "results2dseg", "train.pid"],
+  segmentation3d: ["data", "results3d", "train.pid"],
+};
+
+const JOB_NAME: Record<JobKind, string> = {
+  classifier: "Detection",
+  segmentation: "2D segmentation",
+  segmentation3d: "3D segmentation",
 };
 
 function projectRoot() {
@@ -58,14 +65,15 @@ export function jobPid(kind: JobKind): number | null {
  * matters.
  */
 export function conflictingJob(starting: JobKind): { kind: JobKind; message: string } | null {
-  const other: JobKind = starting === "classifier" ? "segmentation" : "classifier";
-  if (jobPid(other) === null) return null;
-  const name = other === "classifier" ? "Detection" : "Segmentation";
-  return {
-    kind: other,
-    message:
-      `${name} training is already running. Both jobs share one GPU, and starting a ` +
-      `second can exhaust its memory and kill the run partway through. Wait for it to ` +
-      `finish, or stop it first.`,
-  };
+  for (const other of Object.keys(PID_FILES) as JobKind[]) {
+    if (other === starting || jobPid(other) === null) continue;
+    return {
+      kind: other,
+      message:
+        `${JOB_NAME[other]} training is already running. The jobs share one GPU, and starting a ` +
+        `second can exhaust its memory and kill the run partway through. Wait for it to ` +
+        `finish, or stop it first.`,
+    };
+  }
+  return null;
 }

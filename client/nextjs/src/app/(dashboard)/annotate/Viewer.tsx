@@ -1300,7 +1300,15 @@ export default function Viewer({
       toast.error("The saved annotation for this case could not be loaded, so saving would overwrite it. Re-import it or fix the file first.");
       return;
     }
-    const total = counts[0] + counts[1] + counts[2];
+    // Brush strokes write the mask in place and do not replace the array, so the
+    // displayed counts can still be zero after a real stroke. Count the buffer.
+    const live: [number, number, number] = [0, 0, 0];
+    for (let i = 0; i < labels.length; i++) {
+      const v = labels[i];
+      if (v >= 1 && v <= 3) live[v - 1]++;
+    }
+    setCounts(live);
+    const total = live[0] + live[1] + live[2];
     if (total === 0) {
       if (hasSaved) {
         if (confirm("This annotation is now blank. Delete the saved mask?")) await deleteMask(false);
