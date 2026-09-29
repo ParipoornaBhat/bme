@@ -191,6 +191,12 @@ function deriveAxes(affine: number[][]): Record<Plane, PlaneAxes> {
 
 type Cursor = { i: number; j: number; k: number };
 
+// One range for the wheel and the buttons, so neither can reach a zoom the
+// other cannot undo.
+const ZOOM_MIN = 0.4;
+const ZOOM_MAX = 6;
+const clampZoom = (z: number) => Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, Number(z.toFixed(2))));
+
 /** Cursor component along a numeric array axis (0=i, 1=j, 2=k). */
 const axisVal = (c: Cursor, ax: 0 | 1 | 2) => (ax === 0 ? c.i : ax === 1 ? c.j : c.k);
 const setAxis = (c: Cursor, ax: 0 | 1 | 2, v: number): Cursor =>
@@ -269,7 +275,16 @@ function SegmentMeasures({
   );
 }
 
-export default function Viewer({ caseId, onSaved }: { caseId: string; onSaved?: () => void }) {
+export default function Viewer({
+  caseId,
+  onSaved,
+  savedOnDisk = false,
+}: {
+  caseId: string;
+  onSaved?: () => void;
+  /** Whether the case already has a saved .seg.nrrd, from the case list. */
+  savedOnDisk?: boolean;
+}) {
   const { data: session } = useSession();
   const [vol, setVol] = useState<Vol | null>(null);
   const [labels, setLabels] = useState<Uint8Array | null>(null);
@@ -281,7 +296,7 @@ export default function Viewer({ caseId, onSaved }: { caseId: string; onSaved?: 
   const [seg, setSeg] = useState<number>(1);
   const [brush, setBrush] = useState(6);
   const [erasing, setErasing] = useState(false);
-  const [tool, setTool] = useState<"brush" | "pencil" | "torch">("brush");
+  const [tool, setTool] = useState<"brush" | "pencil" | "pan" | "torch">("brush");
   const [torchSize, setTorchSize] = useState(48);
   const [torchHeld, setTorchHeld] = useState(false);
   const torchActive = tool === "torch" || torchHeld;
@@ -298,10 +313,18 @@ export default function Viewer({ caseId, onSaved }: { caseId: string; onSaved?: 
   // Zoom is per view: you often want a lesion magnified in one plane while
   // keeping the others wide for context.
   const [zoom, setZoom] = useState<Record<Plane, number>>({ axial: 1, coronal: 1, sagittal: 1 });
-  const [maskInside, setMaskInside] = useState(true);
+  // Pan is per view like zoom, in screen pixels.
+  const [pan, setPan] = useState<Record<Plane, { x: number; y: number }>>({
+    axial: { x: 0, y: 0 }, coronal: { x: 0, y: 0 }, sagittal: { x: 0, y: 0 },
+  });
+  const [panning, setPanning] = useState<Plane | null>(null);
+  const [maskInside, setMaskInside] = useState(false);
   const [protectLesion, setProtectLesion] = useState(true);
+  const [hasSaved, setHasSaved] = useState(savedOnDisk);
+  useEffect(() => { setHasSaved(savedOnDisk); }, [savedOnDisk]);
 
   // Hydrate preferences from localStorage
+  const prefsLoaded = useRef(false);
   useEffect(() => {
     try {
       const saved = localStorage.getItem("bme_protect_lesion");
@@ -311,8 +334,28 @@ export default function Viewer({ caseId, onSaved }: { caseId: string; onSaved?: 
         const n = Number(savedTorch);
         if (!isNaN(n) && n >= 8 && n <= 240) setTorchSize(n);
       }
+      const savedTool = localStorage.getItem("bme_viewer_tool");
+      if (savedTool === "brush" || savedTool === "pencil" || savedTool === "pan") setTool(savedTool);
+      const savedBrush = Number(localStorage.getItem("bme_viewer_brush"));
+      if (savedBrush >= 1 && savedBrush <= 20) setBrush(savedBrush);
+      const savedSeg = Number(localStorage.getItem("bme_viewer_seg"));
+      if (savedSeg >= 1 && savedSeg <= 3) setSeg(savedSeg);
+      const savedInside = localStorage.getItem("bme_viewer_mask_inside");
+      if (savedInside !== null) setMaskInside(savedInside === "true");
     } catch { /* ignore */ }
+    prefsLoaded.current = true;
   }, []);
+
+  useEffect(() => {
+    if (!prefsLoaded.current) return;
+    try {
+      // The torch is a momentary peek, so it is not what the next case opens with.
+      if (tool !== "torch") localStorage.setItem("bme_viewer_tool", tool);
+      localStorage.setItem("bme_viewer_brush", String(brush));
+      localStorage.setItem("bme_viewer_seg", String(seg));
+      localStorage.setItem("bme_viewer_mask_inside", String(maskInside));
+    } catch { /* ignore */ }
+  }, [tool, brush, seg, maskInside]);
   // Locked by default: painting should not drag the other two views around.
   // Slicer behaves the same way — the crosshair moves when you deliberately
   // move it, not as a side effect of every brush stroke.
@@ -657,17 +700,23 @@ export default function Viewer({ caseId, onSaved }: { caseId: string; onSaved?: 
     ctx.stroke();
     ctx.restore();
 
-    // Live pencil trace on the plane being drawn in.
+    // Live pencil trace on the plane being drawn in: the area that will be
+    // filled on release, and a solid edge, as in the 2D painter.
     if (pencilPlane.current === p && outline.current.length > 1) {
+      const color = erasing ? "#ef4444" : SEGMENTS.find((x) => x.value === seg)!.color;
       ctx.save();
-      ctx.strokeStyle = SEGMENTS.find((x) => x.value === seg)!.color;
-      ctx.lineWidth = Math.max(1.5, Math.round(w / 300));
-      ctx.setLineDash([Math.max(3, w / 90), Math.max(3, w / 90)]);
       ctx.beginPath();
       const [x0, y0] = outline.current[0];
       ctx.moveTo(x0, h - 1 - y0);
       for (const [x, y] of outline.current.slice(1)) ctx.lineTo(x, h - 1 - y);
       ctx.closePath();
+      ctx.globalAlpha = 0.22;
+      ctx.fillStyle = color;
+      ctx.fill();
+      ctx.globalAlpha = 1;
+      ctx.strokeStyle = color;
+      ctx.lineWidth = Math.max(1.5, Math.round(w / 300));
+      ctx.lineJoin = "round";
       ctx.stroke();
       ctx.restore();
     }
@@ -691,7 +740,7 @@ export default function Viewer({ caseId, onSaved }: { caseId: string; onSaved?: 
       ctx.stroke();
       ctx.restore();
     }
-  }, [vol, labels, cursor, seg, outlineTick, planeGeom, sampleAt, cursorInPlane, sliceOf, view, opacity]);
+  }, [vol, labels, cursor, seg, erasing, outlineTick, planeGeom, sampleAt, cursorInPlane, sliceOf, view, opacity]);
 
   const drawAll = useCallback(() => { PLANES.forEach(draw); }, [draw]);
   useEffect(() => { drawAll(); }, [drawAll]);
@@ -788,16 +837,42 @@ export default function Viewer({ caseId, onSaved }: { caseId: string; onSaved?: 
         e.preventDefault();
         e.stopPropagation();
         const delta = e.deltaY < 0 ? 0.15 : -0.15;
-        setZoom((z) => ({
-          ...z,
-          [p]: Math.min(4, Math.max(0.4, Number((z[p] + delta).toFixed(2)))),
-        }));
+        setZoom((z) => ({ ...z, [p]: clampZoom(z[p] + delta) }));
       };
       el.addEventListener("wheel", onWheel, { passive: false });
       cleanups.push(() => el.removeEventListener("wheel", onWheel));
     }
     return () => cleanups.forEach((fn) => fn());
   }, [vol]);
+
+  // ---- pan -------------------------------------------------------------
+  // Dragging is followed on the window, so the view keeps moving when the
+  // pointer runs off the canvas mid-drag.
+  const panStart = useRef<{ plane: Plane; x: number; y: number; ox: number; oy: number } | null>(null);
+  const startPan = useCallback((p: Plane, e: React.MouseEvent) => {
+    panStart.current = { plane: p, x: e.clientX, y: e.clientY, ox: pan[p].x, oy: pan[p].y };
+    setPanning(p);
+  }, [pan]);
+  useEffect(() => {
+    if (!panning) return;
+    const move = (e: MouseEvent) => {
+      const st = panStart.current;
+      if (!st) return;
+      setPan((cur) => ({ ...cur, [st.plane]: { x: st.ox + e.clientX - st.x, y: st.oy + e.clientY - st.y } }));
+    };
+    const up = () => { panStart.current = null; setPanning(null); };
+    window.addEventListener("mousemove", move);
+    window.addEventListener("mouseup", up);
+    return () => {
+      window.removeEventListener("mousemove", move);
+      window.removeEventListener("mouseup", up);
+    };
+  }, [panning]);
+
+  const resetView = (p: Plane) => {
+    setZoom((z) => ({ ...z, [p]: 1 }));
+    setPan((cur) => ({ ...cur, [p]: { x: 0, y: 0 } }));
+  };
 
   // ---- painting --------------------------------------------------------
   const toVoxel = useCallback((p: Plane, ev: React.MouseEvent<HTMLCanvasElement>) => {
@@ -819,6 +894,22 @@ export default function Viewer({ caseId, onSaved }: { caseId: string; onSaved?: 
     setCursor((c) => setAxis(setAxis(c, ax.h, ha), ax.v, vb));
   }, [vol]);
 
+  /**
+   * Whether bone marrow is painted anywhere on this plane's current slice.
+   * "Only inside bone" applies only once it is, as in the 2D painter;
+   * otherwise a fresh case could not take any edema at all.
+   */
+  const sliceHasBone = useCallback((p: Plane) => {
+    if (!vol || !labels) return false;
+    const { w, h } = planeGeom(p, vol);
+    const s = sliceOf(p, vol, cursor);
+    for (let b = 0; b < h; b++)
+      for (let a = 0; a < w; a++)
+        if (labels[sampleAt(p, vol, a, b, s)] === 1) return true;
+    return false;
+  }, [vol, labels, cursor, planeGeom, sliceOf, sampleAt]);
+  const strokeHasBone = useRef(false);
+
   const paintAt = useCallback((p: Plane, ev: React.MouseEvent<HTMLCanvasElement>) => {
     if (!vol || !labels) return;
     const hit = toVoxel(p, ev);
@@ -834,7 +925,7 @@ export default function Viewer({ caseId, onSaved }: { caseId: string; onSaved?: 
         const a = hit.a + da, b = hit.b + db;
         if (a < 0 || b < 0 || a >= w || b >= h) continue;
         const i = sampleAt(p, vol, a, b, s);
-        if (!canPaint(labels[i], seg, { erasing, insideBone: maskInside, hasBone: true, protectLesion })) continue;
+        if (!canPaint(labels[i], seg, { erasing, insideBone: maskInside, hasBone: strokeHasBone.current, protectLesion })) continue;
         labels[i] = erasing ? 0 : seg;
       }
     }
@@ -860,8 +951,10 @@ export default function Viewer({ caseId, onSaved }: { caseId: string; onSaved?: 
     pencilPlane.current = null;
     setOutlineTick((n) => n + 1);
     if (!vol || !labels || !p || pts.length < 3) { drawAll(); return; }
+    pushUndo();
     const { w, h } = planeGeom(p, vol);
     const s = sliceOf(p, vol, cursor);
+    const hasBone = sliceHasBone(p);
 
     let minB = Infinity, maxB = -Infinity;
     for (const [, b] of pts) { if (b < minB) minB = b; if (b > maxB) maxB = b; }
@@ -879,14 +972,16 @@ export default function Viewer({ caseId, onSaved }: { caseId: string; onSaved?: 
         const to = Math.min(w - 1, Math.floor(xs[k + 1]));
         for (let a = from; a <= to; a++) {
           const flat = sampleAt(p, vol, a, b, s);
-          if (!canPaint(labels[flat], seg, { erasing, insideBone: maskInside, hasBone: true, protectLesion })) continue;
+          if (!canPaint(labels[flat], seg, { erasing, insideBone: maskInside, hasBone, protectLesion })) continue;
           labels[flat] = erasing ? 0 : seg;
         }
       }
     }
     setDirty(true);
     drawAll();
-  }, [vol, labels, cursor, erasing, maskInside, protectLesion, seg, planeGeom, sliceOf, sampleAt, drawAll]);
+    recount();
+  }, [vol, labels, cursor, erasing, maskInside, protectLesion, seg, planeGeom, sliceOf, sampleAt, drawAll,
+      pushUndo, sliceHasBone, recount]);
 
   const clearMask = useCallback(() => {
     if (!labels) return;
@@ -898,8 +993,8 @@ export default function Viewer({ caseId, onSaved }: { caseId: string; onSaved?: 
     toast.info("Cleared 3D canvas mask");
   }, [labels, pushUndo, drawAll]);
 
-  const deleteMask = async () => {
-    if (!confirm(`Delete saved 3D mask for ${caseId}?`)) return;
+  const deleteMask = async (ask = true) => {
+    if (ask && !confirm(`Delete saved 3D mask for ${caseId}?`)) return;
     setDeletingMask(true);
     try {
       const res = await fetch(`/api/annotation/${encodeURIComponent(caseId)}`, {
@@ -907,7 +1002,10 @@ export default function Viewer({ caseId, onSaved }: { caseId: string; onSaved?: 
       });
       if (res.ok) {
         clearMask();
+        setDirty(false);
+        setHasSaved(false);
         toast.success(`Deleted saved 3D mask for ${caseId}`);
+        onSaved?.();
       } else {
         toast.error("Failed to delete mask from server");
       }
@@ -927,8 +1025,12 @@ export default function Viewer({ caseId, onSaved }: { caseId: string; onSaved?: 
     }
     const total = counts[0] + counts[1] + counts[2];
     if (total === 0) {
-      toast.error("Cannot save empty annotation: No voxels annotated yet.");
-      setStatus("Cannot save empty annotation: No voxels annotated yet.");
+      if (hasSaved) {
+        if (confirm("This annotation is now blank. Delete the saved mask?")) await deleteMask(false);
+      } else {
+        toast.error("Cannot save empty annotation: No voxels annotated yet.");
+        setStatus("Cannot save empty annotation: No voxels annotated yet.");
+      }
       return;
     }
     setSaving(true);
@@ -968,6 +1070,7 @@ export default function Viewer({ caseId, onSaved }: { caseId: string; onSaved?: 
         ? `Saved — recorded as annotated by ${me}`
         : "Saved to disk (not recorded: database unreachable)");
       setDirty(false);
+      setHasSaved(true);
       if (seriesId) setAnnotatedSeries(seriesId);
       setSavedSuccess(true);
       setTimeout(() => setSavedSuccess(false), 2000);
@@ -980,7 +1083,7 @@ export default function Viewer({ caseId, onSaved }: { caseId: string; onSaved?: 
     } finally {
       setSaving(false);
     }
-  }, [labels, counts, caseId, onSaved, session, savedLoadError, seriesId, annotatedSeries]);
+  }, [labels, counts, caseId, onSaved, session, savedLoadError, seriesId, annotatedSeries, hasSaved]);
 
   // ---- import from 3D Slicer ---------------------------------------------
   const importSlicer = async (file: File) => {
@@ -1017,6 +1120,7 @@ export default function Viewer({ caseId, onSaved }: { caseId: string; onSaved?: 
       setLabels(saved.labels);
       setSavedLoadError(null);
       setDirty(false);
+      setHasSaved(true);
       for (const w of j.warnings ?? []) toast.warning(w);
 
       try {
@@ -1060,14 +1164,15 @@ export default function Viewer({ caseId, onSaved }: { caseId: string; onSaved?: 
       else if (e.key === "3") { setSeg(3); setErasing(false); }
       else if (e.key === "4" || e.key.toLowerCase() === "b") { setTool("brush"); setErasing(false); }
       else if (e.key === "5" || e.key.toLowerCase() === "p") { setTool("pencil"); setErasing(false); }
+      else if (e.key === "6" || e.key.toLowerCase() === "h") { setTool("pan"); }
       else if (e.key === "7") { setTool("torch"); setErasing(false); }
       else if (e.key.toLowerCase() === "t" && !e.ctrlKey && !e.metaKey && !e.altKey) { setTorchHeld(true); }
       else if (e.key === "0" || e.key.toLowerCase() === "e") setErasing((v) => !v);
       else if (e.key.toLowerCase() === "v") cycleViewRef.current();
       else if (e.key.toLowerCase() === "l") setLocked((v) => !v);
-      else if (e.key === "Enter") { e.preventDefault(); commitOutline(); }
       else if (e.key === "Escape") {
-        outline.current = []; pencilPlane.current = null; setOutlineTick((n) => n + 1); drawAll();
+        outline.current = []; pencilPlane.current = null; painting.current = false;
+        setOutlineTick((n) => n + 1); drawAll();
       }
       else if (e.key === "[") {
         if (torchActiveRef.current) {
@@ -1115,7 +1220,7 @@ export default function Viewer({ caseId, onSaved }: { caseId: string; onSaved?: 
       window.removeEventListener("keyup", onKeyUp);
       window.removeEventListener("blur", onBlur);
     };
-  }, [undo, redo, commitOutline, drawAll, vol, activePlane, save]);
+  }, [undo, redo, drawAll, vol, activePlane, save]);
 
   if (busy) {
     return (
@@ -1203,6 +1308,16 @@ export default function Viewer({ caseId, onSaved }: { caseId: string; onSaved?: 
             </button>
             <button
               type="button"
+              onClick={() => setTool("pan")}
+              title="Hand mode (Key 6 or H)"
+              className={`p-1.5 rounded transition border cursor-pointer ${
+                tool === "pan" ? "bg-primary text-primary-foreground border-primary font-medium" : "border-border bg-background text-muted-foreground hover:text-foreground"
+              }`}
+            >
+              <Hand className="h-3.5 w-3.5" />
+            </button>
+            <button
+              type="button"
               onClick={() => { setTool("torch"); setErasing(false); }}
               title="Torch — see scan under annotation (Key 7, or hold T)"
               className={`p-1.5 rounded transition border cursor-pointer ${
@@ -1271,15 +1386,17 @@ export default function Viewer({ caseId, onSaved }: { caseId: string; onSaved?: 
             >
               <Trash2 className="h-3.5 w-3.5" />
             </button>
-            <button
-              type="button"
-              onClick={deleteMask}
-              disabled={deletingMask}
-              title="Delete saved 3D mask permanently"
-              className="p-1.5 rounded border border-destructive/40 bg-destructive/10 text-destructive hover:bg-destructive/20 transition cursor-pointer"
-            >
-              <XCircle className="h-3.5 w-3.5" />
-            </button>
+            {hasSaved && (
+              <button
+                type="button"
+                onClick={() => deleteMask()}
+                disabled={deletingMask}
+                title="Delete saved 3D mask permanently"
+                className="p-1.5 rounded border border-destructive/40 bg-destructive/10 text-destructive hover:bg-destructive/20 transition cursor-pointer"
+              >
+                <XCircle className="h-3.5 w-3.5" />
+              </button>
+            )}
             <button
               type="button"
               onClick={startCollaboration}
@@ -1337,7 +1454,7 @@ export default function Viewer({ caseId, onSaved }: { caseId: string; onSaved?: 
 
             <div className="mx-1 h-5 w-px bg-border" />
 
-            {/* Tool Mode: Brush vs Pencil vs Torch */}
+            {/* Tool Mode: Brush vs Pencil vs Hand vs Torch */}
             <div className="inline-flex overflow-hidden rounded-md border border-border">
               <button
                 type="button"
@@ -1358,6 +1475,16 @@ export default function Viewer({ caseId, onSaved }: { caseId: string; onSaved?: 
                 }`}
               >
                 <Lasso className="h-3 w-3" /> Pencil <span className="text-[10px] opacity-60">(5)</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => setTool("pan")}
+                title="Hand mode — drag to move the view (Key 6 or H)"
+                className={`inline-flex items-center gap-1.5 border-l border-border px-2.5 py-1 text-xs transition cursor-pointer ${
+                  tool === "pan" ? "bg-primary text-primary-foreground font-medium" : "bg-background text-muted-foreground hover:text-foreground"
+                }`}
+              >
+                <Hand className="h-3 w-3" /> Hand <span className="text-[10px] opacity-60">(6)</span>
               </button>
               <button
                 type="button"
@@ -1517,16 +1644,18 @@ export default function Viewer({ caseId, onSaved }: { caseId: string; onSaved?: 
             </button>
 
             {/* Delete Saved Mask */}
-            <button
-              type="button"
-              onClick={deleteMask}
-              disabled={deletingMask}
-              title="Delete saved 3D mask permanently from server"
-              className="inline-flex items-center gap-1 rounded border border-destructive/40 bg-destructive/10 px-2 py-1 text-xs text-destructive hover:bg-destructive/20 transition cursor-pointer"
-            >
-              <XCircle className="h-3 w-3" />
-              <span className="hidden sm:inline">Delete Mask</span>
-            </button>
+            {hasSaved && (
+              <button
+                type="button"
+                onClick={() => deleteMask()}
+                disabled={deletingMask}
+                title="Delete saved 3D mask permanently from server"
+                className="inline-flex items-center gap-1 rounded border border-destructive/40 bg-destructive/10 px-2 py-1 text-xs text-destructive hover:bg-destructive/20 transition cursor-pointer"
+              >
+                <XCircle className="h-3 w-3" />
+                <span className="hidden sm:inline">Delete Mask</span>
+              </button>
+            )}
 
             {/* Save Mask */}
             <button
@@ -1584,17 +1713,17 @@ export default function Viewer({ caseId, onSaved }: { caseId: string; onSaved?: 
                 <span>{p}</span>
                 <span className="flex items-center gap-0.5">
                   <button type="button" title="Zoom out"
-                    onClick={() => setZoom((z) => ({ ...z, [p]: Math.max(1, +(z[p] - 0.25).toFixed(2)) }))}
+                    onClick={() => setZoom((z) => ({ ...z, [p]: clampZoom(z[p] - 0.25) }))}
                     className="rounded border border-neutral-700 px-1 text-neutral-300 hover:bg-neutral-800">
                     <Minus className="h-2.5 w-2.5" />
                   </button>
-                  <button type="button" title="Reset zoom"
-                    onClick={() => setZoom((z) => ({ ...z, [p]: 1 }))}
+                  <button type="button" title="Reset zoom and pan"
+                    onClick={() => resetView(p)}
                     className="w-8 rounded border border-neutral-700 text-[9px] tabular-nums text-neutral-300 hover:bg-neutral-800">
                     {zoom[p].toFixed(1)}x
                   </button>
                   <button type="button" title="Zoom in"
-                    onClick={() => setZoom((z) => ({ ...z, [p]: Math.min(6, +(z[p] + 0.25).toFixed(2)) }))}
+                    onClick={() => setZoom((z) => ({ ...z, [p]: clampZoom(z[p] + 0.25) }))}
                     className="rounded border border-neutral-700 px-1 text-neutral-300 hover:bg-neutral-800">
                     <Plus className="h-2.5 w-2.5" />
                   </button>
@@ -1603,10 +1732,13 @@ export default function Viewer({ caseId, onSaved }: { caseId: string; onSaved?: 
               </div>
               <div className="flex min-h-0 flex-1 items-center justify-center overflow-hidden">
               <div className="flex h-full w-full items-center justify-center"
-                style={{ transform: `scale(${zoom[p]})`, transformOrigin: "center" }}>
+                style={{ transform: `translate(${pan[p].x}px, ${pan[p].y}px) scale(${zoom[p]})`, transformOrigin: "center" }}>
               <canvas
                 ref={(el) => { canvases.current[p] = el; }}
-                className={`${tool === "torch" ? "cursor-none" : "cursor-crosshair"} rounded`}
+                className={`${
+                  tool === "pan" ? (panning === p ? "cursor-grabbing" : "cursor-grab")
+                    : tool === "torch" ? "cursor-none" : "cursor-crosshair"
+                } rounded`}
                 style={{
                   imageRendering: "auto",
                   // Fill the square tile while keeping true physical proportions.
@@ -1616,17 +1748,22 @@ export default function Viewer({ caseId, onSaved }: { caseId: string; onSaved?: 
                 }}
                 onMouseDown={(e) => {
                   if (tool === "torch") return; // Pitfall-1: mouse down with torch tool does nothing
+                  if (tool === "pan") {
+                    if (e.button === 0) startPan(p, e);
+                    return;
+                  }
                   const hit = toVoxel(p, e);
                   if (!hit) return;
                   if (e.shiftKey) { moveCursor(p, hit.a, hit.b); return; }
                   if (e.button !== 0) return;
-                  pushUndo();
                   if (tool === "pencil") {
                     pencilPlane.current = p;
                     outline.current = [[hit.a, hit.b]];
                     painting.current = true;
                     setOutlineTick((n) => n + 1);
                   } else {
+                    pushUndo();
+                    strokeHasBone.current = sliceHasBone(p);
                     painting.current = true;
                     paintAt(p, e);
                     if (!locked) moveCursor(p, hit.a, hit.b);
@@ -1660,14 +1797,19 @@ export default function Viewer({ caseId, onSaved }: { caseId: string; onSaved?: 
                   }
                 }}
                 onMouseUp={() => {
-                  // Pencil follows Slicer's Draw effect: releasing the mouse
-                  // leaves the outline on screen so it can be inspected (and
-                  // extended) before Enter commits it. Only the brush paints
-                  // on release.
+                  // Pencil fills the traced outline on release, as in 2D.
+                  const wasTracing = painting.current && tool === "pencil";
+                  const wasBrushing = painting.current && tool === "brush";
                   painting.current = false;
-                  drawAll();
+                  if (wasTracing) commitOutline();
+                  else drawAll();
+                  // Labels are edited in place, so counts are refreshed when a
+                  // stroke ends rather than on every mouse move.
+                  if (wasBrushing) recount();
                 }}
                 onMouseLeave={() => {
+                  if (painting.current && tool === "pencil") commitOutline();
+                  else if (painting.current) recount();
                   painting.current = false;
                   if (torchRef.current?.plane === p) {
                     torchRef.current = null;
@@ -1713,9 +1855,8 @@ export default function Viewer({ caseId, onSaved }: { caseId: string; onSaved?: 
               <kbd className="font-mono">Ctrl+Z</kbd><span>Undo</span>
               <kbd className="font-mono">Ctrl+Y</kbd><span>Redo</span>
               <kbd className="font-mono">1 2 3</kbd><span>Pick segment</span>
-              <kbd className="font-mono">P</kbd><span>Brush / pencil</span>
-              <kbd className="font-mono">Enter</kbd><span>Fill pencil outline</span>
-              <kbd className="font-mono">Esc</kbd><span>Discard outline</span>
+              <kbd className="font-mono">B P H</kbd><span>Brush / pencil / hand</span>
+              <kbd className="font-mono">Esc</kbd><span>Discard outline while tracing</span>
               <kbd className="font-mono">E</kbd><span>Erase on/off</span>
               <kbd className="font-mono">[ ]</kbd><span>Brush size</span>
               <kbd className="font-mono">&uarr;&darr;&larr;&rarr;</kbd><span>Step slice (hovered view)</span>
@@ -1723,12 +1864,6 @@ export default function Viewer({ caseId, onSaved }: { caseId: string; onSaved?: 
               <kbd className="font-mono">Shift+click</kbd><span>Move crosshair (always)</span>
               <kbd className="font-mono">L</kbd><span>Lock / link views</span>
             </div>
-            {outlineTick >= 0 && outline.current.length > 2 && (
-              <p className="mt-2 rounded bg-accent px-2 py-1 font-medium text-foreground">
-                Outline ready — press <kbd className="font-mono">Enter</kbd> to fill it,
-                or <kbd className="font-mono">Esc</kbd> to discard.
-              </p>
-            )}
             <p className="mt-2 text-muted-foreground">{status}</p>
           </div>
         </div>

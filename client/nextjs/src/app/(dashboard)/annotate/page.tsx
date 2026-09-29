@@ -325,7 +325,12 @@ export default function AnnotatePage() {
                 No 3D cases yet. Put one folder per patient in data/newbme, then run pnpm data:process.
               </div>
             ) : selected ? (
-              <Viewer key={selected} caseId={selected} onSaved={load} />
+              <Viewer
+                key={selected}
+                caseId={selected}
+                onSaved={load}
+                savedOnDisk={cases.find((c) => c.id === selected)?.annotated ?? false}
+              />
             ) : (
               <div className="flex h-96 items-center justify-center rounded-lg border border-dashed border-border text-sm text-muted-foreground">
                 Pick a case from the list to start annotating.
