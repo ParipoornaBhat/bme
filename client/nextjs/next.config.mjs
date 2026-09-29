@@ -83,10 +83,9 @@ const allowedDevOrigins = Array.from(
 );
 
 function launchTunnelIfNeeded(phase) {
-  const isServerPhase =
-    phase === PHASE_DEVELOPMENT_SERVER ||
-    phase === PHASE_PRODUCTION_SERVER ||
-    process.env.NODE_ENV !== "production";
+  if (phase !== PHASE_DEVELOPMENT_SERVER && phase !== PHASE_PRODUCTION_SERVER) {
+    return;
+  }
 
   const isOptedOut =
     process.env.ENABLE_TUNNEL === "false" ||
@@ -95,7 +94,6 @@ function launchTunnelIfNeeded(phase) {
 
   if (
     typeof process !== "undefined" &&
-    isServerPhase &&
     !isOptedOut &&
     !process.env.__CLOUDFLARE_TUNNEL_ACTIVE
   ) {
@@ -164,7 +162,10 @@ function launchTunnelIfNeeded(phase) {
   }
 }
 
-function attachWsProxyIfNeeded() {
+function attachWsProxyIfNeeded(phase) {
+  if (phase !== PHASE_DEVELOPMENT_SERVER && phase !== PHASE_PRODUCTION_SERVER) {
+    return;
+  }
   // Attach upgrade proxy for /ws/collaborate from Next.js (port 3000) to Hono (port 4000)
   if (typeof process !== "undefined" && !process.env.__WS_PROXY_ATTACHED) {
     process.env.__WS_PROXY_ATTACHED = "true";
@@ -213,6 +214,10 @@ const nextConfig = {
   transpilePackages: ["@bme/db"],
   allowedDevOrigins,
 
+  // Keep database drivers external to the server bundle so webpack does not
+  // crawl optional native bindings or external directory trees during build.
+  serverExternalPackages: ["pg", "pg-native", "pg-pool", "@neondatabase/serverless"],
+
   webpack: (config) => {
     config.resolve.extensionAlias = {
       ".js": [".ts", ".tsx", ".js"],
@@ -253,6 +258,6 @@ const nextConfig = {
 
 export default (phase) => {
   launchTunnelIfNeeded(phase);
-  attachWsProxyIfNeeded();
+  attachWsProxyIfNeeded(phase);
   return nextConfig;
 };

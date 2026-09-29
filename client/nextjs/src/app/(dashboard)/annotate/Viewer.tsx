@@ -25,6 +25,7 @@ import {
   Save,
   SlidersHorizontal,
   Trash2,
+  Upload,
   Users,
   XCircle,
   ZoomIn,
@@ -167,6 +168,31 @@ const axisVal = (c: Cursor, ax: 0 | 1 | 2) => (ax === 0 ? c.i : ax === 1 ? c.j :
 const setAxis = (c: Cursor, ax: 0 | 1 | 2, v: number): Cursor =>
   ax === 0 ? { ...c, i: v } : ax === 1 ? { ...c, j: v } : { ...c, k: v };
 
+/**
+ * The case's saved annotation (web editor or 3D Slicer) as a label buffer for
+ * `n` voxels, or null when nothing is saved. Throws when a file exists but
+ * cannot be read, so the caller can refuse to save over it.
+ */
+async function fetchSavedLabels(
+  caseId: string,
+  n: number,
+): Promise<{ labels: Uint8Array | null; warnings: string[] }> {
+  const res = await fetch(`/api/annotation/${caseId}/labels`, { cache: "no-store" });
+  if (res.status === 404) return { labels: null, warnings: [] };
+  if (!res.ok) {
+    const j = await res.json().catch(() => ({}));
+    throw new Error((j as { error?: string }).error ?? "could not load the saved annotation");
+  }
+  const buf = new Uint8Array(await res.arrayBuffer());
+  if (buf.length !== n) throw new Error(`saved annotation has ${buf.length} voxels, the scan has ${n}`);
+  let warnings: string[] = [];
+  try {
+    const info = JSON.parse(decodeURIComponent(res.headers.get("X-Annotation-Info") ?? "")) as { warnings?: string[] };
+    warnings = info.warnings ?? [];
+  } catch { /* no info header */ }
+  return { labels: buf, warnings };
+}
+
 export default function Viewer({ caseId, onSaved }: { caseId: string; onSaved?: () => void }) {
   const { data: session } = useSession();
   const [vol, setVol] = useState<Vol | null>(null);
@@ -232,6 +258,9 @@ export default function Viewer({ caseId, onSaved }: { caseId: string; onSaved?: 
   const [toolbarCollapsed, setToolbarCollapsed] = useState(false);
   const [deletingMask, setDeletingMask] = useState(false);
   const [savedSuccess, setSavedSuccess] = useState(false);
+  const [savedLoadError, setSavedLoadError] = useState<string | null>(null);
+  const [importing, setImporting] = useState(false);
+  const importInput = useRef<HTMLInputElement>(null);
 
   // Hydrate active collaboration session from sessionStorage on reload / tab switch
   useEffect(() => {
@@ -391,13 +420,32 @@ export default function Viewer({ caseId, onSaved }: { caseId: string; onSaved?: 
         const axes = deriveAxes(aff);
 
         if (cancelled) return;
+        setStatus("Loading saved annotation…");
+        let initial: Uint8Array = new Uint8Array(n);
+        let note = "";
+        let loadError: string | null = null;
+        try {
+          const saved = await fetchSavedLabels(caseId, n);
+          if (saved.labels) {
+            initial = saved.labels;
+            note = " · saved annotation loaded";
+            for (const w of saved.warnings) toast.warning(w);
+          }
+        } catch (e) {
+          loadError = e instanceof Error ? e.message : "could not load the saved annotation";
+          note = ` · saved annotation NOT loaded: ${loadError}`;
+          toast.error(`Saved annotation for ${caseId} could not be loaded; saving is disabled so it is not overwritten.`);
+        }
+
+        if (cancelled) return;
+        setSavedLoadError(loadError);
         setVol({ data, dims, spacing, axes, lo, hi });
-        setLabels(new Uint8Array(n));
+        setLabels(initial);
         setCursor({
           i: Math.floor(dims[0] / 2), j: Math.floor(dims[1] / 2), k: Math.floor(dims[2] / 2),
         });
         setCounts([0, 0, 0]);
-        setStatus(`${dims[0]} x ${dims[1]} x ${dims[2]}`);
+        setStatus(`${dims[0]} x ${dims[1]} x ${dims[2]}${note}`);
         setDirty(false);
       } catch (e) {
         if (!cancelled) setStatus(e instanceof Error ? e.message : "failed to load");
@@ -746,6 +794,10 @@ export default function Viewer({ caseId, onSaved }: { caseId: string; onSaved?: 
   // ---- save ------------------------------------------------------------
   const save = useCallback(async () => {
     if (!labels) return;
+    if (savedLoadError) {
+      toast.error("The saved annotation for this case could not be loaded, so saving would overwrite it. Re-import it or fix the file first.");
+      return;
+    }
     const total = counts[0] + counts[1] + counts[2];
     if (total === 0) {
       toast.error("Cannot save empty annotation: No voxels annotated yet.");
@@ -792,7 +844,65 @@ export default function Viewer({ caseId, onSaved }: { caseId: string; onSaved?: 
     } finally {
       setSaving(false);
     }
-  }, [labels, counts, caseId, onSaved, session]);
+  }, [labels, counts, caseId, onSaved, session, savedLoadError]);
+
+  // ---- import from 3D Slicer ---------------------------------------------
+  const importSlicer = async (file: File) => {
+    if (!vol) return;
+    if (!file.name.toLowerCase().endsWith(".nrrd")) {
+      toast.error("Choose a .seg.nrrd saved from 3D Slicer.");
+      return;
+    }
+    const hasWork = counts[0] + counts[1] + counts[2] > 0;
+    if ((hasWork || savedLoadError) &&
+        !confirm(`Replace the current annotation for ${caseId} with the imported file? The current one is overwritten.`)) {
+      return;
+    }
+    setImporting(true);
+    setStatus("Importing from 3D Slicer…");
+    try {
+      const me = session?.user?.name || session?.user?.email || "unknown";
+      const res = await fetch(`/api/annotation/${caseId}/import?by=${encodeURIComponent(me)}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/octet-stream" },
+        body: file,
+      });
+      const j = (await res.json()) as {
+        error?: string;
+        counts?: Record<string, number>;
+        warnings?: string[];
+      };
+      if (!res.ok) throw new Error(j.error ?? "import failed");
+
+      const saved = await fetchSavedLabels(caseId, vol.dims[0] * vol.dims[1] * vol.dims[2]);
+      if (!saved.labels) throw new Error("import finished but no annotation was written");
+      undoStack.current = [];
+      redoStack.current = [];
+      setLabels(saved.labels);
+      setSavedLoadError(null);
+      setDirty(false);
+      for (const w of j.warnings ?? []) toast.warning(w);
+
+      try {
+        await fetch("/api/annotation-log", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ caseId, annotator: me, counts: j.counts ?? {} }),
+        });
+      } catch { /* ledger unavailable */ }
+
+      setStatus(`Imported from 3D Slicer and saved as ${caseId}.seg.nrrd`);
+      toast.success(`Imported 3D Slicer annotation for ${caseId}`);
+      onSaved?.();
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : "import failed";
+      setStatus(msg);
+      toast.error(msg);
+    } finally {
+      setImporting(false);
+      if (importInput.current) importInput.current.value = "";
+    }
+  };
 
   // ---- keyboard shortcuts (identical to 2D) ------------------------------
   useEffect(() => {
@@ -884,6 +994,16 @@ export default function Viewer({ caseId, onSaved }: { caseId: string; onSaved?: 
 
   return (
     <div className="space-y-2">
+      <input
+        ref={importInput}
+        type="file"
+        accept=".nrrd"
+        className="hidden"
+        onChange={(e) => {
+          const f = e.target.files?.[0];
+          if (f) void importSlicer(f);
+        }}
+      />
       {/* 3D Toolbar - Compact Bar vs Full Toolbar */}
       {toolbarCollapsed ? (
         <div className="flex items-center justify-between gap-2 rounded-lg border border-border bg-card p-2 overflow-x-auto py-1.5">
@@ -981,6 +1101,15 @@ export default function Viewer({ caseId, onSaved }: { caseId: string; onSaved?: 
 
           {/* Compact Right Actions */}
           <div className="flex items-center gap-1.5 shrink-0">
+            <button
+              type="button"
+              onClick={() => importInput.current?.click()}
+              disabled={importing}
+              title="Import a .seg.nrrd from 3D Slicer"
+              className="p-1.5 rounded border border-border bg-background text-muted-foreground hover:text-foreground transition cursor-pointer disabled:opacity-40"
+            >
+              {importing ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Upload className="h-3.5 w-3.5" />}
+            </button>
             <button
               onClick={clearMask}
               title="Clear current 3D mask"
@@ -1210,6 +1339,18 @@ export default function Viewer({ caseId, onSaved }: { caseId: string; onSaved?: 
             >
               <Users className="h-3.5 w-3.5" />
               <span>{collabToken ? "Collab Panel" : "Start Collaboration"}</span>
+            </button>
+
+            {/* Import from 3D Slicer */}
+            <button
+              type="button"
+              onClick={() => importInput.current?.click()}
+              disabled={importing}
+              title="Import a .seg.nrrd saved in 3D Slicer"
+              className="inline-flex items-center gap-1 rounded border border-border bg-background px-2 py-1 text-xs text-muted-foreground hover:text-foreground transition cursor-pointer disabled:opacity-40"
+            >
+              {importing ? <Loader2 className="h-3 w-3 animate-spin" /> : <Upload className="h-3 w-3" />}
+              <span className="hidden sm:inline">Import from Slicer</span>
             </button>
 
             {/* Clear Mask Button */}

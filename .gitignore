@@ -19,6 +19,9 @@
 /processed/
 /phi/
 *_PHI*
+# Personal guides and the college cluster manual, not project docs.
+/docs/general/
+/scripts/disk-scan/
 
 # Reference papers — the PDFs are copyrighted and not ours to redistribute,
 # but our own analysis of them is our work and belongs in the repo.

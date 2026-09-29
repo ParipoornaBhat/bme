@@ -15,8 +15,12 @@ harmless; an unrecognised name is a hard failure rather than a silent mislabel.
 
 Validation is not optional here — a bad label file trains a bad model quietly.
 Every case is checked for: unknown segment names, `bme` voxels outside
-`bone_marrow`, empty required segments, and geometry mismatch against the source
-volume. Problems are reported and that case is skipped.
+`bone_marrow`, and empty required segments. Problems are reported and that case
+is skipped.
+
+The output is always on the voxel grid of `data/nifti/<CASE>/<CASE>_primary.nii.gz`.
+Slicer crops saved segmentations to the painted region, so the file is placed on
+the scan by world coordinates rather than assumed to share its shape.
 """
 
 from __future__ import annotations
@@ -87,7 +91,11 @@ def build_labelmap(data, segments) -> tuple[np.ndarray, dict, list[str]]:
     out = np.zeros(shape, dtype=np.uint8)
     found = {}
 
-    for name, info in segments.items():
+    # Slicer's "overwrite none" mode keeps bme and bone_marrow overlapping in
+    # separate layers, so where they overlap the higher label must be written
+    # last regardless of the order segments appear in the header.
+    ordered = sorted(segments.items(), key=lambda kv: LABELS.get(canonical(kv[0]) or "", 0))
+    for name, info in ordered:
         canon = canonical(name)
         if canon is None:
             problems.append(f"unknown segment name {name!r} — expected one of {sorted(LABELS)}")
@@ -108,11 +116,73 @@ def build_labelmap(data, segments) -> tuple[np.ndarray, dict, list[str]]:
                 problems.append(f"required segment {name!r} is empty")
             continue
 
-        # Painted later wins on overlap; bme must sit on top of bone_marrow.
         out[mask] = LABELS[canon]
         found[canon] = int(mask.sum())
 
     return out, found, problems
+
+
+def seg_affine_ras(header) -> np.ndarray:
+    """Voxel index -> RAS mm for a .seg.nrrd, so it can be compared with a NIfTI affine."""
+    sd, org = header.get("space directions"), header.get("space origin")
+    if sd is None or org is None:
+        raise ValueError("file has no space directions/origin, so it cannot be placed on the scan")
+    rows = np.array(
+        [r for r in sd if r is not None and not np.any(np.isnan(np.asarray(r, dtype=float)))],
+        dtype=float,
+    )
+    if rows.shape != (3, 3):
+        raise ValueError(f"unexpected space directions {rows.shape}")
+    aff = np.eye(4)
+    aff[:3, :3] = rows.T
+    aff[:3, 3] = np.asarray(org, dtype=float)
+    space = str(header.get("space", "left-posterior-superior")).lower()
+    if space in ("left-posterior-superior", "lps"):
+        aff[:2, :] *= -1
+    elif space not in ("right-anterior-superior", "ras"):
+        raise ValueError(f"unsupported NRRD space {space!r}")
+    return aff
+
+
+def to_volume_grid(lab: np.ndarray, header, vol_img) -> tuple[np.ndarray, list[str]]:
+    """
+    Put a labelmap from a .seg.nrrd onto the voxel grid of the case's primary scan.
+
+    Slicer usually crops a saved segmentation to the painted region, and an
+    annotator may have drawn on a different series of the same study. Both are
+    handled by mapping every scan voxel to the nearest segmentation voxel in
+    world coordinates. On the same grid this is an exact integer shift.
+    """
+    seg_aff = seg_affine_ras(header)
+    m = np.linalg.inv(seg_aff) @ vol_img.affine
+    rot, t = m[:3, :3], m[:3, 3]
+    shape = vol_img.shape[:3]
+    out = np.zeros(shape, dtype=np.uint8)
+
+    ii, jj = np.meshgrid(np.arange(shape[0]), np.arange(shape[1]), indexing="ij")
+    for k in range(shape[2]):
+        s = np.rint(
+            rot[:, 0, None, None] * ii + rot[:, 1, None, None] * jj + (rot[:, 2] * k + t)[:, None, None]
+        ).astype(np.int64)
+        ok = np.ones(ii.shape, dtype=bool)
+        for ax in range(3):
+            ok &= (s[ax] >= 0) & (s[ax] < lab.shape[ax])
+        out[:, :, k][ok] = lab[s[0][ok], s[1][ok], s[2][ok]]
+
+    notes = []
+    same_grid = np.allclose(rot, np.round(rot), atol=1e-3) and np.allclose(t, np.round(t), atol=1e-2)
+    if not same_grid:
+        notes.append("drawn on a different voxel grid from the primary scan; resampled to it")
+    before = np.count_nonzero(lab) * abs(np.linalg.det(seg_aff[:3, :3]))
+    after = np.count_nonzero(out) * abs(np.linalg.det(vol_img.affine[:3, :3]))
+    if before and not after:
+        raise ValueError("none of the painted voxels fall inside this case's scan; wrong case or wrong series")
+    if before and abs(after - before) / before > 0.1:
+        notes.append(
+            f"painted volume changed {before:.0f} -> {after:.0f} mm3 when placed on the scan; "
+            "check that it lines up"
+        )
+    return out, notes
 
 
 def validate(lab: np.ndarray, found: dict) -> list[str]:
@@ -182,7 +252,21 @@ def main():
             print(f"  {cid}  !! no segment metadata")
             continue
 
+        vol_path = base / "data" / "nifti" / cid / f"{cid}_primary.nii.gz"
+        if not vol_path.exists():
+            skipped.append((cid, "no converted volume — run convert.py"))
+            print(f"  {cid}  !! no converted volume")
+            continue
+        vol_img = nib.load(str(vol_path))
+
         lab, found, problems = build_labelmap(data, segments)
+        notes = []
+        if not problems:
+            try:
+                lab, notes = to_volume_grid(lab, header, vol_img)
+                found = {k: int((lab == v).sum()) for k, v in LABELS.items() if (lab == v).any()}
+            except ValueError as e:
+                problems.append(str(e))
         try:
             problems += validate(lab, found)
         except ImportError:
@@ -195,6 +279,8 @@ def main():
             continue
 
         print(f"  {cid}  {counts}")
+        for n in notes:
+            print(f"       note: {n}")
 
         if args.check_only:
             ok += 1
@@ -206,23 +292,7 @@ def main():
             ok += 1
             continue
 
-        # NRRD space directions -> NIfTI affine.
-        affine = np.eye(4)
-        try:
-            sd = header.get("space directions")
-            org = header.get("space origin")
-            if sd is not None:
-                rows = np.array([r for r in sd if r is not None and not np.any(np.isnan(r))])
-                if rows.shape == (3, 3):
-                    affine[:3, :3] = rows.T
-            if org is not None:
-                affine[:3, 3] = np.asarray(org, dtype=float)
-            # NRRD is typically LPS, NIfTI is RAS — flip the first two axes.
-            affine[:2, :] *= -1
-        except Exception as e:
-            print(f"       !! affine fallback to identity: {e}")
-
-        nib.save(nib.Nifti1Image(lab, affine), str(out))
+        nib.save(nib.Nifti1Image(lab, vol_img.affine), str(out))
         (seg_path.parent / f"{cid}_labels.json").write_text(
             json.dumps({"case_id": cid, "labels": LABELS, "voxel_counts": found}, indent=2),
             encoding="utf-8",
