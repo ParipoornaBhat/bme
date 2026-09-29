@@ -229,6 +229,15 @@ async function fetchSavedLabels(
   return { labels: buf, warnings };
 }
 
+function countLabels(l: Uint8Array): [number, number, number] {
+  const c: [number, number, number] = [0, 0, 0];
+  for (let i = 0; i < l.length; i++) {
+    const v = l[i];
+    if (v) c[v - 1]++;
+  }
+  return c;
+}
+
 function SegmentMeasures({
   counts, spacing,
 }: {
@@ -342,6 +351,7 @@ export default function Viewer({
       if (savedSeg >= 1 && savedSeg <= 3) setSeg(savedSeg);
       const savedInside = localStorage.getItem("bme_viewer_mask_inside");
       if (savedInside !== null) setMaskInside(savedInside === "true");
+      setAutoSave(localStorage.getItem("bme_viewer_autosave") === "true");
     } catch { /* ignore */ }
     prefsLoaded.current = true;
   }, []);
@@ -381,6 +391,17 @@ export default function Viewer({
   const [deletingMask, setDeletingMask] = useState(false);
   const [savedSuccess, setSavedSuccess] = useState(false);
   const [savedLoadError, setSavedLoadError] = useState<string | null>(null);
+  const [autoSave, setAutoSave] = useState(false);
+  const [autoSaveStatus, setAutoSaveStatus] = useState("");
+  // Bumped on every edit, so a save knows whether what it wrote is still
+  // what is on screen.
+  const editVersion = useRef(0);
+  const autoTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const saveInFlight = useRef(false);
+  // Newest edit version queued for auto save, per series: an older snapshot
+  // still waiting for an earlier save to finish must not land after it.
+  const latestAutoVersion = useRef(new Map<string, number>());
+  const scheduleAutoSaveRef = useRef<(source?: Uint8Array) => void>(() => {});
   const [importing, setImporting] = useState(false);
   const importInput = useRef<HTMLInputElement>(null);
 
@@ -496,6 +517,10 @@ export default function Viewer({
   useEffect(() => {
     let cancelled = false;
     setBusy(true); setStatus("Loading scan…"); setLabels(null); setVol(null);
+    // An auto save waiting for the previous series still runs: it carries its
+    // own copy of that series' labels. Dropping the handle only stops edits
+    // here from cancelling it.
+    autoTimer.current = null;
     undoStack.current = []; redoStack.current = [];
 
     (async () => {
@@ -802,6 +827,11 @@ export default function Viewer({
   }, [labels]);
 
   // ---- history ---------------------------------------------------------
+  const markEdited = useCallback(() => {
+    editVersion.current++;
+    setDirty(true);
+  }, []);
+
   const pushUndo = useCallback(() => {
     if (!labels) return;
     undoStack.current.push(labels.slice());
@@ -813,15 +843,17 @@ export default function Viewer({
     const prev = undoStack.current.pop();
     if (!prev || !labels) return;
     redoStack.current.push(labels.slice());
-    setLabels(prev); setDirty(true);
-  }, [labels]);
+    setLabels(prev); markEdited();
+    scheduleAutoSaveRef.current(prev);
+  }, [labels, markEdited]);
 
   const redo = useCallback(() => {
     const next = redoStack.current.pop();
     if (!next || !labels) return;
     undoStack.current.push(labels.slice());
-    setLabels(next); setDirty(true);
-  }, [labels]);
+    setLabels(next); markEdited();
+    scheduleAutoSaveRef.current(next);
+  }, [labels, markEdited]);
 
   useEffect(() => { recount(); }, [labels, recount]);
 
@@ -929,12 +961,12 @@ export default function Viewer({
         labels[i] = erasing ? 0 : seg;
       }
     }
-    setDirty(true);
+    markEdited();
     // Every plane, not just this one — the label volume is shared, so a stroke
     // here changes what the other two views should be showing.
     drawAll();
   }, [vol, labels, cursor, brush, erasing, seg, maskInside, protectLesion,
-      planeGeom, sampleAt, sliceOf, toVoxel, drawAll]);
+      planeGeom, sampleAt, sliceOf, toVoxel, drawAll, markEdited]);
 
   /**
    * Pencil: close the traced outline and fill everything inside it.
@@ -977,11 +1009,12 @@ export default function Viewer({
         }
       }
     }
-    setDirty(true);
+    markEdited();
     drawAll();
     recount();
+    scheduleAutoSaveRef.current();
   }, [vol, labels, cursor, erasing, maskInside, protectLesion, seg, planeGeom, sliceOf, sampleAt, drawAll,
-      pushUndo, sliceHasBone, recount]);
+      pushUndo, sliceHasBone, recount, markEdited]);
 
   const clearMask = useCallback(() => {
     if (!labels) return;
@@ -989,9 +1022,10 @@ export default function Viewer({
     labels.fill(0);
     setCounts([0, 0, 0]);
     drawAll();
-    setDirty(true);
+    markEdited();
+    scheduleAutoSaveRef.current();
     toast.info("Cleared 3D canvas mask");
-  }, [labels, pushUndo, drawAll]);
+  }, [labels, pushUndo, drawAll, markEdited]);
 
   const deleteMask = async (ask = true) => {
     if (ask && !confirm(`Delete saved 3D mask for ${caseId}?`)) return;
@@ -1017,6 +1051,37 @@ export default function Viewer({
   };
 
   // ---- save ------------------------------------------------------------
+  /** Write a label snapshot for one series and record it in the ledger. */
+  const persist = useCallback(async (snap: Uint8Array, series: string) => {
+    const me = session?.user?.name || session?.user?.email || "unknown";
+    const seriesQ = series && series !== "primary" ? `&series=${encodeURIComponent(series)}` : "";
+    const res = await fetch(`/api/annotation/${caseId}?by=${encodeURIComponent(me)}${seriesQ}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/octet-stream" },
+      body: new Uint8Array(snap),
+    });
+    const j = await res.json();
+    if (!res.ok) throw new Error(j.error ?? "save failed");
+
+    let logged = false;
+    try {
+      const c = countLabels(snap);
+      const logRes = await fetch("/api/annotation-log", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          caseId, annotator: me,
+          counts: { bone_marrow: c[0], bme: c[1], uncertain: c[2] },
+        }),
+      });
+      logged = (await logRes.json())?.ok === true;
+    } catch { /* ledger unavailable */ }
+    return { me, logged };
+  }, [caseId, session]);
+
+  const seriesRef = useRef(seriesId);
+  seriesRef.current = seriesId;
+
   const save = useCallback(async () => {
     if (!labels) return;
     if (savedLoadError) {
@@ -1033,43 +1098,20 @@ export default function Viewer({
       }
       return;
     }
+    if (annotatedSeries && seriesId && seriesId !== annotatedSeries && seriesId !== "primary") {
+      const ok = confirm(`Edema is stored on ${annotatedSeries}. Saving on ${seriesId} replaces that outline with this scan. Continue?`);
+      if (!ok) return;
+    }
     setSaving(true);
+    saveInFlight.current = true;
+    const version = editVersion.current;
 
     try {
-      const me = session?.user?.name || session?.user?.email || "unknown";
-      if (annotatedSeries && seriesId && seriesId !== annotatedSeries && seriesId !== "primary") {
-        const ok = confirm(`Edema is stored on ${annotatedSeries}. Saving on ${seriesId} replaces that outline with this scan. Continue?`);
-        if (!ok) {
-          setSaving(false);
-          return;
-        }
-      }
-      const seriesQ = seriesId && seriesId !== "primary" ? `&series=${encodeURIComponent(seriesId)}` : "";
-      const res = await fetch(`/api/annotation/${caseId}?by=${encodeURIComponent(me)}${seriesQ}`, {
-        method: "POST",
-        headers: { "Content-Type": "application/octet-stream" },
-        body: new Uint8Array(labels),
-      });
-      const j = await res.json();
-      if (!res.ok) throw new Error(j.error ?? "save failed");
-
-      let logged = false;
-      try {
-        const logRes = await fetch("/api/annotation-log", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            caseId, annotator: me,
-            counts: { bone_marrow: counts[0], bme: counts[1], uncertain: counts[2] },
-          }),
-        });
-        logged = (await logRes.json())?.ok === true;
-      } catch { /* ledger unavailable */ }
-
+      const { me, logged } = await persist(labels.slice(), seriesId);
       setStatus(logged
         ? `Saved — recorded as annotated by ${me}`
         : "Saved to disk (not recorded: database unreachable)");
-      setDirty(false);
+      if (editVersion.current === version) setDirty(false);
       setHasSaved(true);
       if (seriesId) setAnnotatedSeries(seriesId);
       setSavedSuccess(true);
@@ -1081,9 +1123,53 @@ export default function Viewer({
       setStatus(msg);
       toast.error(msg);
     } finally {
+      saveInFlight.current = false;
       setSaving(false);
     }
-  }, [labels, counts, caseId, onSaved, session, savedLoadError, seriesId, annotatedSeries, hasSaved]);
+  }, [labels, counts, caseId, onSaved, savedLoadError, seriesId, annotatedSeries, hasSaved, persist]);
+
+  // Auto save: a short pause after each stroke, undo or clear. The snapshot,
+  // case and series are fixed when it is queued, so it lands on the scan it
+  // was drawn on even if the user has moved on by then.
+  scheduleAutoSaveRef.current = (source) => {
+    const current = source ?? labels;
+    if (!autoSave || !current || savedLoadError) return;
+    if (annotatedSeries && seriesId && seriesId !== annotatedSeries && seriesId !== "primary") {
+      setAutoSaveStatus(`Auto save off here: edema is on ${annotatedSeries}`);
+      return;
+    }
+    if (autoTimer.current) clearTimeout(autoTimer.current);
+    autoTimer.current = null;
+    const snap = current.slice();
+    // A blank volume is never auto saved; Save offers to delete the file instead.
+    if (!snap.some((v) => v !== 0)) return;
+    const version = editVersion.current;
+    const series = seriesId;
+    latestAutoVersion.current.set(series, version);
+
+    const run = async () => {
+      if ((latestAutoVersion.current.get(series) ?? version) > version) return;
+      if (saveInFlight.current) {
+        setTimeout(run, 500);
+        return;
+      }
+      saveInFlight.current = true;
+      setAutoSaveStatus("Auto-saving…");
+      try {
+        await persist(snap, series);
+        const time = new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+        setAutoSaveStatus(`Auto-saved ${time}`);
+        if (seriesRef.current === series && editVersion.current === version) setDirty(false);
+        setHasSaved(true);
+        onSaved?.();
+      } catch {
+        setAutoSaveStatus("Auto-save failed");
+      } finally {
+        saveInFlight.current = false;
+      }
+    };
+    autoTimer.current = setTimeout(run, 1000);
+  };
 
   // ---- import from 3D Slicer ---------------------------------------------
   const importSlicer = async (file: File) => {
@@ -1097,6 +1183,9 @@ export default function Viewer({
         !confirm(`Replace the current annotation for ${caseId} with the imported file? The current one is overwritten.`)) {
       return;
     }
+    if (autoTimer.current) clearTimeout(autoTimer.current);
+    autoTimer.current = null;
+    latestAutoVersion.current.set(seriesId, editVersion.current + 1);
     setImporting(true);
     setStatus("Importing from 3D Slicer…");
     try {
@@ -1611,6 +1700,34 @@ export default function Viewer({
               </button>
             </div>
 
+            {/* Auto Save */}
+            <div className="flex items-center gap-1.5 border-l border-border pl-2">
+              <label
+                className="flex items-center gap-1.5 text-xs text-muted-foreground cursor-pointer select-none"
+                title="Auto-save the 3D mask shortly after each stroke/edit"
+              >
+                <input
+                  type="checkbox"
+                  checked={autoSave}
+                  onChange={(e) => {
+                    setAutoSave(e.target.checked);
+                    try {
+                      localStorage.setItem("bme_viewer_autosave", e.target.checked ? "true" : "false");
+                    } catch { /* ignore */ }
+                    if (e.target.checked) toast.success("Auto Save enabled");
+                    else toast.info("Auto Save disabled");
+                  }}
+                  className="rounded border-border accent-primary h-3.5 w-3.5"
+                />
+                <span className="font-medium">Auto Save</span>
+              </label>
+              {autoSaveStatus && (
+                <span className="text-[10px] text-muted-foreground font-mono truncate max-w-[160px]">
+                  {autoSaveStatus}
+                </span>
+              )}
+            </div>
+
             {/* Collaboration Button */}
             <button
               type="button"
@@ -1805,11 +1922,17 @@ export default function Viewer({
                   else drawAll();
                   // Labels are edited in place, so counts are refreshed when a
                   // stroke ends rather than on every mouse move.
-                  if (wasBrushing) recount();
+                  if (wasBrushing) {
+                    recount();
+                    scheduleAutoSaveRef.current();
+                  }
                 }}
                 onMouseLeave={() => {
                   if (painting.current && tool === "pencil") commitOutline();
-                  else if (painting.current) recount();
+                  else if (painting.current) {
+                    recount();
+                    scheduleAutoSaveRef.current();
+                  }
                   painting.current = false;
                   if (torchRef.current?.plane === p) {
                     torchRef.current = null;
