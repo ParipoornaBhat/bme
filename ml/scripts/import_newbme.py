@@ -9,9 +9,15 @@ and imported as the next free BME-nnn.
 
 The scan the edema was drawn on becomes <CASE>_primary.nii.gz, so the paint
 lines up. Every other scan is saved too, including a `_1` copy, as
-<CASE>_tra.nii.gz, <CASE>_cor.nii.gz, <CASE>_cor-1.nii.gz. A name.json in the
-folder or the zip can give those labels; without it the names come from the
-filenames. The site can open each one.
+<CASE>_tra.nii.gz, <CASE>_cor.nii.gz, <CASE>_cor-1.nii.gz. Those labels come
+from the filenames. The site can open each one.
+
+name.json, beside the zip or inside it, holds the patient name. It is written
+only to data/deid_map.csv. A missing name.json is fine: the zip filename is
+kept instead. Accepted shapes:
+
+    { "name": "the patient name" }
+    { "patient": "the patient name" }
 
 The one segment is named bme. Bone is painted later in the web app. The zip
 filename is the patient link, appended to data/deid_map.csv, which is
@@ -112,6 +118,25 @@ def slugify(text: str) -> str:
     return (slug or "scan")[:32]
 
 
+def patient_name(paths: list[Path]) -> str:
+    """Name from name.json. Empty when the file is missing or has no name."""
+    for path in paths:
+        if not path.is_file():
+            continue
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if isinstance(raw, str) and raw.strip():
+            return raw.strip()
+        if isinstance(raw, dict):
+            for key in ("name", "patient", "patient_name"):
+                value = raw.get(key)
+                if isinstance(value, str) and value.strip():
+                    return value.strip()
+    return ""
+
+
 def load_name_map(paths: list[Path]) -> dict[str, str]:
     """filename -> slug. Missing or unreadable files yield an empty map."""
     found: dict[str, str] = {}
@@ -209,6 +234,7 @@ def materialise(item: dict, dest: Path) -> dict:
         raise ValueError(f"{len(named)} segments")
     name_files = list(dest.rglob("name.json")) + list(item["zip"].parent.glob("name.json"))
     pairs = assign_slugs(scans, load_name_map(name_files))
+    who = patient_name(name_files)
     annotated = matching_slug(pairs, seg_h)
     primary = next(scan for slug, scan in pairs if slug == annotated)
     name = next(iter(named))
@@ -219,6 +245,7 @@ def materialise(item: dict, dest: Path) -> dict:
         "seg": seg,
         "renames": {} if canonical(name) == "bme" else {name: "bme"},
         "zip_name": item["zip_name"],
+        "patient": who,
     }
 
 
@@ -297,6 +324,9 @@ def main():
         tmp = Path(tempfile.mkdtemp(prefix="bme-newbme-"))
         try:
             ready = materialise(item, tmp)
+            if ready["patient"] and ready["patient"] in seen:
+                print(f"  {cid}  skipped: patient already imported")
+                continue
             row = import_case(
                 base, cid, ready["scan"], ready["seg"], ready["renames"], "bme", fields,
             )
@@ -308,12 +338,13 @@ def main():
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
         names = " ".join(slug for slug, _ in ready["pairs"])
+        source = ready["patient"] or item["zip_name"]
         append_rows(worklist, fields, [row])
         append_rows(base / "data" / "deid_map.csv", DEID_FIELDS, [{
             **{k: "" for k in DEID_FIELDS},
             "case_id": cid,
             "class": "BME",
-            "source_archive": item["zip_name"],
+            "source_archive": source,
             "status": "ok",
             "notes": f"edema on {ready['annotated']}; scans={names}",
         }])
