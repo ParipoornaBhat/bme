@@ -60,6 +60,16 @@ Phases are defined in [PRD.md](PRD.md) §8.
 
 In order. Each step's output is the next step's input.
 
+0. **3D data commands (2026-09-29).** Three pnpm scripts. They only touch 3D files. 2D slices, masks, and results stay. Patient names go to gitignored maps (`data/deid_map.csv` or `Non BME/new/<n>/name.json`), never into the chat or the repo.
+
+   | Command | What it does |
+   |---|---|
+   | `pnpm data:3d:erase` | Deletes `data/raw`, `data/nifti`, `data/annotations`, and `data/nnunet`. Clears `BME-` / `NBME-` rows from `data/worklist.csv`, `data/deid_map.csv`, and the Postgres `patient` table (studies and series cascade). Does **not** delete `data/newbme` or `Non BME/`. The next import starts at `BME-001`. |
+   | `pnpm data:process` | Imports `data/newbme`. Each item is one `.zip` in that folder, or one subfolder that contains one `.zip`. The zip holds the scan `.nrrd` files and one `Segmentation.seg.nrrd`. Every scan is kept (`BME-001_tra.nii.gz`, `_cor.nii.gz`, `_cor-1.nii.gz`). The edema outline is attached to the scan it was drawn on (`_primary`). Optional `name.json` is `{ "name": "..." }` or `{ "patient": "..." }`; if it is missing, the zip filename is stored instead. The source zip is deleted only after the case is written. Dry run: `python ml/scripts/import_newbme.py .` |
+   | `pnpm data:3d:nonbme:process` | Converts every `.zip` in `Non BME/3d` (DICOM) into `Non BME/new/1/`, `new/2/`, … Each folder gets `name.json` (the zip filename) and one compressed `.nrrd` per series, named `tra`, `cor`, `sag`, then `tra-1`, `cor-1` when a direction repeats. Every series is kept. A slice-size mismatch inside one series becomes its own file instead of failing the zip. The zip is deleted only after the nrrd files exist. A non-uniform-spacing line from SimpleITK is a warning; the file is still written. |
+
+   On `/annotate` → 3D, a case with more than one scan shows a button per series (`BME-001 tra · edema`, `BME-001 cor`). The edema paint is only drawn on the series it belongs to. An empty 3D list says so instead of spinning on a case id left in the browser.
+
 0. **3D dataset replaced with the team's Slicer export (2026-09-29).**
    The Drive `BME` folder (3D Slicer scans + BME-only segmentations) is now the 3D dataset:
    **55 patients, `BME-001`..`BME-055`**, in folder-name order. The old 107-case worklist and
@@ -287,6 +297,9 @@ ml/scripts/gradcam.py   heatmaps from the saved checkpoints; never trains
 ml/scripts/inventory.py re-run the dataset inventory
 ml/scripts/deid.py      de-identification
 ml/scripts/convert.py   DICOM -> NIfTI + picks each case's primary series
+ml/scripts/import_newbme.py   data/newbme zips -> BME-nnn (pnpm data:process)
+ml/scripts/nonbme_to_nrrd.py  Non BME/3d zips -> Non BME/new (pnpm data:3d:nonbme:process)
+scripts/erase-3d.js     wipe 3D volumes and case numbers (pnpm data:3d:erase)
 ml/scripts/seg2nifti.py .seg.nrrd -> validated training labelmap
 ml/scripts/build_dataset.py  nnU-Net layout + patient-level splits
 ml/scripts/train.py     nnU-Net plan/preprocess/train wrapper

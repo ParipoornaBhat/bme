@@ -201,10 +201,13 @@ def matching_slug(pairs: list[tuple[str, Path]], seg_h) -> str:
     return hits[0]
 
 
-def inspect(folder: Path):
-    zips = [p for p in folder.iterdir() if p.is_file() and p.suffix.lower() == ".zip"]
-    if len(zips) != 1:
-        return None, "no zip" if not zips else f"{len(zips)} zip files"
+def inspect(path: Path):
+    if path.is_file() and path.suffix.lower() == ".zip":
+        zips = [path]
+    else:
+        zips = [p for p in path.iterdir() if p.is_file() and p.suffix.lower() == ".zip"]
+        if len(zips) != 1:
+            return None, "no zip" if not zips else f"{len(zips)} zip files"
     try:
         with zipfile.ZipFile(zips[0]) as zf:
             names = [n for n in zf.namelist() if n.lower().endswith(".nrrd") and not n.endswith("/")]
@@ -232,7 +235,9 @@ def materialise(item: dict, dest: Path) -> dict:
     named = segments_in(seg_h)
     if len(named) != 1:
         raise ValueError(f"{len(named)} segments")
-    name_files = list(dest.rglob("name.json")) + list(item["zip"].parent.glob("name.json"))
+    name_files = list(dest.rglob("name.json"))
+    if item["zip"].parent != item.get("src"):
+        name_files += list(item["zip"].parent.glob("name.json"))
     pairs = assign_slugs(scans, load_name_map(name_files))
     who = patient_name(name_files)
     annotated = matching_slug(pairs, seg_h)
@@ -285,24 +290,28 @@ def main():
     if not src.is_dir():
         sys.exit(f"missing {src}\nPut one folder per patient inside it, then run this again.")
 
-    folders = sorted(p for p in src.iterdir() if p.is_dir())
-    if not folders:
-        sys.exit(f"no patient folders in {src}")
+    incoming = sorted(
+        p for p in src.iterdir()
+        if p.is_dir() or (p.is_file() and p.suffix.lower() == ".zip")
+    )
+    if not incoming:
+        sys.exit(f"no zips or patient folders in {src}")
 
     seen = known_sources(base)
     plan, skipped = [], []
-    for folder in folders:
-        item, why = inspect(folder)
+    for entry in incoming:
+        item, why = inspect(entry)
         if why:
-            skipped.append((folder.name, why))
+            skipped.append((entry.name, why))
             continue
         if item["zip_name"] in seen:
-            skipped.append((folder.name, "zip already imported"))
+            skipped.append((entry.name, "zip already imported"))
             continue
-        plan.append((folder, item))
+        item["src"] = src
+        plan.append((entry, item))
 
     ids = next_ids(used_ids(base), len(plan))
-    print(f"{len(folders)} folders: {len(plan)} to import, {len(skipped)} skipped")
+    print(f"{len(incoming)} items: {len(plan)} to import, {len(skipped)} skipped")
     if plan:
         print(f"new ids: {ids[0]} .. {ids[-1]}" if len(ids) > 1 else f"new id: {ids[0]}")
     for i, (_, why) in enumerate(skipped, 1):
@@ -348,7 +357,10 @@ def main():
             "status": "ok",
             "notes": f"edema on {ready['annotated']}; scans={names}",
         }])
-        shutil.rmtree(folder)
+        if folder.is_dir():
+            shutil.rmtree(folder)
+        else:
+            folder.unlink()
         imported += 1
         print(f"  {cid}  imported ({names}; edema on {ready['annotated']}), source folder removed")
 

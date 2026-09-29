@@ -434,6 +434,9 @@ export default function Viewer({ caseId, onSaved }: { caseId: string; onSaved?: 
   const canvases = useRef<Record<Plane, HTMLCanvasElement | null>>({
     axial: null, coronal: null, sagittal: null,
   });
+  const viewRefs = useRef<Record<Plane, HTMLDivElement | null>>({
+    axial: null, coronal: null, sagittal: null,
+  });
   const painting = useRef(false);
   const pencilPlane = useRef<Plane | null>(null);
   const undoStack = useRef<Uint8Array[]>([]);
@@ -770,6 +773,29 @@ export default function Viewer({ caseId, onSaved }: { caseId: string; onSaved?: 
   }, [labels]);
 
   useEffect(() => { recount(); }, [labels, recount]);
+
+  // Same wheel zoom as the 2D painter: the view under the pointer zooms,
+  // and the page does not scroll. Listeners are non-passive so preventDefault works.
+  useEffect(() => {
+    if (!vol) return;
+    const cleanups: Array<() => void> = [];
+    for (const p of PLANES) {
+      const el = viewRefs.current[p];
+      if (!el) continue;
+      const onWheel = (e: WheelEvent) => {
+        e.preventDefault();
+        e.stopPropagation();
+        const delta = e.deltaY < 0 ? 0.15 : -0.15;
+        setZoom((z) => ({
+          ...z,
+          [p]: Math.min(4, Math.max(0.4, Number((z[p] + delta).toFixed(2)))),
+        }));
+      };
+      el.addEventListener("wheel", onWheel, { passive: false });
+      cleanups.push(() => el.removeEventListener("wheel", onWheel));
+    }
+    return () => cleanups.forEach((fn) => fn());
+  }, [vol]);
 
   // ---- painting --------------------------------------------------------
   const toVoxel = useCallback((p: Plane, ev: React.MouseEvent<HTMLCanvasElement>) => {

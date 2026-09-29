@@ -33,7 +33,7 @@
     "db:sync": "pnpm --filter @bme/db db:sync",
     "data:process": "node scripts/import-newbme.js",
     "data:3d:erase": "node scripts/erase-3d.js",
-    "data:3d:erase": "node scripts/erase-3d.js",
+    "data:3d:nonbme:process": "node scripts/nonbme-to-nrrd.js",
     "migrate:generate": "pnpm --filter @bme/db db:generate --name",
     "migrate:deploy": "pnpm --filter @bme/db db:migrate",
     "clean": "node scripts/clean.js",
