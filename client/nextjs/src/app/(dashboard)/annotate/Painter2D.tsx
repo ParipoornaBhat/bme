@@ -18,12 +18,10 @@ import {
   Layers,
   Loader2,
   Lock,
-  LogOut,
   Maximize2,
   MessageSquare,
   Move,
   Paintbrush,
-  RefreshCw,
   RotateCcw,
   RotateCw,
   Save,
@@ -36,10 +34,11 @@ import {
   ZoomOut,
 } from "lucide-react";
 import { toast } from "sonner";
-import { useSession } from "~/lib/auth-client";
 import CollaborationViewerHeader from "~/components/collaborate/CollaborationViewerHeader";
 import CollaborationMasterPanel from "~/components/collaborate/CollaborationMasterPanel";
 import LiveCursorsOverlay from "~/components/collaborate/LiveCursorsOverlay";
+import { guestSessionScreen } from "~/components/collaborate/GuestSessionScreen";
+import { useGuestUserId, useHostSession, useSessionNotices } from "~/lib/useHostSession";
 import {
   useCollaboration,
   type MaskOpApplied,
@@ -157,74 +156,22 @@ export default function Painter2D({
   panRef.current = pan;
 
   // Collaboration States
-  const { data: session } = useSession();
-  const [collabToken, setCollabToken] = useState<string | null>(externalCollabToken || null);
-  const [shareUrl, setShareUrl] = useState<string>("");
-  const [showMasterPanel, setShowMasterPanel] = useState(false);
-  const [startingCollab, setStartingCollab] = useState(false);
-  // The id this client created the session under. masterUserId starts as a
-  // placeholder and is replaced once the auth session loads, so without pinning
-  // it the host can connect under a different id than the one that owns the
-  // session - and, now that nobody is promoted automatically, be locked out of
-  // their own review.
-  const [collabHostId, setCollabHostId] = useState<string | null>(null);
-  // Returned by the API to whoever created the session; it is what makes this
-  // socket the host. Never shared, never put in a link.
-  const [collabHostKey, setCollabHostKey] = useState<string | null>(null);
-
-  useEffect(() => {
-    if (externalCollabToken) {
-      setCollabToken(externalCollabToken);
-    }
-  }, [externalCollabToken]);
-
-  // Stable Master User ID for collaboration session and WebSocket
-  const [masterUserId, setMasterUserId] = useState<string>("master_host");
-  const [masterUserName, setMasterUserName] = useState<string>("Dr. Master");
-
-  useEffect(() => {
-    if (typeof window !== "undefined") {
-      let uid = session?.user?.id;
-      if (!uid) {
-        uid = localStorage.getItem("bme_master_uid") || "";
-        if (!uid) {
-          uid = `master_${Math.random().toString(36).substring(2, 9)}`;
-          localStorage.setItem("bme_master_uid", uid);
-        }
-      }
-      setMasterUserId(uid);
-      setMasterUserName(session?.user?.name || "Dr. Master");
-    }
-  }, [session?.user?.id, session?.user?.name]);
-
-  // Generated once and persisted: the id is part of the WebSocket URL, so a new
-  // one on every render would reconnect in a loop and leave the master granting
-  // permissions to participants that no longer exist.
-  const [persistedCollabUserId] = useState<string>(() => {
-    if (typeof window === "undefined") return "";
-    try {
-      const saved = localStorage.getItem("bme_collab_radiologist_uid");
-      if (saved) return saved;
-      const fresh = `collab_${Math.random().toString(36).substring(2, 9)}`;
-      localStorage.setItem("bme_collab_radiologist_uid", fresh);
-      return fresh;
-    } catch {
-      return `collab_${Math.random().toString(36).substring(2, 9)}`;
-    }
-  });
+  const host = useHostSession({ storagePrefix: "bme_active_collab", enabled: !isCollaborator });
+  const collabToken = isCollaborator ? (externalCollabToken || null) : host.token;
+  const guestUserId = useGuestUserId();
 
   const activeUserId = isCollaborator
-    ? (collaboratorUserId || persistedCollabUserId)
-    : (collabHostId ?? masterUserId);
+    ? (collaboratorUserId || guestUserId)
+    : host.userId;
   const activeUserName = isCollaborator
     ? (collaboratorUserName || (typeof window !== "undefined" && localStorage.getItem("bme_collab_radiologist_name")) || "Dr. Radiologist")
-    : masterUserName;
+    : host.userName;
 
   const collab = useCollaboration({
     token: collabToken || "",
     userId: activeUserId,
     userName: activeUserName,
-    hostKey: isCollaborator ? undefined : (collabHostKey ?? undefined),
+    hostKey: isCollaborator ? undefined : (host.hostKey ?? undefined),
     onViewpointUpdated: (vp, updatedBy) => {
       // Remember where everyone is, so choosing to follow someone can jump
       // straight to their view instead of waiting for them to move again.
@@ -279,110 +226,8 @@ export default function Painter2D({
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [toolbarCollapsed, setToolbarCollapsed] = useState(false);
 
-  // Restore an active collaboration session after a reload - once, on mount.
-  // Re-running whenever collabToken went empty is what made End Session look
-  // broken: clearing the token immediately restored it from storage.
-  useEffect(() => {
-    try {
-      const savedToken = sessionStorage.getItem("bme_active_collab_token");
-      const savedHostKey = sessionStorage.getItem("bme_active_collab_host_key");
-      if (savedToken && !collabToken && !isCollaborator) {
-        setCollabToken(savedToken);
-        setCollabHostKey(savedHostKey || null);
-        const baseOrigin =
-          process.env.NEXT_PUBLIC_APP_URL &&
-          !process.env.NEXT_PUBLIC_APP_URL.includes("localhost")
-            ? process.env.NEXT_PUBLIC_APP_URL.replace(/\/$/, "")
-            : window.location.origin;
-        setShareUrl(`${baseOrigin}/collaborate/${savedToken}`);
-      }
-    } catch { /* ignore */ }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
-  // Forget the host's session everywhere: state and the copy kept for reloads.
-  const forgetHostSession = () => {
-    try {
-      sessionStorage.removeItem("bme_active_collab_token");
-      sessionStorage.removeItem("bme_active_collab_host_key");
-    } catch { /* ignore */ }
-    setCollabToken(null);
-    setCollabHostKey(null);
-    setShowMasterPanel(false);
-  };
-
-  // The host's session can also end without this page asking: from another
-  // tab, or because the server restarted and a reload restored a token it no
-  // longer knows. Drop back to "Start Collaboration" rather than leave a panel
-  // attached to a dead session.
-  useEffect(() => {
-    if (isCollaborator || !collabToken) return;
-    if (collab.sessionInvalid) {
-      toast.info("That review session no longer exists. Start a new one to collaborate.");
-      forgetHostSession();
-    } else if (collab.sessionEnded) {
-      forgetHostSession();
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [collab.sessionInvalid, collab.sessionEnded, collabToken, isCollaborator]);
-
-  const startCollaboration = async () => {
-    if (collabToken) {
-      setShowMasterPanel(true);
-      return;
-    }
-    setStartingCollab(true);
-    const hostId = masterUserId;
-    setCollabHostId(hostId);
-    try {
-      const res = await fetch("/api/collaborate/session", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          caseId: selected?.stem || "2d_slice",
-          userId: hostId,
-          userName: masterUserName,
-        }),
-      });
-      if (!res.ok) {
-        let errorMsg = `Server error (${res.status})`;
-        try {
-          const contentType = res.headers.get("content-type") || "";
-          if (contentType.includes("application/json")) {
-            const data = await res.json();
-            errorMsg = data.error || errorMsg;
-          }
-        } catch { /* fallback */ }
-        if (res.status === 502 || res.status === 504) {
-          errorMsg = "Backend API server (port 4000) is unreachable. Please make sure the backend server is running via 'pnpm dev'.";
-        }
-        console.error("Failed to start 2D collaboration:", errorMsg);
-        toast.error(errorMsg);
-        return;
-      }
-      const data = await res.json();
-      if (data.token) {
-        const baseOrigin =
-          process.env.NEXT_PUBLIC_APP_URL &&
-          !process.env.NEXT_PUBLIC_APP_URL.includes("localhost")
-            ? process.env.NEXT_PUBLIC_APP_URL.replace(/\/$/, "")
-            : window.location.origin;
-        const shareUrl = `${baseOrigin}/collaborate/${data.token}`;
-        setCollabHostKey(data.hostKey ?? null);
-        setCollabToken(data.token);
-        setShareUrl(shareUrl);
-        setShowMasterPanel(true);
-        try {
-          sessionStorage.setItem("bme_active_collab_token", data.token);
-          if (data.hostKey) sessionStorage.setItem("bme_active_collab_host_key", data.hostKey);
-        } catch { /* ignore */ }
-      }
-    } catch (err) {
-      console.error("Failed to start 2D collaboration:", err);
-    } finally {
-      setStartingCollab(false);
-    }
-  };
+  useSessionNotices(collab, collabToken, !isCollaborator, host.forget);
+  const startCollaboration = () => host.start(selected?.stem || "2d_slice", "2d");
 
   useEffect(() => {
     if (collabToken && collab.connected && selected) {
@@ -408,53 +253,6 @@ export default function Painter2D({
       );
     }
   }, [selected, zoom, pan, collabToken, collab.connected, slices, collab.updateViewpoint]);
-
-  // Toast notifications when participants join or disconnect from Master session (keyed by boolean connected state)
-  const prevConnectedMapRef = useRef<Map<string, boolean>>(new Map());
-  useEffect(() => {
-    if (!collabToken || !collab.connected) return;
-    const curr = collab.participants;
-    const prevMap = prevConnectedMapRef.current;
-    const newMap = new Map<string, boolean>();
-
-    curr.forEach((p) => newMap.set(p.id, p.connected));
-
-    // Notify for new connected participants
-    curr.forEach((p) => {
-      if (p.id !== collab.currentUserId && p.connected) {
-        const wasConn = prevMap.get(p.id);
-        if (wasConn === false || (wasConn === undefined && prevMap.size > 0)) {
-          toast.info(`🩺 ${p.name} joined the review session`);
-        }
-      }
-    });
-
-    // Notify for disconnected participants
-    prevMap.forEach((wasConn, uid) => {
-      if (uid !== collab.currentUserId && wasConn) {
-        const target = curr.find((p) => p.id === uid);
-        if (!target || !target.connected) {
-          const name = target?.name || `Participant`;
-          toast.warning(`🩺 ${name} left the review session`);
-        }
-      }
-    });
-
-    prevConnectedMapRef.current = newMap;
-  }, [collab.participants, collabToken, collab.connected, collab.currentUserId]);
-
-  // Toast notifications for the host when new viewers request admission
-  const seenRequestsRef = useRef<Set<string>>(new Set());
-  useEffect(() => {
-    if (!collabToken || isCollaborator) return;
-    const currentIds = new Set(collab.joinRequests.map((r) => r.userId));
-    collab.joinRequests.forEach((req) => {
-      if (!seenRequestsRef.current.has(req.userId)) {
-        toast.info(`🩺 ${req.name} wants to join`);
-      }
-    });
-    seenRequestsRef.current = currentIds;
-  }, [collab.joinRequests, collabToken, isCollaborator]);
 
   const [isPanning, setIsPanning] = useState(false);
   const panStartRef = useRef<{ x: number; y: number }>({ x: 0, y: 0 });
@@ -1750,110 +1548,9 @@ export default function Painter2D({
     return true;
   });
 
-  // 1. Viewer voluntarily left the review
-  if (isCollaborator && collab.admission === "left") {
-    return (
-      <div className="flex h-full w-full flex-col items-center justify-center gap-3 p-6 text-center">
-        <LogOut className="h-10 w-10 text-slate-400" />
-        <h1 className="text-lg font-semibold">You left the review</h1>
-        <p className="max-w-md text-sm text-muted-foreground">
-          You have exited the collaborative review session.
-        </p>
-        <button
-          type="button"
-          onClick={() => collab.rejoinLobby()}
-          className="mt-2 inline-flex items-center gap-1.5 rounded-xl bg-blue-600 px-4 py-2 text-xs font-semibold text-white shadow hover:bg-blue-500 transition-all cursor-pointer active:scale-95"
-        >
-          <RefreshCw className="h-3.5 w-3.5" />
-          <span>Rejoin</span>
-        </button>
-      </div>
-    );
-  }
-
-  // 2. Viewer was denied by host
-  if (isCollaborator && collab.admission === "denied") {
-    return (
-      <div className="flex h-full w-full flex-col items-center justify-center gap-3 p-6 text-center">
-        <XCircle className="h-10 w-10 text-red-500" />
-        <h1 className="text-lg font-semibold">The host declined your request</h1>
-        <p className="max-w-md text-sm text-muted-foreground">
-          The host did not admit you to this review session.
-        </p>
-      </div>
-    );
-  }
-
-  // 2b. Viewer replaced by newer tab
-  if (isCollaborator && collab.admission === "replaced") {
-    return (
-      <div className="flex h-full w-full flex-col items-center justify-center gap-3 p-6 text-center">
-        <XCircle className="h-10 w-10 text-amber-500" />
-        <h1 className="text-lg font-semibold">This review was opened in another tab</h1>
-        <p className="max-w-md text-sm text-muted-foreground">
-          This session was opened in another tab or window. It has been disconnected here.
-        </p>
-      </div>
-    );
-  }
-
-  // Ending the session or revoking this participant closes their socket, but the
-  // study was still rendered - with working tools - until a reload. Take it off
-  // the screen the moment either happens. Both are final, so unlike the paused
-  // state below there is nothing to wait for.
-  if (isCollaborator && (collab.sessionEnded || collab.removed)) {
-    return (
-      <div className="flex h-full w-full flex-col items-center justify-center gap-3 p-6 text-center">
-        <XCircle className="h-10 w-10 text-red-500" />
-        <h1 className="text-lg font-semibold">
-          {collab.removed ? "You were removed from this review" : "Review session ended"}
-        </h1>
-        <p className="max-w-md text-sm text-muted-foreground">
-          {collab.removed
-            ? "The host revoked your access. This link no longer works for you."
-            : "The host ended this session. This link no longer works."}
-        </p>
-      </div>
-    );
-  }
-
-  // 3. Viewer waiting for host admission in lobby
-  if (isCollaborator && collab.admission === "waiting") {
-    return (
-      <div className="flex h-full w-full flex-col items-center justify-center gap-3 p-6 text-center">
-        <Loader2 className="h-10 w-10 animate-spin text-blue-500" />
-        <h1 className="text-lg font-semibold">
-          {collab.waitingHostConnected
-            ? "Asking the host to let you in…"
-            : "Waiting for the host to start"}
-        </h1>
-        <p className="max-w-md text-sm text-muted-foreground">
-          {collab.waitingHostConnected
-            ? "Your request has been sent to the host. You will enter automatically when admitted."
-            : "The host is not connected yet. The review session will begin when the host joins."}
-        </p>
-      </div>
-    );
-  }
-
-  // A shared link is only live while the host is in the room. Render nothing of
-  // the study when they are not: the scan should not sit unattended on someone
-  // else's screen. The session reconnects on its own when the host returns.
-  if (isCollaborator && collab.hostOffline) {
-    return (
-      <div className="flex h-full w-full flex-col items-center justify-center gap-3 p-6 text-center">
-        <Lock className="h-10 w-10 text-amber-500" />
-        <h1 className="text-lg font-semibold">Review session paused</h1>
-        <p className="max-w-md text-sm text-muted-foreground">
-          The host is not connected. This link stays inactive until they rejoin,
-          at which point this page reconnects on its own.
-        </p>
-        <span className="mt-1 flex items-center gap-2 text-xs text-muted-foreground">
-          <Loader2 className="h-3.5 w-3.5 animate-spin" />
-          Waiting for the host
-        </span>
-      </div>
-    );
+  if (isCollaborator) {
+    const screen = guestSessionScreen(collab);
+    if (screen) return screen;
   }
 
   return (
@@ -2234,7 +1931,7 @@ export default function Painter2D({
                   <button
                     type="button"
                     onClick={startCollaboration}
-                    disabled={startingCollab}
+                    disabled={host.starting}
                     title={collabToken ? "Collab Panel" : "Start Collaboration"}
                     className="relative p-1.5 rounded border border-blue-500/40 bg-blue-500/10 text-blue-400 hover:bg-blue-500/20 transition cursor-pointer"
                   >
@@ -2568,7 +2265,7 @@ export default function Painter2D({
                   <button
                     type="button"
                     onClick={startCollaboration}
-                    disabled={startingCollab}
+                    disabled={host.starting}
                     className="inline-flex items-center gap-1.5 rounded-md border border-blue-500/40 bg-blue-500/10 px-2.5 py-1 text-xs font-semibold text-blue-400 hover:bg-blue-500/20 transition-all cursor-pointer"
                   >
                     <Users className="h-3.5 w-3.5" />
@@ -2866,14 +2563,14 @@ export default function Painter2D({
         </div>
       )}
 
-      {showMasterPanel && collabToken && (
+      {host.showPanel && collabToken && (
         <div
-          onClick={() => setShowMasterPanel(false)}
+          onClick={() => host.setShowPanel(false)}
           className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 p-4 backdrop-blur-sm cursor-pointer animate-in fade-in duration-150"
         >
           <div onClick={(e) => e.stopPropagation()} className="cursor-default">
             <CollaborationMasterPanel
-              shareUrl={shareUrl}
+              shareUrl={host.shareUrl}
               followUserId={followUserId}
               onFollowUser={setFollowUserId}
               participants={collab.participants}
@@ -2882,9 +2579,9 @@ export default function Painter2D({
               onRemoveUser={collab.removeUser}
               onEndSession={() => {
                 collab.endSession();
-                forgetHostSession();
+                host.forget();
               }}
-              onClose={() => setShowMasterPanel(false)}
+              onClose={() => host.setShowPanel(false)}
               joinRequests={collab.joinRequests}
               leftList={collab.leftList}
               onAdmit={collab.admit}

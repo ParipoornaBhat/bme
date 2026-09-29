@@ -7,6 +7,9 @@ import { RefreshCw, ShieldAlert, Stethoscope } from "lucide-react";
 const Painter2D = dynamic(() => import("~/app/(dashboard)/annotate/Painter2D"), {
   ssr: false,
 });
+const Viewer = dynamic(() => import("~/app/(dashboard)/annotate/Viewer"), {
+  ssr: false,
+});
 
 /**
  * Full Radiologist Collaboration Viewer Page matching /annotate.
@@ -24,6 +27,8 @@ export default function CollaborateViewerPage({
   const [inputName, setInputName] = useState<string>("");
   const [checkingSession, setCheckingSession] = useState(true);
   const [sessionError, setSessionError] = useState<string | null>(null);
+  // A 3D review opens the volume viewer on the session's case.
+  const [session3d, setSession3d] = useState<{ caseId: string } | null>(null);
 
   // Load saved radiologist name from localStorage on mount
   useEffect(() => {
@@ -53,6 +58,9 @@ export default function CollaborateViewerPage({
           if (!cancelled) {
             setSessionError(res.status === 404 ? "Collaboration session not found or expired" : "Failed to load session");
           }
+        } else {
+          const data = (await res.json()) as { mode?: string; caseId?: string };
+          if (!cancelled && data.mode === "3d" && data.caseId) setSession3d({ caseId: data.caseId });
         }
       } catch {
         if (!cancelled) setSessionError("Failed to connect to collaboration server");
@@ -160,6 +168,19 @@ export default function CollaborateViewerPage({
           <p className="mt-2 text-sm text-slate-400">{sessionError}</p>
         </div>
       </div>
+    );
+  }
+
+  if (session3d) {
+    return (
+      <main className="flex min-h-screen w-screen flex-col bg-background text-foreground p-3">
+        <Viewer
+          caseId={session3d.caseId}
+          collabToken={token}
+          isCollaborator={true}
+          collaboratorUserName={userName}
+        />
+      </main>
     );
   }
 

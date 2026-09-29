@@ -70,6 +70,8 @@ export type Participant = {
 export type CollabSession = {
   token: string;
   caseId: string;
+  // Which viewer the shared link opens: the 2D slice painter or the 3D volume.
+  mode: "2d" | "3d";
   creatorId: string;
   createdAt: string;
   active: boolean;
@@ -159,11 +161,17 @@ export function generateSessionToken(): string {
   return "collab_sec_" + randomBytes(16).toString("hex");
 }
 
-export function createSession(caseId: string, creatorId: string, creatorName: string): CollabSession {
+export function createSession(
+  caseId: string,
+  creatorId: string,
+  creatorName: string,
+  mode: "2d" | "3d" = "2d",
+): CollabSession {
   const token = generateSessionToken();
   const session: CollabSession = {
     token,
     caseId,
+    mode,
     creatorId,
     createdAt: new Date().toISOString(),
     active: true,
@@ -206,7 +214,7 @@ export function createSession(caseId: string, creatorId: string, creatorName: st
 }
 
 export type CollabAccess =
-  | { ok: true; role: "MASTER" | "VIEWER"; permissions: ParticipantPermission }
+  | { ok: true; role: "MASTER" | "VIEWER"; permissions: ParticipantPermission; caseId: string; mode: "2d" | "3d" }
   | { ok: false; status: 401 | 403 | 404; error: string };
 
 /**
@@ -231,7 +239,7 @@ export function checkCollabAccess(token: string, key: string): CollabAccess {
     if (!participant || !participant.connected || !live || live.size === 0) {
       return { ok: false, status: 401, error: "Participant is not connected" };
     }
-    return { ok: true, role: participant.role, permissions: participant.permissions };
+    return { ok: true, role: participant.role, permissions: participant.permissions, caseId: session.caseId, mode: session.mode };
   }
   return { ok: false, status: 401, error: "Invalid participant key" };
 }

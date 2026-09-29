@@ -37,12 +37,13 @@ app.post("/session", async (c) => {
   try {
     const body = await c.req.json();
     const { caseId, userId = "master_user", userName = "Dr. Master" } = body;
+    const mode = body.mode === "3d" ? "3d" : "2d";
 
     if (!caseId || !ID.test(caseId)) {
       return c.json({ error: "Invalid case ID format" }, 400);
     }
 
-    const session = createSession(caseId, userId, userName);
+    const session = createSession(caseId, userId, userName, mode);
 
     return c.json({
       success: true,
@@ -50,6 +51,7 @@ app.post("/session", async (c) => {
       // Returned once, to the creator. It is what makes their socket the host.
       hostKey: session.hostKey,
       caseId: session.caseId,
+      mode: session.mode,
       createdAt: session.createdAt,
     });
   } catch (err: any) {
@@ -76,6 +78,7 @@ app.get("/session/:token", (c) => {
   return c.json({
     token: session.token,
     caseId: session.caseId,
+    mode: session.mode,
     active: session.active,
     createdAt: session.createdAt,
     masterId: session.masterId,
@@ -122,7 +125,7 @@ app.get("/access", (c) => {
   if (!token || !key) return c.json({ error: "Missing token or key" }, 401);
   const access = checkCollabAccess(token, key);
   if (!access.ok) return c.json({ error: access.error }, access.status);
-  return c.json({ role: access.role, permissions: access.permissions });
+  return c.json({ role: access.role, permissions: access.permissions, caseId: access.caseId, mode: access.mode });
 });
 
 app.get("/volume/:token", async (c) => {

@@ -30,6 +30,11 @@ export type ViewpointState = {
   selectedCaseId?: string;
   selectedStem?: string;
   selectedRelPath?: string;
+  // 3D viewer: the crosshair, the open series, and zoom and pan for each view.
+  seriesId?: string;
+  cursor3d?: { i: number; j: number; k: number };
+  zoom3d?: Record<string, number>;
+  pan3d?: Record<string, { x: number; y: number }>;
 };
 
 export type Participant = {

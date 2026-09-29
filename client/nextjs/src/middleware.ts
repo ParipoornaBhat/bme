@@ -32,13 +32,29 @@ const PASS_THROUGH = [
 type GuestPermission = "VIEW" | "ANNOTATE" | "DELETE_ANNOTATION";
 
 // The only routes a guest can reach, and what the host must have granted.
-function guestPermissionFor(path: string, method: string): GuestPermission | null {
-  if (path === "/api/cases2d" && method === "GET") return "VIEW";
-  if (path === "/api/annotation2d/flag") return method === "GET" ? "VIEW" : "ANNOTATE";
+// 3D routes name a case; `caseId` is set for those, and a guest may only
+// reach the case their session is about.
+function guestPermissionFor(
+  path: string,
+  method: string,
+): { permission: GuestPermission; caseId?: string } | null {
+  if (path === "/api/cases2d" && method === "GET") return { permission: "VIEW" };
+  if (path === "/api/annotation2d/flag") return { permission: method === "GET" ? "VIEW" : "ANNOTATE" };
   if (/^\/api\/annotation2d\/[^/]+$/.test(path)) {
-    if (method === "GET") return "VIEW";
-    if (method === "POST") return "ANNOTATE";
-    if (method === "DELETE") return "DELETE_ANNOTATION";
+    if (method === "GET") return { permission: "VIEW" };
+    if (method === "POST") return { permission: "ANNOTATE" };
+    if (method === "DELETE") return { permission: "DELETE_ANNOTATION" };
+  }
+  const volume = /^\/api\/volume\/([^/]+)$/.exec(path);
+  if (volume && method === "GET") return { permission: "VIEW", caseId: volume[1] };
+  const labels = /^\/api\/annotation\/([^/]+)\/labels$/.exec(path);
+  if (labels && method === "GET") return { permission: "VIEW", caseId: labels[1] };
+  const flag = /^\/api\/annotation\/([^/]+)\/flag$/.exec(path);
+  if (flag) return { permission: method === "GET" ? "VIEW" : "ANNOTATE", caseId: flag[1] };
+  const mask = /^\/api\/annotation\/([^/]+)$/.exec(path);
+  if (mask) {
+    if (method === "POST") return { permission: "ANNOTATE", caseId: mask[1] };
+    if (method === "DELETE") return { permission: "DELETE_ANNOTATION", caseId: mask[1] };
   }
   return null;
 }
@@ -97,12 +113,12 @@ async function isTeamMember(req: NextRequest): Promise<boolean> {
   return ok;
 }
 
-async function guestMay(req: NextRequest, permission: GuestPermission): Promise<boolean> {
+async function guestMay(req: NextRequest, permission: GuestPermission, caseId?: string): Promise<boolean> {
   const token = req.nextUrl.searchParams.get("collab") ?? "";
   const participantKey = req.nextUrl.searchParams.get("key") ?? "";
   if (!token || !participantKey) return false;
 
-  const key = `guest:${token}:${participantKey}:${permission}`;
+  const key = `guest:${token}:${participantKey}:${permission}:${caseId ?? ""}`;
   const hit = cached(key);
   if (hit !== null) return hit;
 
@@ -111,8 +127,14 @@ async function guestMay(req: NextRequest, permission: GuestPermission): Promise<
     const url = `${API}/api/collaborate/access?token=${encodeURIComponent(token)}&key=${encodeURIComponent(participantKey)}`;
     const res = await fetch(url, { cache: "no-store" });
     if (res.ok) {
-      const access = (await res.json()) as { permissions?: Record<string, boolean> };
+      const access = (await res.json()) as {
+        permissions?: Record<string, boolean>;
+        caseId?: string;
+        mode?: string;
+      };
       ok = access.permissions?.[permission] === true;
+      // A 3D review covers one case; its link opens nothing else.
+      if (caseId !== undefined) ok = ok && access.mode === "3d" && access.caseId === caseId;
     }
   } catch {
     ok = false;
@@ -130,8 +152,8 @@ export async function middleware(req: NextRequest) {
 
   if (await isTeamMember(req)) return NextResponse.next();
 
-  const permission = guestPermissionFor(path, method);
-  if (permission && (await guestMay(req, permission))) return NextResponse.next();
+  const guest = guestPermissionFor(path, method);
+  if (guest && (await guestMay(req, guest.permission, guest.caseId))) return NextResponse.next();
 
   return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
 }

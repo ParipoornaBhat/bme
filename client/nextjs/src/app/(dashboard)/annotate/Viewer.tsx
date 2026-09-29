@@ -15,6 +15,7 @@ import {
   Link2,
   Link2Off,
   Loader2,
+  Lock,
   Maximize2,
   Minus,
   Paintbrush,
@@ -35,6 +36,9 @@ import { toast } from "sonner";
 import { useSession } from "~/lib/auth-client";
 import Render3D from "./Render3D";
 import CollaborationMasterPanel from "~/components/collaborate/CollaborationMasterPanel";
+import CollaborationViewerHeader from "~/components/collaborate/CollaborationViewerHeader";
+import { getColorForUser } from "~/components/collaborate/LiveCursorsOverlay";
+import { guestSessionScreen } from "~/components/collaborate/GuestSessionScreen";
 import {
   useOverlayView,
   isLabelVisible,
@@ -42,7 +46,14 @@ import {
   hiddenLabelsForView,
   OverlayControls,
 } from "~/lib/useOverlayView";
-import { useCollaboration } from "~/lib/useCollaboration";
+import {
+  useCollaboration,
+  type Participant,
+  type ParticipantPermission,
+  type ViewpointState,
+} from "~/lib/useCollaboration";
+import { MaskSync, type MaskSyncIO } from "~/lib/mask-sync";
+import { useGuestUserId, useHostSession, useSessionNotices } from "~/lib/useHostSession";
 import { canPaint } from "~/lib/paint-rules";
 import { isInTorch, type TorchState } from "~/lib/torch";
 import type { FlagRecord } from "~/lib/flag-store";
@@ -213,9 +224,10 @@ async function fetchSavedLabels(
   caseId: string,
   n: number,
   series = "",
+  access: (url: string) => string = (url) => url,
 ): Promise<{ labels: Uint8Array | null; warnings: string[] }> {
   const q = series && series !== "primary" ? `?series=${encodeURIComponent(series)}` : "";
-  const res = await fetch(`/api/annotation/${caseId}/labels${q}`, { cache: "no-store" });
+  const res = await fetch(access(`/api/annotation/${caseId}/labels${q}`), { cache: "no-store" });
   if (res.status === 404) return { labels: null, warnings: [] };
   if (!res.ok) {
     const j = await res.json().catch(() => ({}));
@@ -291,6 +303,9 @@ export default function Viewer({
   onSaved,
   savedOnDisk = false,
   flag: flagFromList = null,
+  collabToken: externalCollabToken,
+  isCollaborator = false,
+  collaboratorUserName,
 }: {
   caseId: string;
   onSaved?: () => void;
@@ -298,6 +313,10 @@ export default function Viewer({
   savedOnDisk?: boolean;
   /** The case's review flag, from the case list. */
   flag?: FlagRecord | null;
+  /** Set when a guest opens the viewer from a shared review link. */
+  collabToken?: string;
+  isCollaborator?: boolean;
+  collaboratorUserName?: string;
 }) {
   const { data: session } = useSession();
   const [vol, setVol] = useState<Vol | null>(null);
@@ -310,7 +329,7 @@ export default function Viewer({
   const [seg, setSeg] = useState<number>(1);
   const [brush, setBrush] = useState(6);
   const [erasing, setErasing] = useState(false);
-  const [tool, setTool] = useState<"brush" | "pencil" | "pan" | "torch">("brush");
+  const [tool, setTool] = useState<"brush" | "pencil" | "pan" | "torch">(isCollaborator ? "pan" : "brush");
   const [torchSize, setTorchSize] = useState(48);
   const [torchHeld, setTorchHeld] = useState(false);
   const torchActive = tool === "torch" || torchHeld;
@@ -353,7 +372,7 @@ export default function Viewer({
         if (!isNaN(n) && n >= 8 && n <= 240) setTorchSize(n);
       }
       const savedTool = localStorage.getItem("bme_viewer_tool");
-      if (savedTool === "brush" || savedTool === "pencil" || savedTool === "pan") setTool(savedTool);
+      if (!isCollaborator && (savedTool === "brush" || savedTool === "pencil" || savedTool === "pan")) setTool(savedTool);
       const savedBrush = Number(localStorage.getItem("bme_viewer_brush"));
       if (savedBrush >= 1 && savedBrush <= 20) setBrush(savedBrush);
       const savedSeg = Number(localStorage.getItem("bme_viewer_seg"));
@@ -390,12 +409,12 @@ export default function Viewer({
   const cycleViewRef = useRef(cycleView);
   cycleViewRef.current = cycleView;
 
-  // Collaboration States
-  const [collabToken, setCollabToken] = useState<string | null>(null);
-  const [shareUrl, setShareUrl] = useState<string>("");
-  const [showMasterPanel, setShowMasterPanel] = useState(false);
-  const [startingCollab, setStartingCollab] = useState(false);
-  const [collabHostKey, setCollabHostKey] = useState<string | null>(null);
+  // Collaboration: the host starts a review from here; a guest opens this
+  // viewer from the shared link. A 3D review covers one case, so each case
+  // keeps its own session.
+  const host = useHostSession({ storagePrefix: `bme_active_3d_collab_${caseId}`, enabled: !isCollaborator });
+  const collabToken = isCollaborator ? (externalCollabToken || null) : host.token;
+  const guestUserId = useGuestUserId();
   const [toolbarCollapsed, setToolbarCollapsed] = useState(false);
   const [deletingMask, setDeletingMask] = useState(false);
   const [savedSuccess, setSavedSuccess] = useState(false);
@@ -414,97 +433,125 @@ export default function Viewer({
   const [importing, setImporting] = useState(false);
   const importInput = useRef<HTMLInputElement>(null);
 
-  // Hydrate active collaboration session from sessionStorage on reload / tab switch
-  useEffect(() => {
-    try {
-      const savedToken = sessionStorage.getItem("bme_active_3d_collab_token");
-      const savedHostKey = sessionStorage.getItem("bme_active_3d_collab_host_key");
-      if (savedToken && !collabToken) {
-        setCollabToken(savedToken);
-        setCollabHostKey(savedHostKey || null);
-        const baseOrigin =
-          process.env.NEXT_PUBLIC_APP_URL &&
-          !process.env.NEXT_PUBLIC_APP_URL.includes("localhost")
-            ? process.env.NEXT_PUBLIC_APP_URL.replace(/\/$/, "")
-            : window.location.origin;
-        setShareUrl(`${baseOrigin}/collaborate/${savedToken}`);
-      }
-    } catch { /* ignore */ }
-  }, []);
+  // Whose view this client mirrors. Null means moving independently. Either
+  // side can follow the other: the host can watch a radiologist work, and a
+  // radiologist can watch the host.
+  const [followUserId, setFollowUserId] = useState<string | null>(null);
+  const followUserIdRef = useRef<string | null>(null);
+  followUserIdRef.current = followUserId;
+  const followInitialised = useRef(false);
+  const lastViewpointByUser = useRef(new Map<string, ViewpointState>());
+  const applyViewpointRef = useRef<(vp: ViewpointState) => void>(() => {});
+  const appliedRemoteView = useRef<string | null>(null);
+
+  // Keeps this client's label volume in step with a live review; see
+  // src/lib/mask-sync.ts. The volume is synced as one flat array per series.
+  const labelsRef = useRef<Uint8Array | null>(null);
+  labelsRef.current = labels;
+  const syncIORef = useRef<MaskSyncIO>({ sendOp: () => {}, render: () => {}, newOpId: () => "" });
+  const maskSyncRef = useRef<MaskSync | null>(null);
+  if (!maskSyncRef.current) {
+    maskSyncRef.current = new MaskSync({
+      sendOp: (opId, runs) => syncIORef.current.sendOp(opId, runs),
+      render: () => syncIORef.current.render(),
+      newOpId: () => syncIORef.current.newOpId(),
+    });
+  }
+  const maskSync = maskSyncRef.current;
+  const canEditRef = useRef(false);
+  const currentUserIdRef = useRef("");
+  const participantsRef = useRef<Participant[]>([]);
 
   const collab = useCollaboration({
     token: collabToken || "",
-    userId: session?.user?.id || "master_user",
-    userName: session?.user?.name || "Dr. Master",
-    hostKey: collabHostKey ?? undefined,
+    userId: isCollaborator ? guestUserId : host.userId,
+    userName: isCollaborator
+      ? (collaboratorUserName || (typeof window !== "undefined" && localStorage.getItem("bme_collab_radiologist_name")) || "Dr. Radiologist")
+      : host.userName,
+    hostKey: isCollaborator ? undefined : (host.hostKey ?? undefined),
+    onViewpointUpdated: (vp, updatedBy) => {
+      // Remember where everyone is, so choosing to follow someone can jump
+      // straight to their view instead of waiting for them to move again.
+      if (updatedBy) lastViewpointByUser.current.set(updatedBy, vp);
+      if (updatedBy && updatedBy === followUserIdRef.current) applyViewpointRef.current(vp);
+    },
+    onMaskSnapshot: (d) => {
+      const screen = labelsRef.current;
+      if (screen) maskSync.onSnapshot(d, screen, canEditRef.current, [undoStack.current, redoStack.current]);
+    },
+    onMaskOp: (d) => {
+      const screen = labelsRef.current;
+      if (!screen) return;
+      maskSync.onOp(d, screen, canEditRef.current, currentUserIdRef.current, [undoStack.current, redoStack.current]);
+      // Someone else's stroke is unsaved work here too, so Save lights up.
+      if (d.userId !== currentUserIdRef.current) {
+        editVersion.current++;
+        setDirty(true);
+      }
+    },
   });
+  useSessionNotices(collab, collabToken, !isCollaborator, host.forget);
+  participantsRef.current = collab.participants;
 
-  const startCollaboration = async () => {
-    if (collabToken) {
-      setShowMasterPanel(true);
-      return;
-    }
-    setStartingCollab(true);
-    try {
-      const res = await fetch("/api/collaborate/session", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          caseId,
-          userId: session?.user?.id || "master_user",
-          userName: session?.user?.name || "Dr. Master",
-        }),
-      });
-      if (!res.ok) {
-        let errorMsg = `Server error (${res.status})`;
-        try {
-          const contentType = res.headers.get("content-type") || "";
-          if (contentType.includes("application/json")) {
-            const data = await res.json();
-            errorMsg = data.error || errorMsg;
-          }
-        } catch { /* fallback */ }
-        if (res.status === 502 || res.status === 504) {
-          errorMsg = "Backend API server (port 4000) is unreachable. Please make sure the backend server is running via 'pnpm dev'.";
-        }
-        console.error("Failed to start collaboration:", errorMsg);
-        toast.error(errorMsg);
-        return;
-      }
-      const data = await res.json();
-      if (data.token) {
-        const baseOrigin =
-          process.env.NEXT_PUBLIC_APP_URL &&
-          !process.env.NEXT_PUBLIC_APP_URL.includes("localhost")
-            ? process.env.NEXT_PUBLIC_APP_URL.replace(/\/$/, "")
-            : window.location.origin;
-        const shareUrl = `${baseOrigin}/collaborate/${data.token}`;
-        setCollabHostKey(data.hostKey ?? null);
-        setCollabToken(data.token);
-        setShareUrl(shareUrl);
-        setShowMasterPanel(true);
-        try {
-          sessionStorage.setItem("bme_active_3d_collab_token", data.token);
-          if (data.hostKey) sessionStorage.setItem("bme_active_3d_collab_host_key", data.hostKey);
-        } catch { /* ignore */ }
-      }
-    } catch (err) {
-      console.error("Failed to start collaboration:", err);
-    } finally {
-      setStartingCollab(false);
-    }
-  };
+  const permissions: ParticipantPermission = isCollaborator
+    ? collab.permissions
+    : {
+        VIEW: true,
+        ZOOM_PAN: true,
+        SLICE_CONTROL: true,
+        WINDOW_LEVEL: true,
+        ANNOTATE: true,
+        EDIT_ANNOTATION: true,
+        DELETE_ANNOTATION: true,
+        AI_ANALYSIS: true,
+        DOWNLOAD: false,
+      };
+  const canAnnotate = !isCollaborator || permissions.ANNOTATE;
+  const canZoomPan = !isCollaborator || permissions.ZOOM_PAN;
+  const canMoveSlices = !isCollaborator || permissions.SLICE_CONTROL;
+  const canDelete = !isCollaborator || permissions.DELETE_ANNOTATION;
+  // Viewers without annotate permission never send: the server would refuse,
+  // and their edits would sit unconfirmed forever.
+  canEditRef.current = canAnnotate;
+  currentUserIdRef.current = collab.currentUserId;
+  const canZoomPanRef = useRef(canZoomPan);
+  canZoomPanRef.current = canZoomPan;
 
+  // Study data routes refuse anyone who is not a signed-in team member unless
+  // the request proves the caller is in a live review of this case.
+  const guestAccessQuery =
+    isCollaborator && collabToken && collab.participantKey
+      ? `collab=${encodeURIComponent(collabToken)}&key=${encodeURIComponent(collab.participantKey)}`
+      : "";
+  const withAccess = (url: string) =>
+    guestAccessQuery ? `${url}${url.includes("?") ? "&" : "?"}${guestAccessQuery}` : url;
+  const withAccessRef = useRef(withAccess);
+  withAccessRef.current = withAccess;
+  // A guest has nothing to fetch with until the server has issued their key.
+  const dataReady = !isCollaborator || Boolean(guestAccessQuery);
+
+  // A guest has no case list to read the flag from, so it is fetched here.
   useEffect(() => {
-    if (collabToken && collab.connected && collab.role === "MASTER" && vol) {
-      const ax = vol.axes[activePlane].slice;
-      collab.updateViewpoint({
-        sliceIndex: axisVal(cursor, ax),
-        plane: activePlane,
-        zoom: zoom[activePlane] ?? 1.0,
-      });
-    }
-  }, [cursor, activePlane, zoom, collabToken, collab.connected, collab.role, vol, collab.updateViewpoint]);
+    if (!isCollaborator || !dataReady) return;
+    let cancelled = false;
+    fetch(withAccessRef.current(`/api/annotation/${caseId}/flag`), { cache: "no-store" })
+      .then((r) => (r.ok ? r.json() : null))
+      .then((j: { flag?: FlagRecord | null } | null) => { if (!cancelled && j) setFlag(j.flag ?? null); })
+      .catch(() => { /* flag optional */ });
+    return () => { cancelled = true; };
+  }, [isCollaborator, dataReady, caseId]);
+
+  // Send what changed since the last flush. Batched, so a brush stroke goes
+  // out as a few edits rather than one per mouse event.
+  const flushTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const scheduleFlush = useCallback(() => {
+    if (!maskSyncRef.current?.ready || flushTimer.current !== null) return;
+    flushTimer.current = setTimeout(() => {
+      flushTimer.current = null;
+      const screen = labelsRef.current;
+      if (screen) maskSyncRef.current?.flush(screen, canEditRef.current);
+    }, 60);
+  }, []);
 
   const canvases = useRef<Record<Plane, HTMLCanvasElement | null>>({
     axial: null, coronal: null, sagittal: null,
@@ -524,8 +571,12 @@ export default function Viewer({
 
   // ---- load ------------------------------------------------------------
   useEffect(() => {
+    if (!dataReady) return;
     let cancelled = false;
     setBusy(true); setStatus("Loading scan…"); setLabels(null); setVol(null);
+    // The previous series' labels are about to be replaced; its live copy
+    // stops here and the new one is joined once loaded.
+    maskSyncRef.current?.leave();
     // An auto save waiting for the previous series still runs: it carries its
     // own copy of that series' labels. Dropping the handle only stops edits
     // here from cancelling it.
@@ -535,7 +586,7 @@ export default function Viewer({
     (async () => {
       try {
         const nifti = await import("nifti-reader-js");
-        const listed = await fetch(`/api/volume/${caseId}?list=1`, { cache: "no-store" });
+        const listed = await fetch(withAccessRef.current(`/api/volume/${caseId}?list=1`), { cache: "no-store" });
         const catalog = listed.ok
           ? await listed.json() as { annotated?: string; series?: { id: string; label: string }[] }
           : { annotated: "", series: [] };
@@ -551,7 +602,7 @@ export default function Viewer({
           return;
         }
         const query = pick && pick !== "primary" ? `?series=${encodeURIComponent(pick)}` : "";
-        const res = await fetch(`/api/volume/${caseId}${query}`);
+        const res = await fetch(withAccessRef.current(`/api/volume/${caseId}${query}`));
         if (!res.ok) throw new Error((await res.json()).error ?? "load failed");
         let buf = await res.arrayBuffer();
         if (nifti.isCompressed(buf)) buf = nifti.decompress(buf) as ArrayBuffer;
@@ -605,9 +656,10 @@ export default function Viewer({
           if (!edemaHere) {
             note = ` · edema is on ${catalog.annotated || "the other scan"}`;
           } else {
-            const saved = await fetchSavedLabels(caseId, n, pick);
+            const saved = await fetchSavedLabels(caseId, n, pick, withAccessRef.current);
             if (saved.labels) {
               initial = saved.labels;
+              setHasSaved(true);
               note = " · saved annotation loaded";
               for (const w of saved.warnings) toast.warning(w);
             }
@@ -635,7 +687,7 @@ export default function Viewer({
       }
     })();
     return () => { cancelled = true; };
-  }, [caseId, seriesId]);
+  }, [caseId, seriesId, dataReady]);
 
   // ---- geometry --------------------------------------------------------
   /**
@@ -755,6 +807,28 @@ export default function Viewer({
       ctx.restore();
     }
 
+    // Other participants' pointers on this view.
+    if (collabToken) {
+      for (const pt of participantsRef.current) {
+        const c = pt.cursor;
+        if (pt.id === currentUserIdRef.current || !pt.connected || !c || c.plane !== p) continue;
+        const px = c.x * w;
+        const py = h - 1 - c.y * h;
+        const r = Math.max(3, w / 110);
+        ctx.save();
+        ctx.fillStyle = getColorForUser(pt.id);
+        ctx.strokeStyle = "rgba(0, 0, 0, 0.8)";
+        ctx.lineWidth = Math.max(1, w / 400);
+        ctx.beginPath();
+        ctx.arc(px, py, r, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.stroke();
+        ctx.font = `bold ${Math.max(9, Math.round(w / 40))}px sans-serif`;
+        ctx.fillText(pt.initials, px + r + 2, py - r);
+        ctx.restore();
+      }
+    }
+
     // Torch ring on the plane being viewed with torch
     if (currentTorch && currentTorch.plane === p) {
       const cy = h - 1 - currentTorch.b;
@@ -774,7 +848,8 @@ export default function Viewer({
       ctx.stroke();
       ctx.restore();
     }
-  }, [vol, labels, cursor, seg, erasing, outlineTick, planeGeom, sampleAt, cursorInPlane, sliceOf, view, opacity]);
+  }, [vol, labels, cursor, seg, erasing, outlineTick, planeGeom, sampleAt, cursorInPlane, sliceOf, view, opacity,
+      collabToken]);
 
   const drawAll = useCallback(() => { PLANES.forEach(draw); }, [draw]);
   useEffect(() => { drawAll(); }, [drawAll]);
@@ -839,7 +914,8 @@ export default function Viewer({
   const markEdited = useCallback(() => {
     editVersion.current++;
     setDirty(true);
-  }, []);
+    scheduleFlush();
+  }, [scheduleFlush]);
 
   const pushUndo = useCallback(() => {
     if (!labels) return;
@@ -866,6 +942,131 @@ export default function Viewer({
 
   useEffect(() => { recount(); }, [labels, recount]);
 
+  // ---- live review -----------------------------------------------------
+  const permsRef = useRef({ annotate: canAnnotate, zoomPan: canZoomPan, slices: canMoveSlices });
+  permsRef.current = { annotate: canAnnotate, zoomPan: canZoomPan, slices: canMoveSlices };
+  const drawAllRef = useRef(drawAll);
+  drawAllRef.current = drawAll;
+  const recountRef = useRef(recount);
+  recountRef.current = recount;
+  const syncStem = `3d-${seriesId || "primary"}`;
+  syncIORef.current = {
+    sendOp: (opId, runs) => collab.sendMaskOp({ caseId, stem: syncStem, opId, runs }),
+    render: () => {
+      drawAllRef.current();
+      recountRef.current();
+    },
+    newOpId: () =>
+      `${collab.currentUserId || "me"}:${Date.now().toString(36)}:${Math.random().toString(36).slice(2, 8)}`,
+  };
+
+  // Undo and redo swap the whole label array, so they reach the session
+  // through here rather than through a stroke.
+  useEffect(() => { scheduleFlush(); }, [labels, scheduleFlush]);
+
+  // Open the loaded series in the live session - on load, on connecting, and
+  // again after a reconnect.
+  useEffect(() => {
+    if (!collabToken) {
+      maskSync.leave();
+      return;
+    }
+    const screen = labelsRef.current;
+    if (!collab.connected || !vol || !screen) return;
+    const base = maskSync.join(`${caseId}::${syncStem}`, screen, canEditRef.current);
+    collab.sendMaskJoin({ caseId, stem: syncStem, width: screen.length, height: 1, base });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [collabToken, collab.connected, vol]);
+
+  // Share this client's view: crosshair, active view, series, zoom and pan.
+  const shareViewpoint = useCallback(() => {
+    if (!collabToken || !collab.connected || !vol) return;
+    const signature = JSON.stringify([cursor, activePlane, zoom, pan, seriesId]);
+    // Do not echo a view we only adopted because we are following someone.
+    // Two participants following each other would otherwise bounce the same
+    // viewpoint back and forth.
+    if (appliedRemoteView.current === signature) {
+      appliedRemoteView.current = null;
+      return;
+    }
+    collab.updateViewpoint({
+      sliceIndex: axisVal(cursor, vol.axes[activePlane].slice),
+      maxSlices: vol.dims[vol.axes[activePlane].slice],
+      plane: activePlane,
+      zoom: zoom[activePlane],
+      pan: pan[activePlane],
+      selectedCaseId: caseId,
+      seriesId,
+      cursor3d: cursor,
+      zoom3d: zoom,
+      pan3d: pan,
+    });
+  }, [collabToken, collab.connected, collab.updateViewpoint, vol, cursor, activePlane, zoom, pan, seriesId, caseId]);
+  useEffect(() => { shareViewpoint(); }, [shareViewpoint]);
+
+  // Re-broadcast when participants join or reconnect, so they land on the
+  // host's view. Masks need no help here: a joiner gets them from the server.
+  useEffect(() => {
+    if (collab.role === "MASTER") {
+      appliedRemoteView.current = null;
+      shareViewpoint();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [collab.participants.length]);
+
+  applyViewpointRef.current = (vp) => {
+    if (!vol || (vp.selectedCaseId && vp.selectedCaseId !== caseId)) return;
+    const inBounds = (c: Cursor) =>
+      c.i >= 0 && c.j >= 0 && c.k >= 0 && c.i < vol.dims[0] && c.j < vol.dims[1] && c.k < vol.dims[2];
+    const nextSeries = vp.seriesId && seriesChoices.some((c) => c.id === vp.seriesId) ? vp.seriesId : seriesId;
+    if (nextSeries !== seriesId) {
+      // The volume reloads; the view is applied once it has.
+      setSeriesId(nextSeries);
+      return;
+    }
+    const nextCursor = vp.cursor3d && inBounds(vp.cursor3d) ? vp.cursor3d : cursor;
+    const nextPlane = vp.plane ?? activePlane;
+    const nextZoom = (vp.zoom3d as Record<Plane, number> | undefined) ?? zoom;
+    const nextPan = (vp.pan3d as Record<Plane, { x: number; y: number }> | undefined) ?? pan;
+    appliedRemoteView.current = JSON.stringify([nextCursor, nextPlane, nextZoom, nextPan, nextSeries]);
+    setCursor(nextCursor);
+    setActivePlane(nextPlane);
+    setZoom(nextZoom);
+    setPan(nextPan);
+  };
+
+  // Snap to the followed participant's last known view the moment we start
+  // following them, and again once a series switch has finished loading.
+  useEffect(() => {
+    if (!followUserId || !vol) return;
+    const vp = lastViewpointByUser.current.get(followUserId)
+      ?? (collab.participants.find((p) => p.id === followUserId)?.role === "MASTER" ? collab.viewpoint : null);
+    if (vp) applyViewpointRef.current(vp);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [followUserId, vol]);
+
+  // Default to following the host, so a radiologist opening the link lands on
+  // the same view without having to do anything. Settled once, then it is the
+  // participant's own choice.
+  const masterId = collab.participants.find((p) => p.role === "MASTER")?.id ?? null;
+  useEffect(() => {
+    if (followInitialised.current || !collabToken || !isCollaborator || !masterId) return;
+    if (masterId === collab.currentUserId) return;
+    followInitialised.current = true;
+    setFollowUserId(masterId);
+  }, [collabToken, isCollaborator, masterId, collab.currentUserId]);
+
+  // Stop following someone who has left.
+  useEffect(() => {
+    if (!followUserId) return;
+    if (!collab.participants.some((p) => p.id === followUserId && p.connected)) setFollowUserId(null);
+  }, [collab.participants, followUserId]);
+
+  // Redraw when someone's pointer moves.
+  useEffect(() => {
+    if (collabToken) drawAllRef.current();
+  }, [collab.participants, collabToken]);
+
   // Same wheel zoom as the 2D painter: the view under the pointer zooms,
   // and the page does not scroll. Listeners are non-passive so preventDefault works.
   useEffect(() => {
@@ -877,6 +1078,7 @@ export default function Viewer({
       const onWheel = (e: WheelEvent) => {
         e.preventDefault();
         e.stopPropagation();
+        if (!canZoomPanRef.current) return;
         const delta = e.deltaY < 0 ? 0.15 : -0.15;
         setZoom((z) => ({ ...z, [p]: clampZoom(z[p] + delta) }));
       };
@@ -1040,7 +1242,7 @@ export default function Viewer({
     if (ask && !confirm(`Delete saved 3D mask for ${caseId}?`)) return;
     setDeletingMask(true);
     try {
-      const res = await fetch(`/api/annotation/${encodeURIComponent(caseId)}`, {
+      const res = await fetch(withAccess(`/api/annotation/${encodeURIComponent(caseId)}`), {
         method: "DELETE",
       });
       if (res.ok) {
@@ -1062,9 +1264,9 @@ export default function Viewer({
   // ---- save ------------------------------------------------------------
   /** Write a label snapshot for one series and record it in the ledger. */
   const persist = useCallback(async (snap: Uint8Array, series: string) => {
-    const me = session?.user?.name || session?.user?.email || "unknown";
+    const me = (isCollaborator ? collaboratorUserName : null) || session?.user?.name || session?.user?.email || "unknown";
     const seriesQ = series && series !== "primary" ? `&series=${encodeURIComponent(series)}` : "";
-    const res = await fetch(`/api/annotation/${caseId}?by=${encodeURIComponent(me)}${seriesQ}`, {
+    const res = await fetch(withAccessRef.current(`/api/annotation/${caseId}?by=${encodeURIComponent(me)}${seriesQ}`), {
       method: "POST",
       headers: { "Content-Type": "application/octet-stream" },
       body: new Uint8Array(snap),
@@ -1073,7 +1275,8 @@ export default function Viewer({
     if (!res.ok) throw new Error(j.error ?? "save failed");
 
     let logged = false;
-    try {
+    // The ledger is for the team; a guest's save is recorded on disk only.
+    if (!isCollaborator) try {
       const c = countLabels(snap);
       const logRes = await fetch("/api/annotation-log", {
         method: "POST",
@@ -1086,7 +1289,7 @@ export default function Viewer({
       logged = (await logRes.json())?.ok === true;
     } catch { /* ledger unavailable */ }
     return { me, logged };
-  }, [caseId, session]);
+  }, [caseId, session, isCollaborator, collaboratorUserName]);
 
   const seriesRef = useRef(seriesId);
   seriesRef.current = seriesId;
@@ -1193,7 +1396,7 @@ export default function Viewer({
   const writeCaseFlag = async (body: Record<string, unknown>) => {
     setFlagSaving(true);
     try {
-      const res = await fetch(`/api/annotation/${caseId}/flag`, {
+      const res = await fetch(withAccess(`/api/annotation/${caseId}/flag`), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(body),
@@ -1278,6 +1481,13 @@ export default function Viewer({
     const onKey = (e: KeyboardEvent) => {
       if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return;
       const mod = e.ctrlKey || e.metaKey;
+      const k = e.key.toLowerCase();
+      // Keys for tools a guest has not been granted do nothing.
+      const annotateKey = mod ? ["z", "y", "s"].includes(k) : ["1", "2", "3", "4", "5", "0", "b", "p", "e"].includes(k);
+      if (annotateKey && !permsRef.current.annotate) return;
+      if (!mod && (k === "6" || k === "h") && !permsRef.current.zoomPan) return;
+      if (!mod && ["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", "PageUp", "PageDown"].includes(e.key)
+          && !permsRef.current.slices) return;
       if (mod && e.key.toLowerCase() === "z" && !e.shiftKey) { e.preventDefault(); undo(); return; }
       if (mod && (e.key.toLowerCase() === "y" || (e.key.toLowerCase() === "z" && e.shiftKey))) {
         e.preventDefault(); redo(); return;
@@ -1351,6 +1561,24 @@ export default function Viewer({
     };
   }, [undo, redo, drawAll, vol, activePlane, save]);
 
+  if (isCollaborator) {
+    const screen = guestSessionScreen(collab);
+    if (screen) return screen;
+  }
+
+  const guestHeader = isCollaborator && (
+    <CollaborationViewerHeader
+      caseId={caseId}
+      masterConnected={collab.participants.some((p) => p.role === "MASTER" && p.connected)}
+      followingMaster={Boolean(followUserId)}
+      followingName={collab.participants.find((p) => p.id === followUserId)?.name ?? null}
+      canFollowMaster={Boolean(masterId) && masterId !== collab.currentUserId}
+      onToggleFollowMaster={() => setFollowUserId((curr) => (curr ? null : masterId))}
+      permissions={permissions}
+      onLeave={collab.leave}
+    />
+  );
+
   if (busy) {
     return (
       <div className="flex h-96 items-center justify-center gap-2 text-sm text-muted-foreground">
@@ -1364,6 +1592,7 @@ export default function Viewer({
 
   return (
     <div className="space-y-2">
+      {guestHeader}
       {seriesChoices.length > 1 && (
         <div className="flex flex-wrap items-center gap-1.5">
           {seriesChoices.map((s) => (
@@ -1371,7 +1600,8 @@ export default function Viewer({
               key={s.id}
               type="button"
               onClick={() => setSeriesId(s.id)}
-              className={`rounded-md border px-2.5 py-1 text-xs font-medium ${
+              disabled={!canMoveSlices}
+              className={`rounded-md border px-2.5 py-1 text-xs font-medium disabled:opacity-50 ${
                 seriesId === s.id
                   ? "border-primary bg-primary text-primary-foreground"
                   : "border-border bg-card text-muted-foreground hover:text-foreground"
@@ -1396,55 +1626,73 @@ export default function Viewer({
       {toolbarCollapsed ? (
         <div className="flex items-center justify-between gap-2 rounded-lg border border-border bg-card p-2 overflow-x-auto py-1.5">
           <div className="flex items-center gap-1.5 shrink-0">
-            {/* Compact Segment Pickers */}
-            <div className="flex items-center gap-1 bg-background/80 rounded-md border border-border p-0.5">
-              {SEGMENTS.map((s, i) => (
+            {canAnnotate && (
+              <>
+                {/* Compact Segment Pickers */}
+                <div className="flex items-center gap-1 bg-background/80 rounded-md border border-border p-0.5">
+                  {SEGMENTS.map((s, i) => (
+                    <button
+                      key={s.value}
+                      onClick={() => { setSeg(s.value); setErasing(false); }}
+                      title={`${s.label} (Key ${i + 1}) - ${counts[s.value - 1].toLocaleString()} voxels`}
+                      className={`p-1 rounded transition cursor-pointer ${
+                        seg === s.value && !erasing ? "bg-primary/20 ring-1 ring-primary" : "hover:bg-muted"
+                      }`}
+                    >
+                      <span className="block h-3 w-3 rounded-full" style={{ backgroundColor: s.color }} />
+                    </button>
+                  ))}
+                </div>
+    
+                <div className="h-4 w-px bg-border" />
+    
+              </>
+            )}
+            {!canAnnotate && (
+              <div className="flex items-center gap-1.5 rounded-md bg-blue-500/10 border border-blue-500/20 px-2 py-1 text-xs text-blue-400 font-medium">
+                <Lock className="h-3 w-3 text-blue-400" />
+                <span className="hidden sm:inline">Review Mode</span>
+              </div>
+            )}
+            {/* Tools */}
+            {canAnnotate && (
+              <>
                 <button
-                  key={s.value}
-                  onClick={() => { setSeg(s.value); setErasing(false); }}
-                  title={`${s.label} (Key ${i + 1}) - ${counts[s.value - 1].toLocaleString()} voxels`}
-                  className={`p-1 rounded transition cursor-pointer ${
-                    seg === s.value && !erasing ? "bg-primary/20 ring-1 ring-primary" : "hover:bg-muted"
+                  type="button"
+                  onClick={() => { setTool("brush"); setErasing(false); }}
+                  title="Brush mode (Key 4 or B)"
+                  className={`p-1.5 rounded transition border cursor-pointer ${
+                    tool === "brush" && !erasing ? "bg-primary text-primary-foreground border-primary font-medium" : "border-border bg-background text-muted-foreground hover:text-foreground"
                   }`}
                 >
-                  <span className="block h-3 w-3 rounded-full" style={{ backgroundColor: s.color }} />
+                  <Paintbrush className="h-3.5 w-3.5" />
                 </button>
-              ))}
-            </div>
-
-            <div className="h-4 w-px bg-border" />
-
-            {/* Tools */}
-            <button
-              type="button"
-              onClick={() => { setTool("brush"); setErasing(false); }}
-              title="Brush mode (Key 4 or B)"
-              className={`p-1.5 rounded transition border cursor-pointer ${
-                tool === "brush" && !erasing ? "bg-primary text-primary-foreground border-primary font-medium" : "border-border bg-background text-muted-foreground hover:text-foreground"
-              }`}
-            >
-              <Paintbrush className="h-3.5 w-3.5" />
-            </button>
-            <button
-              type="button"
-              onClick={() => { setTool("pencil"); setErasing(false); }}
-              title="Pencil mode (Key 5 or P)"
-              className={`p-1.5 rounded transition border cursor-pointer ${
-                tool === "pencil" && !erasing ? "bg-primary text-primary-foreground border-primary font-medium" : "border-border bg-background text-muted-foreground hover:text-foreground"
-              }`}
-            >
-              <Lasso className="h-3.5 w-3.5" />
-            </button>
-            <button
-              type="button"
-              onClick={() => setTool("pan")}
-              title="Hand mode (Key 6 or H)"
-              className={`p-1.5 rounded transition border cursor-pointer ${
-                tool === "pan" ? "bg-primary text-primary-foreground border-primary font-medium" : "border-border bg-background text-muted-foreground hover:text-foreground"
-              }`}
-            >
-              <Hand className="h-3.5 w-3.5" />
-            </button>
+                <button
+                  type="button"
+                  onClick={() => { setTool("pencil"); setErasing(false); }}
+                  title="Pencil mode (Key 5 or P)"
+                  className={`p-1.5 rounded transition border cursor-pointer ${
+                    tool === "pencil" && !erasing ? "bg-primary text-primary-foreground border-primary font-medium" : "border-border bg-background text-muted-foreground hover:text-foreground"
+                  }`}
+                >
+                  <Lasso className="h-3.5 w-3.5" />
+                </button>
+              </>
+            )}
+            {canZoomPan && (
+              <>
+                <button
+                  type="button"
+                  onClick={() => setTool("pan")}
+                  title="Hand mode (Key 6 or H)"
+                  className={`p-1.5 rounded transition border cursor-pointer ${
+                    tool === "pan" ? "bg-primary text-primary-foreground border-primary font-medium" : "border-border bg-background text-muted-foreground hover:text-foreground"
+                  }`}
+                >
+                  <Hand className="h-3.5 w-3.5" />
+                </button>
+              </>
+            )}
             <button
               type="button"
               onClick={() => { setTool("torch"); setErasing(false); }}
@@ -1465,67 +1713,83 @@ export default function Viewer({
             >
               {locked ? <Link2Off className="h-3.5 w-3.5" /> : <Link2 className="h-3.5 w-3.5" />}
             </button>
-            <button
-              type="button"
-              onClick={() => setErasing((e) => !e)}
-              title="Eraser (Key 0 or E)"
-              className={`p-1.5 rounded transition border cursor-pointer ${
-                erasing ? "border-destructive bg-destructive/10 text-destructive ring-1 ring-destructive" : "border-border bg-background text-muted-foreground hover:text-foreground"
-              }`}
-            >
-              <Eraser className="h-3.5 w-3.5" />
-            </button>
-
-            <div className="h-4 w-px bg-border" />
-
-            {/* Undo / Redo */}
-            <button
-              type="button"
-              onClick={undo}
-              title="Undo (Ctrl+Z)"
-              className="p-1.5 rounded border border-border bg-background text-muted-foreground hover:text-foreground transition cursor-pointer"
-            >
-              <RotateCcw className="h-3.5 w-3.5" />
-            </button>
-            <button
-              type="button"
-              onClick={redo}
-              title="Redo (Ctrl+Y)"
-              className="p-1.5 rounded border border-border bg-background text-muted-foreground hover:text-foreground transition cursor-pointer"
-            >
-              <RotateCw className="h-3.5 w-3.5" />
-            </button>
+            {canAnnotate && (
+              <>
+                <button
+                  type="button"
+                  onClick={() => setErasing((e) => !e)}
+                  title="Eraser (Key 0 or E)"
+                  className={`p-1.5 rounded transition border cursor-pointer ${
+                    erasing ? "border-destructive bg-destructive/10 text-destructive ring-1 ring-destructive" : "border-border bg-background text-muted-foreground hover:text-foreground"
+                  }`}
+                >
+                  <Eraser className="h-3.5 w-3.5" />
+                </button>
+    
+                <div className="h-4 w-px bg-border" />
+    
+                {/* Undo / Redo */}
+                <button
+                  type="button"
+                  onClick={undo}
+                  title="Undo (Ctrl+Z)"
+                  className="p-1.5 rounded border border-border bg-background text-muted-foreground hover:text-foreground transition cursor-pointer"
+                >
+                  <RotateCcw className="h-3.5 w-3.5" />
+                </button>
+                <button
+                  type="button"
+                  onClick={redo}
+                  title="Redo (Ctrl+Y)"
+                  className="p-1.5 rounded border border-border bg-background text-muted-foreground hover:text-foreground transition cursor-pointer"
+                >
+                  <RotateCw className="h-3.5 w-3.5" />
+                </button>
+              </>
+            )}
           </div>
 
           {/* Compact Right Actions */}
           <div className="flex items-center gap-1.5 shrink-0">
-            <button
-              type="button"
-              onClick={() => setFlagModalOpen(true)}
-              title={flag ? `Flagged: ${flag.reason || "Not Sure"}` : "Flag case"}
-              className={`p-1.5 rounded border transition cursor-pointer ${
-                flag ? "border-amber-500/50 bg-amber-500/15 text-amber-500" : "border-border bg-background text-muted-foreground hover:text-foreground"
-              }`}
-            >
-              <Flag className={`h-3.5 w-3.5 ${flag ? "fill-amber-500 text-amber-500" : ""}`} />
-            </button>
-            <button
-              type="button"
-              onClick={() => importInput.current?.click()}
-              disabled={importing}
-              title="Import a .seg.nrrd from 3D Slicer"
-              className="p-1.5 rounded border border-border bg-background text-muted-foreground hover:text-foreground transition cursor-pointer disabled:opacity-40"
-            >
-              {importing ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Upload className="h-3.5 w-3.5" />}
-            </button>
-            <button
-              onClick={clearMask}
-              title="Clear current 3D mask"
-              className="p-1.5 rounded border border-border bg-background text-muted-foreground hover:text-destructive transition cursor-pointer"
-            >
-              <Trash2 className="h-3.5 w-3.5" />
-            </button>
-            {hasSaved && (
+            {canAnnotate && (
+              <>
+                <button
+                  type="button"
+                  onClick={() => setFlagModalOpen(true)}
+                  title={flag ? `Flagged: ${flag.reason || "Not Sure"}` : "Flag case"}
+                  className={`p-1.5 rounded border transition cursor-pointer ${
+                    flag ? "border-amber-500/50 bg-amber-500/15 text-amber-500" : "border-border bg-background text-muted-foreground hover:text-foreground"
+                  }`}
+                >
+                  <Flag className={`h-3.5 w-3.5 ${flag ? "fill-amber-500 text-amber-500" : ""}`} />
+                </button>
+              </>
+            )}
+            {!isCollaborator && (
+              <>
+                <button
+                  type="button"
+                  onClick={() => importInput.current?.click()}
+                  disabled={importing}
+                  title="Import a .seg.nrrd from 3D Slicer"
+                  className="p-1.5 rounded border border-border bg-background text-muted-foreground hover:text-foreground transition cursor-pointer disabled:opacity-40"
+                >
+                  {importing ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Upload className="h-3.5 w-3.5" />}
+                </button>
+              </>
+            )}
+            {canDelete && (
+              <>
+                <button
+                  onClick={clearMask}
+                  title="Clear current 3D mask"
+                  className="p-1.5 rounded border border-border bg-background text-muted-foreground hover:text-destructive transition cursor-pointer"
+                >
+                  <Trash2 className="h-3.5 w-3.5" />
+                </button>
+              </>
+            )}
+            {hasSaved && canDelete && (
               <button
                 type="button"
                 onClick={() => deleteMask()}
@@ -1536,26 +1800,39 @@ export default function Viewer({
                 <XCircle className="h-3.5 w-3.5" />
               </button>
             )}
-            <button
-              type="button"
-              onClick={startCollaboration}
-              disabled={startingCollab}
-              title={collabToken ? "Collab Panel" : "Start Collaboration"}
-              className="p-1.5 rounded border border-blue-500/40 bg-blue-500/10 text-blue-400 hover:bg-blue-500/20 transition cursor-pointer"
-            >
-              <Users className="h-3.5 w-3.5" />
-            </button>
-            <button
-              onClick={save}
-              disabled={saving || !dirty}
-              title="Save 3D Mask (Ctrl+S)"
-              className={`inline-flex items-center gap-1 rounded-md px-2.5 py-1 text-xs font-medium transition cursor-pointer ${
-                savedSuccess ? "bg-emerald-600 text-white" : "bg-primary text-primary-foreground hover:bg-primary/90 disabled:opacity-40"
-              }`}
-            >
-              {saving ? <Loader2 className="h-3 w-3 animate-spin" /> : savedSuccess ? <Check className="h-3 w-3" /> : <Save className="h-3 w-3" />}
-              <span>{savedSuccess ? "Saved!" : dirty ? "Save" : "Saved"}</span>
-            </button>
+            {!isCollaborator && (
+              <>
+                <button
+                  type="button"
+                  onClick={() => host.start(caseId, "3d")}
+                  disabled={host.starting}
+                  title={collabToken ? "Collab Panel" : "Start Collaboration"}
+                  className="relative p-1.5 rounded border border-blue-500/40 bg-blue-500/10 text-blue-400 hover:bg-blue-500/20 transition cursor-pointer"
+                >
+                  <Users className="h-3.5 w-3.5" />
+                  {collab.joinRequests.length > 0 && (
+                    <span className="absolute -top-1 -right-1 flex h-4 min-w-4 px-1 items-center justify-center rounded-full bg-red-500 text-[10px] font-bold text-white">
+                      {collab.joinRequests.length}
+                    </span>
+                  )}
+                </button>
+              </>
+            )}
+            {canAnnotate && (
+              <>
+                <button
+                  onClick={save}
+                  disabled={saving || !dirty}
+                  title="Save 3D Mask (Ctrl+S)"
+                  className={`inline-flex items-center gap-1 rounded-md px-2.5 py-1 text-xs font-medium transition cursor-pointer ${
+                    savedSuccess ? "bg-emerald-600 text-white" : "bg-primary text-primary-foreground hover:bg-primary/90 disabled:opacity-40"
+                  }`}
+                >
+                  {saving ? <Loader2 className="h-3 w-3 animate-spin" /> : savedSuccess ? <Check className="h-3 w-3" /> : <Save className="h-3 w-3" />}
+                  <span>{savedSuccess ? "Saved!" : dirty ? "Save" : "Saved"}</span>
+                </button>
+              </>
+            )}
             <button
               type="button"
               onClick={() => setToolbarCollapsed(false)}
@@ -1569,62 +1846,81 @@ export default function Viewer({
       ) : (
         <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-border bg-card p-2.5">
           <div className="flex flex-wrap items-center gap-2">
-            <span className="text-xs font-semibold uppercase tracking-wider text-muted-foreground mr-1">
-              Label:
-            </span>
-            {SEGMENTS.map((s, i) => (
-              <button
-                key={s.value}
-                onClick={() => { setSeg(s.value); setErasing(false); }}
-                title={`${s.label} (Key ${i + 1})`}
-                className={`inline-flex items-center gap-1.5 rounded-md px-2.5 py-1 text-xs font-medium border transition cursor-pointer ${
-                  seg === s.value && !erasing
-                    ? `${s.badge} ring-1 ring-primary`
-                    : "border-border bg-background text-muted-foreground hover:text-foreground"
-                }`}
-              >
-                <span className="h-2 w-2 rounded-full" style={{ backgroundColor: s.color }} />
-                {s.label}
-                <span className="text-[10px] opacity-60 tabular-nums">
-                  ({counts[s.value - 1].toLocaleString()})
+            {canAnnotate && (
+              <>
+                <span className="text-xs font-semibold uppercase tracking-wider text-muted-foreground mr-1">
+                  Label:
                 </span>
-              </button>
-            ))}
+                {SEGMENTS.map((s, i) => (
+                  <button
+                    key={s.value}
+                    onClick={() => { setSeg(s.value); setErasing(false); }}
+                    title={`${s.label} (Key ${i + 1})`}
+                    className={`inline-flex items-center gap-1.5 rounded-md px-2.5 py-1 text-xs font-medium border transition cursor-pointer ${
+                      seg === s.value && !erasing
+                        ? `${s.badge} ring-1 ring-primary`
+                        : "border-border bg-background text-muted-foreground hover:text-foreground"
+                    }`}
+                  >
+                    <span className="h-2 w-2 rounded-full" style={{ backgroundColor: s.color }} />
+                    {s.label}
+                    <span className="text-[10px] opacity-60 tabular-nums">
+                      ({counts[s.value - 1].toLocaleString()})
+                    </span>
+                  </button>
+                ))}
+    
+                <div className="mx-1 h-5 w-px bg-border" />
+              </>
+            )}
 
-            <div className="mx-1 h-5 w-px bg-border" />
+            {!canAnnotate && (
+              <div className="flex items-center gap-2 rounded-md bg-blue-500/10 border border-blue-500/20 px-3 py-1 text-xs text-blue-400 font-medium">
+                <Lock className="h-3.5 w-3.5 text-blue-400" />
+                <span>Read-Only Review Mode — Drawing locked by Master</span>
+              </div>
+            )}
 
             {/* Tool Mode: Brush vs Pencil vs Hand vs Torch */}
             <div className="inline-flex overflow-hidden rounded-md border border-border">
-              <button
-                type="button"
-                onClick={() => { setTool("brush"); setErasing(false); }}
-                title="Brush mode (Key 4 or B)"
-                className={`inline-flex items-center gap-1.5 px-2.5 py-1 text-xs transition cursor-pointer ${
-                  tool === "brush" ? "bg-primary text-primary-foreground font-medium" : "bg-background text-muted-foreground hover:text-foreground"
-                }`}
-              >
-                <Paintbrush className="h-3 w-3" /> Brush <span className="text-[10px] opacity-60">(4)</span>
-              </button>
-              <button
-                type="button"
-                onClick={() => { setTool("pencil"); setErasing(false); }}
-                title="Pencil mode — trace an outline, the inside auto-fills (Key 5 or P)"
-                className={`inline-flex items-center gap-1.5 border-l border-border px-2.5 py-1 text-xs transition cursor-pointer ${
-                  tool === "pencil" ? "bg-primary text-primary-foreground font-medium" : "bg-background text-muted-foreground hover:text-foreground"
-                }`}
-              >
-                <Lasso className="h-3 w-3" /> Pencil <span className="text-[10px] opacity-60">(5)</span>
-              </button>
-              <button
-                type="button"
-                onClick={() => setTool("pan")}
-                title="Hand mode — drag to move the view (Key 6 or H)"
-                className={`inline-flex items-center gap-1.5 border-l border-border px-2.5 py-1 text-xs transition cursor-pointer ${
-                  tool === "pan" ? "bg-primary text-primary-foreground font-medium" : "bg-background text-muted-foreground hover:text-foreground"
-                }`}
-              >
-                <Hand className="h-3 w-3" /> Hand <span className="text-[10px] opacity-60">(6)</span>
-              </button>
+              {canAnnotate && (
+                <>
+                  <button
+                    type="button"
+                    onClick={() => { setTool("brush"); setErasing(false); }}
+                    title="Brush mode (Key 4 or B)"
+                    className={`inline-flex items-center gap-1.5 px-2.5 py-1 text-xs transition cursor-pointer ${
+                      tool === "brush" ? "bg-primary text-primary-foreground font-medium" : "bg-background text-muted-foreground hover:text-foreground"
+                    }`}
+                  >
+                    <Paintbrush className="h-3 w-3" /> Brush <span className="text-[10px] opacity-60">(4)</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => { setTool("pencil"); setErasing(false); }}
+                    title="Pencil mode — trace an outline, the inside auto-fills (Key 5 or P)"
+                    className={`inline-flex items-center gap-1.5 border-l border-border px-2.5 py-1 text-xs transition cursor-pointer ${
+                      tool === "pencil" ? "bg-primary text-primary-foreground font-medium" : "bg-background text-muted-foreground hover:text-foreground"
+                    }`}
+                  >
+                    <Lasso className="h-3 w-3" /> Pencil <span className="text-[10px] opacity-60">(5)</span>
+                  </button>
+                </>
+              )}
+              {canZoomPan && (
+                <>
+                  <button
+                    type="button"
+                    onClick={() => setTool("pan")}
+                    title="Hand mode — drag to move the view (Key 6 or H)"
+                    className={`inline-flex items-center gap-1.5 border-l border-border px-2.5 py-1 text-xs transition cursor-pointer ${
+                      tool === "pan" ? "bg-primary text-primary-foreground font-medium" : "bg-background text-muted-foreground hover:text-foreground"
+                    }`}
+                  >
+                    <Hand className="h-3 w-3" /> Hand <span className="text-[10px] opacity-60">(6)</span>
+                  </button>
+                </>
+              )}
               <button
                 type="button"
                 onClick={() => { setTool("torch"); setErasing(false); }}
@@ -1637,42 +1933,46 @@ export default function Viewer({
               </button>
             </div>
 
-            <button
-              onClick={() => setErasing((e) => !e)}
-              title="Toggle eraser mode (Key 0 or E)"
-              className={`inline-flex items-center gap-1.5 rounded-md px-2.5 py-1 text-xs font-medium border transition cursor-pointer ${
-                erasing
-                  ? "border-destructive bg-destructive/10 text-destructive ring-1 ring-destructive"
-                  : "border-border bg-background text-muted-foreground hover:text-foreground"
-              }`}
-            >
-              <Eraser className="h-3.5 w-3.5" /> Eraser <span className="text-[10px] opacity-60">(0)</span>
-            </button>
-
-            <label className="flex items-center gap-1.5 text-xs text-muted-foreground cursor-pointer select-none ml-1">
-              <input
-                type="checkbox"
-                checked={maskInside}
-                onChange={(e) => setMaskInside(e.target.checked)}
-                className="rounded border-border accent-primary h-3.5 w-3.5"
-              />
-              <span>Only inside bone</span>
-            </label>
-
-            <label className="flex items-center gap-1.5 text-xs text-muted-foreground cursor-pointer select-none ml-1">
-              <input
-                type="checkbox"
-                checked={protectLesion}
-                onChange={(e) => {
-                  setProtectLesion(e.target.checked);
-                  try {
-                    localStorage.setItem("bme_protect_lesion", String(e.target.checked));
-                  } catch {}
-                }}
-                className="rounded border-border accent-primary h-3.5 w-3.5"
-              />
-              <span>Protect lesion</span>
-            </label>
+            {canAnnotate && (
+              <>
+                <button
+                  onClick={() => setErasing((e) => !e)}
+                  title="Toggle eraser mode (Key 0 or E)"
+                  className={`inline-flex items-center gap-1.5 rounded-md px-2.5 py-1 text-xs font-medium border transition cursor-pointer ${
+                    erasing
+                      ? "border-destructive bg-destructive/10 text-destructive ring-1 ring-destructive"
+                      : "border-border bg-background text-muted-foreground hover:text-foreground"
+                  }`}
+                >
+                  <Eraser className="h-3.5 w-3.5" /> Eraser <span className="text-[10px] opacity-60">(0)</span>
+                </button>
+    
+                <label className="flex items-center gap-1.5 text-xs text-muted-foreground cursor-pointer select-none ml-1">
+                  <input
+                    type="checkbox"
+                    checked={maskInside}
+                    onChange={(e) => setMaskInside(e.target.checked)}
+                    className="rounded border-border accent-primary h-3.5 w-3.5"
+                  />
+                  <span>Only inside bone</span>
+                </label>
+    
+                <label className="flex items-center gap-1.5 text-xs text-muted-foreground cursor-pointer select-none ml-1">
+                  <input
+                    type="checkbox"
+                    checked={protectLesion}
+                    onChange={(e) => {
+                      setProtectLesion(e.target.checked);
+                      try {
+                        localStorage.setItem("bme_protect_lesion", String(e.target.checked));
+                      } catch {}
+                    }}
+                    className="rounded border-border accent-primary h-3.5 w-3.5"
+                  />
+                  <span>Protect lesion</span>
+                </label>
+              </>
+            )}
 
             <button
               type="button"
@@ -1688,7 +1988,7 @@ export default function Viewer({
           </div>
 
           <div className="flex items-center gap-3">
-            {tool === "brush" && (
+            {canAnnotate && tool === "brush" && (
               <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
                 <Paintbrush className="h-3.5 w-3.5" />
                 <span>Size: {brush}px</span>
@@ -1730,103 +2030,135 @@ export default function Viewer({
               setOpacity={setOpacity}
             />
 
-            {/* Undo & Redo */}
-            <div className="inline-flex overflow-hidden rounded-md border border-border">
+            {canAnnotate && (
+              <>
+                {/* Undo & Redo */}
+                <div className="inline-flex overflow-hidden rounded-md border border-border">
+                  <button
+                    type="button"
+                    onClick={undo}
+                    title="Undo (Ctrl+Z)"
+                    className="inline-flex items-center gap-1 bg-background px-2 py-1 text-xs text-muted-foreground hover:text-foreground hover:bg-muted transition cursor-pointer"
+                  >
+                    <RotateCcw className="h-3 w-3" /> Undo
+                  </button>
+                  <button
+                    type="button"
+                    onClick={redo}
+                    title="Redo (Ctrl+Y)"
+                    className="inline-flex items-center gap-1 border-l border-border bg-background px-2 py-1 text-xs text-muted-foreground hover:text-foreground hover:bg-muted transition cursor-pointer"
+                  >
+                    <RotateCw className="h-3 w-3" /> Redo
+                  </button>
+                </div>
+              </>
+            )}
+
+            {canAnnotate && (
+              <>
+                {/* Flag Case */}
+                <button
+                  type="button"
+                  onClick={() => setFlagModalOpen(true)}
+                  title={flag ? `Flagged: ${flag.reason || "Not Sure"}` : "Flag this case for review (e.g. Not Sure)"}
+                  className={`inline-flex items-center gap-1.5 rounded-md px-2.5 py-1 text-xs font-medium border transition cursor-pointer ${
+                    flag
+                      ? "border-amber-500/50 bg-amber-500/15 text-amber-500 hover:bg-amber-500/25 ring-1 ring-amber-500/30"
+                      : "border-border bg-background text-muted-foreground hover:text-foreground"
+                  }`}
+                >
+                  <Flag className={`h-3.5 w-3.5 ${flag ? "fill-amber-500 text-amber-500" : ""}`} />
+                  <span>{flag ? "Flagged" : "Flag"}</span>
+                </button>
+              </>
+            )}
+
+            {canAnnotate && (
+              <>
+                {/* Auto Save */}
+                <div className="flex items-center gap-1.5 border-l border-border pl-2">
+                  <label
+                    className="flex items-center gap-1.5 text-xs text-muted-foreground cursor-pointer select-none"
+                    title="Auto-save the 3D mask shortly after each stroke/edit"
+                  >
+                    <input
+                      type="checkbox"
+                      checked={autoSave}
+                      onChange={(e) => {
+                        setAutoSave(e.target.checked);
+                        try {
+                          localStorage.setItem("bme_viewer_autosave", e.target.checked ? "true" : "false");
+                        } catch { /* ignore */ }
+                        if (e.target.checked) toast.success("Auto Save enabled");
+                        else toast.info("Auto Save disabled");
+                      }}
+                      className="rounded border-border accent-primary h-3.5 w-3.5"
+                    />
+                    <span className="font-medium">Auto Save</span>
+                  </label>
+                  {autoSaveStatus && (
+                    <span className="text-[10px] text-muted-foreground font-mono truncate max-w-[160px]">
+                      {autoSaveStatus}
+                    </span>
+                  )}
+                </div>
+              </>
+            )}
+
+            {/* Collaboration Button (host) vs Participant Indicator (guest) */}
+            {!isCollaborator ? (
               <button
                 type="button"
-                onClick={undo}
-                title="Undo (Ctrl+Z)"
-                className="inline-flex items-center gap-1 bg-background px-2 py-1 text-xs text-muted-foreground hover:text-foreground hover:bg-muted transition cursor-pointer"
+                onClick={() => host.start(caseId, "3d")}
+                disabled={host.starting}
+                className="inline-flex items-center gap-1.5 rounded-md border border-blue-500/40 bg-blue-500/10 px-2.5 py-1 text-xs font-semibold text-blue-400 hover:bg-blue-500/20 transition-all cursor-pointer"
               >
-                <RotateCcw className="h-3 w-3" /> Undo
+                <Users className="h-3.5 w-3.5" />
+                <span>{collabToken ? "Collab Panel" : "Start Collaboration"}</span>
+                {collab.joinRequests.length > 0 && (
+                  <span className="ml-1 flex h-4 min-w-4 px-1 items-center justify-center rounded-full bg-red-500 text-[10px] font-bold text-white">
+                    {collab.joinRequests.length}
+                  </span>
+                )}
               </button>
-              <button
-                type="button"
-                onClick={redo}
-                title="Redo (Ctrl+Y)"
-                className="inline-flex items-center gap-1 border-l border-border bg-background px-2 py-1 text-xs text-muted-foreground hover:text-foreground hover:bg-muted transition cursor-pointer"
-              >
-                <RotateCw className="h-3 w-3" /> Redo
-              </button>
-            </div>
+            ) : (
+              <div className="flex items-center gap-1.5 rounded-md border border-blue-500/30 bg-blue-500/10 px-2.5 py-1 text-xs font-medium text-blue-300">
+                <Users className="h-3.5 w-3.5" />
+                <span>Review Session ({collab.participants.length})</span>
+              </div>
+            )}
 
-            {/* Flag Case */}
-            <button
-              type="button"
-              onClick={() => setFlagModalOpen(true)}
-              title={flag ? `Flagged: ${flag.reason || "Not Sure"}` : "Flag this case for review (e.g. Not Sure)"}
-              className={`inline-flex items-center gap-1.5 rounded-md px-2.5 py-1 text-xs font-medium border transition cursor-pointer ${
-                flag
-                  ? "border-amber-500/50 bg-amber-500/15 text-amber-500 hover:bg-amber-500/25 ring-1 ring-amber-500/30"
-                  : "border-border bg-background text-muted-foreground hover:text-foreground"
-              }`}
-            >
-              <Flag className={`h-3.5 w-3.5 ${flag ? "fill-amber-500 text-amber-500" : ""}`} />
-              <span>{flag ? "Flagged" : "Flag"}</span>
-            </button>
+            {!isCollaborator && (
+              <>
+                {/* Import from 3D Slicer */}
+                <button
+                  type="button"
+                  onClick={() => importInput.current?.click()}
+                  disabled={importing}
+                  title="Import a .seg.nrrd saved in 3D Slicer"
+                  className="inline-flex items-center gap-1 rounded border border-border bg-background px-2 py-1 text-xs text-muted-foreground hover:text-foreground transition cursor-pointer disabled:opacity-40"
+                >
+                  {importing ? <Loader2 className="h-3 w-3 animate-spin" /> : <Upload className="h-3 w-3" />}
+                  <span className="hidden sm:inline">Import from Slicer</span>
+                </button>
+              </>
+            )}
 
-            {/* Auto Save */}
-            <div className="flex items-center gap-1.5 border-l border-border pl-2">
-              <label
-                className="flex items-center gap-1.5 text-xs text-muted-foreground cursor-pointer select-none"
-                title="Auto-save the 3D mask shortly after each stroke/edit"
-              >
-                <input
-                  type="checkbox"
-                  checked={autoSave}
-                  onChange={(e) => {
-                    setAutoSave(e.target.checked);
-                    try {
-                      localStorage.setItem("bme_viewer_autosave", e.target.checked ? "true" : "false");
-                    } catch { /* ignore */ }
-                    if (e.target.checked) toast.success("Auto Save enabled");
-                    else toast.info("Auto Save disabled");
-                  }}
-                  className="rounded border-border accent-primary h-3.5 w-3.5"
-                />
-                <span className="font-medium">Auto Save</span>
-              </label>
-              {autoSaveStatus && (
-                <span className="text-[10px] text-muted-foreground font-mono truncate max-w-[160px]">
-                  {autoSaveStatus}
-                </span>
-              )}
-            </div>
-
-            {/* Collaboration Button */}
-            <button
-              type="button"
-              onClick={startCollaboration}
-              disabled={startingCollab}
-              className="inline-flex items-center gap-1.5 rounded-md border border-blue-500/40 bg-blue-500/10 px-2.5 py-1 text-xs font-semibold text-blue-400 hover:bg-blue-500/20 transition-all cursor-pointer"
-            >
-              <Users className="h-3.5 w-3.5" />
-              <span>{collabToken ? "Collab Panel" : "Start Collaboration"}</span>
-            </button>
-
-            {/* Import from 3D Slicer */}
-            <button
-              type="button"
-              onClick={() => importInput.current?.click()}
-              disabled={importing}
-              title="Import a .seg.nrrd saved in 3D Slicer"
-              className="inline-flex items-center gap-1 rounded border border-border bg-background px-2 py-1 text-xs text-muted-foreground hover:text-foreground transition cursor-pointer disabled:opacity-40"
-            >
-              {importing ? <Loader2 className="h-3 w-3 animate-spin" /> : <Upload className="h-3 w-3" />}
-              <span className="hidden sm:inline">Import from Slicer</span>
-            </button>
-
-            {/* Clear Mask Button */}
-            <button
-              onClick={clearMask}
-              title="Clear current 3D canvas mask"
-              className="inline-flex items-center gap-1 rounded border border-border bg-background px-2 py-1 text-xs text-muted-foreground hover:text-destructive transition cursor-pointer"
-            >
-              <Trash2 className="h-3 w-3" />
-            </button>
+            {canDelete && (
+              <>
+                {/* Clear Mask Button */}
+                <button
+                  onClick={clearMask}
+                  title="Clear current 3D canvas mask"
+                  className="inline-flex items-center gap-1 rounded border border-border bg-background px-2 py-1 text-xs text-muted-foreground hover:text-destructive transition cursor-pointer"
+                >
+                  <Trash2 className="h-3 w-3" />
+                </button>
+              </>
+            )}
 
             {/* Delete Saved Mask */}
-            {hasSaved && (
+            {hasSaved && canDelete && (
               <button
                 type="button"
                 onClick={() => deleteMask()}
@@ -1839,26 +2171,30 @@ export default function Viewer({
               </button>
             )}
 
-            {/* Save Mask */}
-            <button
-              onClick={save}
-              disabled={saving || !dirty}
-              title="Save 3D Mask (Ctrl+S)"
-              className={`inline-flex items-center gap-1.5 rounded-md px-3 py-1 text-xs font-medium transition cursor-pointer ${
-                savedSuccess
-                  ? "bg-emerald-600 text-white"
-                  : "bg-primary text-primary-foreground hover:bg-primary/90 disabled:opacity-40"
-              }`}
-            >
-              {saving ? (
-                <Loader2 className="h-3.5 w-3.5 animate-spin" />
-              ) : savedSuccess ? (
-                <Check className="h-3.5 w-3.5" />
-              ) : (
-                <Save className="h-3.5 w-3.5" />
-              )}
-              {savedSuccess ? "Saved!" : dirty ? "Save Mask" : "Saved"}
-            </button>
+            {canAnnotate && (
+              <>
+                {/* Save Mask */}
+                <button
+                  onClick={save}
+                  disabled={saving || !dirty}
+                  title="Save 3D Mask (Ctrl+S)"
+                  className={`inline-flex items-center gap-1.5 rounded-md px-3 py-1 text-xs font-medium transition cursor-pointer ${
+                    savedSuccess
+                      ? "bg-emerald-600 text-white"
+                      : "bg-primary text-primary-foreground hover:bg-primary/90 disabled:opacity-40"
+                  }`}
+                >
+                  {saving ? (
+                    <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                  ) : savedSuccess ? (
+                    <Check className="h-3.5 w-3.5" />
+                  ) : (
+                    <Save className="h-3.5 w-3.5" />
+                  )}
+                  {savedSuccess ? "Saved!" : dirty ? "Save Mask" : "Saved"}
+                </button>
+              </>
+            )}
 
             {/* Collapse Toolbar Toggle */}
             <button
@@ -1914,17 +2250,17 @@ export default function Viewer({
                 style={{ color: PLANE_COLOR[p] }}>
                 <span>{p}</span>
                 <span className="flex items-center gap-0.5">
-                  <button type="button" title="Zoom out"
+                  <button type="button" disabled={!canZoomPan} title="Zoom out"
                     onClick={() => setZoom((z) => ({ ...z, [p]: clampZoom(z[p] - 0.25) }))}
                     className="rounded border border-neutral-700 px-1 text-neutral-300 hover:bg-neutral-800">
                     <Minus className="h-2.5 w-2.5" />
                   </button>
-                  <button type="button" title="Reset zoom and pan"
+                  <button type="button" disabled={!canZoomPan} title="Reset zoom and pan"
                     onClick={() => resetView(p)}
                     className="w-8 rounded border border-neutral-700 text-[9px] tabular-nums text-neutral-300 hover:bg-neutral-800">
                     {zoom[p].toFixed(1)}x
                   </button>
-                  <button type="button" title="Zoom in"
+                  <button type="button" disabled={!canZoomPan} title="Zoom in"
                     onClick={() => setZoom((z) => ({ ...z, [p]: clampZoom(z[p] + 0.25) }))}
                     className="rounded border border-neutral-700 px-1 text-neutral-300 hover:bg-neutral-800">
                     <Plus className="h-2.5 w-2.5" />
@@ -1951,13 +2287,16 @@ export default function Viewer({
                 onMouseDown={(e) => {
                   if (tool === "torch") return; // Pitfall-1: mouse down with torch tool does nothing
                   if (tool === "pan") {
-                    if (e.button === 0) startPan(p, e);
+                    if (e.button === 0 && canZoomPan) startPan(p, e);
                     return;
                   }
                   const hit = toVoxel(p, e);
                   if (!hit) return;
-                  if (e.shiftKey) { moveCursor(p, hit.a, hit.b); return; }
-                  if (e.button !== 0) return;
+                  if (e.shiftKey) {
+                    if (canMoveSlices) moveCursor(p, hit.a, hit.b);
+                    return;
+                  }
+                  if (e.button !== 0 || !canAnnotate) return;
                   if (tool === "pencil") {
                     pencilPlane.current = p;
                     outline.current = [[hit.a, hit.b]];
@@ -1968,11 +2307,15 @@ export default function Viewer({
                     strokeHasBone.current = sliceHasBone(p);
                     painting.current = true;
                     paintAt(p, e);
-                    if (!locked) moveCursor(p, hit.a, hit.b);
+                    if (!locked && canMoveSlices) moveCursor(p, hit.a, hit.b);
                   }
                 }}
                 onMouseMove={(e) => {
                   const hit = toVoxel(p, e);
+                  if (hit && collabToken && collab.connected) {
+                    const g = planeGeom(p, vol);
+                    collab.updateCursor({ x: hit.a / g.w, y: hit.b / g.h, plane: p });
+                  }
                   if (hit) {
                     lastPointerPosRef.current = { plane: p, a: hit.a, b: hit.b };
                     if (torchActiveRef.current) {
@@ -2032,6 +2375,7 @@ export default function Viewer({
               </div>
               </div>
               <input type="range" min={0} max={depth - 1} value={s}
+                disabled={!canMoveSlices}
                 onChange={(e) => {
                   const v = Number(e.target.value);
                   setCursor((c) => setAxis(c, g.axis.slice, v));
@@ -2096,24 +2440,29 @@ export default function Viewer({
         />
       )}
 
-      {showMasterPanel && collabToken && (
+      {host.showPanel && collabToken && (
         <div
-          onClick={() => setShowMasterPanel(false)}
+          onClick={() => host.setShowPanel(false)}
           className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 p-4 backdrop-blur-sm cursor-pointer animate-in fade-in duration-150"
         >
           <div onClick={(e) => e.stopPropagation()} className="cursor-default">
             <CollaborationMasterPanel
-              shareUrl={shareUrl}
+              shareUrl={host.shareUrl}
+              followUserId={followUserId}
+              onFollowUser={setFollowUserId}
               participants={collab.participants}
               currentUserId={collab.currentUserId}
               onUpdatePermission={collab.updatePermission}
               onRemoveUser={collab.removeUser}
               onEndSession={() => {
                 collab.endSession();
-                setCollabToken(null);
-                setShowMasterPanel(false);
+                host.forget();
               }}
-              onClose={() => setShowMasterPanel(false)}
+              onClose={() => host.setShowPanel(false)}
+              joinRequests={collab.joinRequests}
+              leftList={collab.leftList}
+              onAdmit={collab.admit}
+              onDeny={collab.deny}
             />
           </div>
         </div>
