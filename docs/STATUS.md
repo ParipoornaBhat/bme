@@ -4,7 +4,7 @@
 If you are picking this project up cold (new chat, new teammate, new machine), read this
 file first, then [SUMMARY.md](SUMMARY.md) for the full picture, then [PRD.md](PRD.md).
 
-Last updated: **2026-09-24**
+Last updated: **2026-09-29**
 
 ---
 
@@ -59,6 +59,19 @@ Phases are defined in [PRD.md](PRD.md) §8.
 ## Do this next
 
 In order. Each step's output is the next step's input.
+
+0. **3D dataset replaced with the team's Slicer export (2026-09-29).**
+   The Drive `BME` folder (3D Slicer scans + BME-only segmentations) is now the 3D dataset:
+   **55 patients, `BME-001`..`BME-055`**, in folder-name order. The old 107-case worklist and
+   de-id map are kept under `data/old_3d/<timestamp>/`. Get it with
+   `python ml/scripts/import_slicer_all.py . <folder with the Drive zips>` (dry run), then add `--apply`;
+   same zips give the same IDs. 25 folders were skipped, never guessed: 9 no segmentation,
+   10 segmentation without a scan file, 4 with two segmentation files, 1 with two segments,
+   2 with two matching scans. Folder names are in `data/slicer_import_report.csv` (local).
+   The 3D tab now opens saved annotations (`read_seg.py`), so the Slicer BME shows up.
+   **Next:** paint bone marrow on each case in the 3D tab (Protect lesion on) —
+   `seg2nifti.py` rejects a case without it. **All 55 are BME-positive: the 3D set has no
+   negatives yet.** Needs `pynrrd nibabel scipy` in `ml/.venv`.
 
 0. **Review and annotation tool suite complete (2026-09-24, branch `collaborative-radiologist-view`).**
    All 5 collaborative review and annotation tasks are implemented:
@@ -221,6 +234,8 @@ Carried from [PRD.md](PRD.md) §10, updated with what the data answered.
 |---|---|---|
 | **2D case-level AUC jumped 0.658 → 0.961 when the dataset was rebuilt** | A number that good on this task, from 18 positive patients, is more likely a dataset shortcut than a modelling win | Two leaks measured on 2026-09-04. **(a)** `BME-2D-005` and `BME-2D-008` carry a **red ellipse drawn around the lesion**, burned into the pixels — 2/25 BME files, 0/69 non-BME. **(b)** A burned-in yellow A/P orientation overlay appears in **19/69 non-BME (28%)** but **1/25 BME (4%)**, and the two folders are framed and cropped differently — different exporters. Neither alone explains 0.96, but together they make it indefensible. **Before quoting anything: retrain on a centre crop excluding the borders, and drop or repair the two ellipse images.** |
 | 18 BME patients is the whole 2D positive pool | 3–4 positives per validation fold; the per-fold spread is wider than most effects | Always report mean ± std with n stated. Never quote one fold. |
+| **3D set is 55 BME-positive cases, no negatives** | A segmenter trained only on positives has never seen a knee without edema; FP rate on normal scans is unmeasured | Get non-BME scans into the Slicer export, or keep the old NBME cases' volumes |
+| **3D Slicer cases have BME but no bone marrow** | `seg2nifti.py` rejects them until bone is painted | Paint bone in the 3D tab with Protect lesion on |
 | **Every case filename carries a patient name** | PHI exposure | Fixed by step 1. Data is gitignored, so nothing has leaked. |
 | 23 cases have full PHI in DICOM headers | PHI exposure | Fixed by step 1. |
 | Burned-in pixel text unchecked | Anonymisers do not touch pixels | `deid.py` reports the `BurnedInAnnotation` flag; still spot-check visually. |

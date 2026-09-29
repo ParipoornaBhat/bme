@@ -90,3 +90,23 @@ export async function POST(
     }
   }
 }
+
+/**
+ * Removes the canonical <CASE>.seg.nrrd, which is what training and the editor
+ * read. Each annotator's own <CASE>__<name>.seg.nrrd copy is left in place, so
+ * a mistaken delete can be recovered from it.
+ */
+export async function DELETE(
+  _req: NextRequest,
+  { params }: { params: Promise<{ caseId: string }> },
+) {
+  const { caseId } = await params;
+  if (!ID.test(caseId)) return NextResponse.json({ error: "bad case id" }, { status: 400 });
+  const seg = path.join(root(), "data", "annotations", caseId, `${caseId}.seg.nrrd`);
+  try {
+    fs.rmSync(seg, { force: true });
+  } catch (e) {
+    return NextResponse.json({ error: `failed to delete mask: ${e}` }, { status: 500 });
+  }
+  return NextResponse.json({ ok: true, deleted: true });
+}

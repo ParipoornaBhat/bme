@@ -775,7 +775,7 @@ export default function Viewer({ caseId, onSaved }: { caseId: string; onSaved?: 
     if (!confirm(`Delete saved 3D mask for ${caseId}?`)) return;
     setDeletingMask(true);
     try {
-      const res = await fetch(`/api/cases/${encodeURIComponent(caseId)}/mask`, {
+      const res = await fetch(`/api/annotation/${encodeURIComponent(caseId)}`, {
         method: "DELETE",
       });
       if (res.ok) {
