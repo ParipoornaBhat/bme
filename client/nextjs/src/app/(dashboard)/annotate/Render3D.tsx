@@ -1,7 +1,8 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Box, Loader2, Maximize2 } from "lucide-react";
+import { Box, Expand, Loader2, Maximize2, Shrink } from "lucide-react";
+import { wheelZoomFactor } from "~/lib/wheel-zoom";
 
 /**
  * The 3D quadrant, matching how 3D Slicer presents a segmentation.
@@ -30,7 +31,7 @@ type SegDef = { value: number; label: string; color: string };
 type AxisEnds = { atZero: string; atMax: string };
 
 export default function Render3D({
-  labels, dims, spacing, orient, segments, hidden: controlledHidden,
+  labels, dims, spacing, orient, segments, hidden: controlledHidden, expanded = false, onToggleExpand, fill = false,
 }: {
   labels: Uint8Array | null;
   dims: [number, number, number];
@@ -39,6 +40,11 @@ export default function Render3D({
   orient: [AxisEnds, AxisEnds, AxisEnds];
   segments: ReadonlyArray<SegDef>;
   hidden?: Set<number>;
+  /** Shown full size in place of the four-up. */
+  expanded?: boolean;
+  onToggleExpand?: () => void;
+  /** Grow to fill a flex parent, drawing at that size. Otherwise a fixed 460px square. */
+  fill?: boolean;
 }) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const [built, setBuilt] = useState<Array<{ value: number; quads: P3[][] }> | null>(null);
@@ -51,6 +57,35 @@ export default function Render3D({
   const [zoom, setZoom] = useState(1);
   const [fit, setFit] = useState(false);
   const drag = useRef<{ x: number; y: number } | null>(null);
+  // The canvas is drawn at the size of the space it has, so it stays sharp
+  // when the view is expanded.
+  const boxRef = useRef<HTMLDivElement | null>(null);
+  const [size, setSize] = useState({ w: 460, h: 460 });
+  useEffect(() => {
+    const box = boxRef.current;
+    if (!box || !fill) return;
+    const ro = new ResizeObserver(() => {
+      const w = Math.max(200, Math.floor(box.clientWidth));
+      const h = Math.max(200, Math.floor(box.clientHeight));
+      setSize((cur) => (cur.w === w && cur.h === h ? cur : { w, h }));
+    });
+    ro.observe(box);
+    return () => ro.disconnect();
+  }, [fill]);
+
+  // Ctrl+wheel (or a touchpad pinch) zooms; a plain wheel scrolls the page.
+  useEffect(() => {
+    const cv = canvasRef.current;
+    if (!cv) return;
+    const onWheel = (e: WheelEvent) => {
+      const factor = wheelZoomFactor(e);
+      if (factor === null) return;
+      e.preventDefault();
+      setZoom((z) => Math.max(0.4, Math.min(8, z * factor)));
+    };
+    cv.addEventListener("wheel", onWheel, { passive: false });
+    return () => cv.removeEventListener("wheel", onWheel);
+  }, []);
 
   const mm: P3 = [dims[0] * spacing[0], dims[1] * spacing[1], dims[2] * spacing[2]];
 
@@ -211,14 +246,16 @@ export default function Render3D({
       ctx.fillStyle = `rgb(${Math.round(r * t.shade)},${Math.round(g * t.shade)},${Math.round(b * t.shade)})`;
       ctx.fill();
     }
-  }, [built, hidden, yaw, pitch, zoom, fit, mm, segments, orient]);
+  }, [built, hidden, yaw, pitch, zoom, fit, mm, segments, orient, size]);
 
   const voxel = spacing[0] * spacing[1] * spacing[2];
   const totalFaces = (built ?? []).reduce((n, g) => n + g.quads.length, 0);
 
   return (
-    <div className="flex min-h-0 flex-col overflow-hidden rounded-lg border-2 border-neutral-700 bg-black p-1.5">
-      <div className="mb-1 flex shrink-0 items-center justify-between gap-1 px-1 text-[10px] uppercase tracking-wider text-neutral-400">
+    <div className={`flex min-h-0 flex-col overflow-hidden rounded-lg border-2 border-neutral-700 bg-black p-1.5 ${fill ? "flex-1" : ""}`}>
+      <div className="mb-1 flex shrink-0 select-none items-center justify-between gap-1 px-1 text-[10px] uppercase tracking-wider text-neutral-400"
+        onDoubleClick={onToggleExpand}
+        title="Double-click for full view">
         <span className="inline-flex items-center gap-1"><Box className="h-3 w-3" /> 3D</span>
         <span className="flex items-center gap-1">
           <button onClick={() => setFit((v) => !v)} disabled={!built}
@@ -231,13 +268,20 @@ export default function Render3D({
             className="rounded border border-neutral-600 px-1.5 py-0.5 normal-case tracking-normal text-neutral-300 hover:bg-neutral-800 disabled:opacity-40">
             {building ? "Building…" : built ? "Rebuild" : "Build"}
           </button>
+          {onToggleExpand && (
+            <button type="button" onClick={onToggleExpand}
+              title={expanded ? "Back to all four views (Esc)" : "Full view"}
+              className="rounded border border-neutral-600 px-1 py-0.5 text-neutral-300 hover:bg-neutral-800">
+              {expanded ? <Shrink className="h-2.5 w-2.5" /> : <Expand className="h-2.5 w-2.5" />}
+            </button>
+          )}
         </span>
       </div>
 
-      <div className="relative flex min-h-0 flex-1 items-center justify-center">
-        <canvas ref={canvasRef} width={460} height={460}
-          className="cursor-grab rounded active:cursor-grabbing"
-          style={{ maxWidth: "100%", maxHeight: "100%" }}
+      <div ref={boxRef} className={fill ? "relative min-h-[200px] flex-1" : "relative flex min-h-0 flex-1 items-center justify-center"}>
+        <canvas ref={canvasRef} width={fill ? size.w : 460} height={fill ? size.h : 460}
+          className={`${fill ? "absolute inset-0 h-full w-full" : ""} cursor-grab rounded active:cursor-grabbing`}
+          style={fill ? undefined : { maxWidth: "100%", maxHeight: "100%" }}
           onPointerDown={(e) => {
             drag.current = { x: e.clientX, y: e.clientY };
             e.currentTarget.setPointerCapture(e.pointerId);
@@ -253,7 +297,6 @@ export default function Render3D({
           }}
           onPointerUp={() => { drag.current = null; }}
           onPointerCancel={() => { drag.current = null; }}
-          onWheel={(e) => setZoom((z) => Math.max(0.4, Math.min(8, z * (e.deltaY > 0 ? 0.9 : 1.1))))}
         />
         {!built && (
           <div className="pointer-events-none absolute inset-0 flex items-center justify-center px-5 text-center text-[11px] text-neutral-500">

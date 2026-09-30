@@ -17,6 +17,7 @@ import {
   Loader2,
   Lock,
   Maximize2,
+  Minimize2,
   Minus,
   Paintbrush,
   Plus,
@@ -55,6 +56,7 @@ import {
 import { MaskSync, type MaskSyncIO } from "~/lib/mask-sync";
 import { useGuestUserId, useHostSession, useSessionNotices } from "~/lib/useHostSession";
 import { canPaint } from "~/lib/paint-rules";
+import { wheelZoomFactor } from "~/lib/wheel-zoom";
 import { isInTorch, type TorchState } from "~/lib/torch";
 import type { FlagRecord } from "~/lib/flag-store";
 import FlagDialog from "./FlagDialog";
@@ -265,7 +267,7 @@ function SegmentMeasures({
     return { ...s, n, mm3, cm3: mm3 / 1000 };
   }).filter((r) => r.n > 0);
   return (
-    <div className="rounded-lg border border-border bg-card p-3 text-xs">
+    <div className="shrink-0 rounded-lg border border-border bg-card p-3 text-xs">
       <div className="mb-2 font-semibold">Annotated region</div>
       {rows.length === 0 ? (
         <p className="text-muted-foreground">Nothing painted yet.</p>
@@ -559,6 +561,33 @@ export default function Viewer({
   const viewRefs = useRef<Record<Plane, HTMLDivElement | null>>({
     axial: null, coronal: null, sagittal: null,
   });
+  // One view shown full size in place of the four-up, or null for all four.
+  const [expanded, setExpanded] = useState<Plane | "3d" | null>(null);
+  const expandedRef = useRef(expanded);
+  expandedRef.current = expanded;
+  const toggleExpanded = (v: Plane | "3d") => setExpanded((cur) => (cur === v ? null : v));
+
+  // On a wide screen the four-up is sized to end at the bottom of the window,
+  // so the views fit without scrolling the page. Measured rather than a fixed
+  // calc(): the toolbar wraps to one or two rows, and banners come and go.
+  const gridRef = useRef<HTMLDivElement | null>(null);
+  const rootRef = useRef<HTMLDivElement | null>(null);
+  const [gridHeight, setGridHeight] = useState<number | null>(null);
+  const fitGrid = useCallback(() => {
+    const el = gridRef.current;
+    if (!el) return;
+    if (window.innerWidth < 1024) {
+      setGridHeight(null);
+      return;
+    }
+    let scroller: HTMLElement | null = el.parentElement;
+    while (scroller && !/(auto|scroll)/.test(getComputedStyle(scroller).overflowY)) scroller = scroller.parentElement;
+    const scrolled = scroller ? scroller.scrollTop : window.scrollY;
+    const viewportBottom = scroller ? scroller.getBoundingClientRect().bottom : window.innerHeight;
+    const top = el.getBoundingClientRect().top + scrolled;
+    const h = Math.max(520, Math.floor(viewportBottom - top - 12));
+    setGridHeight((cur) => (cur !== null && Math.abs(cur - h) < 2 ? cur : h));
+  }, []);
   const painting = useRef(false);
   const pencilPlane = useRef<Plane | null>(null);
   const undoStack = useRef<Uint8Array[]>([]);
@@ -1067,8 +1096,9 @@ export default function Viewer({
     if (collabToken) drawAllRef.current();
   }, [collab.participants, collabToken]);
 
-  // Same wheel zoom as the 2D painter: the view under the pointer zooms,
-  // and the page does not scroll. Listeners are non-passive so preventDefault works.
+  // Ctrl+wheel (or a touchpad pinch) zooms the view under the pointer; a
+  // plain wheel scrolls the page. Listeners are non-passive so preventDefault
+  // can stop the browser zooming the whole page instead.
   useEffect(() => {
     if (!vol) return;
     const cleanups: Array<() => void> = [];
@@ -1076,17 +1106,30 @@ export default function Viewer({
       const el = viewRefs.current[p];
       if (!el) continue;
       const onWheel = (e: WheelEvent) => {
+        const factor = wheelZoomFactor(e);
+        if (factor === null) return;
         e.preventDefault();
         e.stopPropagation();
         if (!canZoomPanRef.current) return;
-        const delta = e.deltaY < 0 ? 0.15 : -0.15;
-        setZoom((z) => ({ ...z, [p]: clampZoom(z[p] + delta) }));
+        setZoom((z) => ({ ...z, [p]: clampZoom(z[p] * factor) }));
       };
       el.addEventListener("wheel", onWheel, { passive: false });
       cleanups.push(() => el.removeEventListener("wheel", onWheel));
     }
     return () => cleanups.forEach((fn) => fn());
   }, [vol]);
+
+  useEffect(() => {
+    if (!vol) return;
+    fitGrid();
+    const ro = new ResizeObserver(() => fitGrid());
+    if (rootRef.current) ro.observe(rootRef.current);
+    window.addEventListener("resize", fitGrid);
+    return () => {
+      ro.disconnect();
+      window.removeEventListener("resize", fitGrid);
+    };
+  }, [vol, fitGrid]);
 
   // ---- pan -------------------------------------------------------------
   // Dragging is followed on the window, so the view keeps moving when the
@@ -1517,6 +1560,9 @@ export default function Viewer({
       else if (e.key === "0" || e.key.toLowerCase() === "e") setErasing((v) => !v);
       else if (e.key.toLowerCase() === "v") cycleViewRef.current();
       else if (e.key.toLowerCase() === "l") setLocked((v) => !v);
+      else if (e.key === "Escape" && expandedRef.current && !painting.current) {
+        setExpanded(null);
+      }
       else if (e.key === "Escape") {
         outline.current = []; pencilPlane.current = null; painting.current = false;
         setOutlineTick((n) => n + 1); drawAll();
@@ -1599,7 +1645,7 @@ export default function Viewer({
   }
 
   return (
-    <div className="space-y-2">
+    <div ref={rootRef} className="space-y-2">
       {guestHeader}
       {seriesChoices.length > 1 && (
         <div className="flex flex-wrap items-center gap-1.5">
@@ -2239,7 +2285,9 @@ export default function Viewer({
 
       {/* Four-Up: three orthogonal views plus an info panel, as in Slicer */}
       <div
-        className="grid gap-2 grid-cols-1 md:grid-cols-2 lg:grid-rows-2 min-h-0 lg:h-[min(calc(100vh-215px),1100px)]"
+        ref={gridRef}
+        className={`grid gap-2 grid-cols-1 min-h-0 ${expanded ? "" : "md:grid-cols-2 lg:grid-rows-2"}`}
+        style={gridHeight !== null ? { height: gridHeight } : undefined}
       >
         {PLANES.map((p) => {
           const g = planeGeom(p, vol);
@@ -2247,15 +2295,18 @@ export default function Viewer({
           const s = sliceOf(p, vol, cursor);
           return (
             <div key={p}
+              ref={(el) => { viewRefs.current[p] = el; }}
               onMouseEnter={() => setActivePlane(p)}
-              className="flex min-h-0 flex-col overflow-hidden rounded-lg border-2 bg-black p-1.5"
+              className={`${expanded && expanded !== p ? "hidden" : "flex"} min-h-0 flex-col overflow-hidden rounded-lg border-2 bg-black p-1.5`}
               style={{
                 borderColor: PLANE_COLOR[p],
                 opacity: activePlane === p ? 1 : 0.94,
                 boxShadow: activePlane === p ? `0 0 0 1px ${PLANE_COLOR[p]}` : undefined,
               }}>
-              <div className="mb-1 flex shrink-0 items-center justify-between gap-1 px-1 text-[10px] uppercase tracking-wider"
-                style={{ color: PLANE_COLOR[p] }}>
+              <div className="mb-1 flex shrink-0 select-none items-center justify-between gap-1 px-1 text-[10px] uppercase tracking-wider"
+                style={{ color: PLANE_COLOR[p] }}
+                onDoubleClick={() => toggleExpanded(p)}
+                title="Double-click for full view">
                 <span>{p}</span>
                 <span className="flex items-center gap-0.5">
                   <button type="button" disabled={!canZoomPan} title="Zoom out"
@@ -2274,6 +2325,12 @@ export default function Viewer({
                     <Plus className="h-2.5 w-2.5" />
                   </button>
                   <span className="ml-1 tabular-nums text-neutral-400">{s + 1}/{depth}</span>
+                  <button type="button"
+                    title={expanded === p ? "Back to all four views (Esc)" : "Full view"}
+                    onClick={() => toggleExpanded(p)}
+                    className="ml-1 rounded border border-neutral-700 px-1 text-neutral-300 hover:bg-neutral-800">
+                    {expanded === p ? <Minimize2 className="h-2.5 w-2.5" /> : <Maximize2 className="h-2.5 w-2.5" />}
+                  </button>
                 </span>
               </div>
               <div className="flex min-h-0 flex-1 items-center justify-center overflow-hidden">
@@ -2393,18 +2450,23 @@ export default function Viewer({
           );
         })}
 
-        <div className="space-y-2">
-          <Render3D
-            labels={labels}
-            dims={vol.dims}
-            spacing={vol.spacing}
-            orient={vol.orient}
-            segments={SEGMENTS}
-            hidden={hiddenLabelsForView(view)}
-          />
+        <div className={`${expanded && expanded !== "3d" ? "hidden" : "flex"} min-h-0 flex-col gap-2 overflow-y-auto`}>
+          <div className={`flex flex-col ${expanded === "3d" ? "min-h-[70vh] flex-1" : "min-h-[260px] flex-1"}`}>
+            <Render3D
+              labels={labels}
+              dims={vol.dims}
+              spacing={vol.spacing}
+              orient={vol.orient}
+              segments={SEGMENTS}
+              hidden={hiddenLabelsForView(view)}
+              expanded={expanded === "3d"}
+              onToggleExpand={() => toggleExpanded("3d")}
+              fill
+            />
+          </div>
           <SegmentMeasures counts={counts} spacing={vol.spacing} />
 
-          <div className="rounded-lg border border-border bg-card p-3 text-xs">
+          <div className="shrink-0 rounded-lg border border-border bg-card p-3 text-xs">
             <div className="mb-2 flex items-baseline justify-between">
               <span className="font-semibold">{caseId}</span>
               <span className="tabular-nums text-muted-foreground">
@@ -2423,6 +2485,8 @@ export default function Viewer({
               <kbd className="font-mono">PgUp/PgDn</kbd><span>Step 10 slices</span>
               <kbd className="font-mono">Shift+click</kbd><span>Move crosshair (always)</span>
               <kbd className="font-mono">L</kbd><span>Lock / link views</span>
+              <kbd className="font-mono">Ctrl+wheel</kbd><span>Zoom the view (or pinch)</span>
+              <kbd className="font-mono">Dbl-click title</kbd><span>Full view; Esc to go back</span>
             </div>
             <p className="mt-2 text-muted-foreground">{status}</p>
           </div>
