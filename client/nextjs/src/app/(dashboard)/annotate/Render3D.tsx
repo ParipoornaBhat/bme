@@ -65,8 +65,8 @@ export default function Render3D({
     const box = boxRef.current;
     if (!box || !fill) return;
     const ro = new ResizeObserver(() => {
-      const w = Math.max(200, Math.floor(box.clientWidth));
-      const h = Math.max(200, Math.floor(box.clientHeight));
+      const w = Math.max(80, Math.floor(box.clientWidth));
+      const h = Math.max(80, Math.floor(box.clientHeight));
       setSize((cur) => (cur.w === w && cur.h === h ? cur : { w, h }));
     });
     ro.observe(box);
@@ -278,7 +278,7 @@ export default function Render3D({
         </span>
       </div>
 
-      <div ref={boxRef} className={fill ? "relative min-h-[200px] flex-1" : "relative flex min-h-0 flex-1 items-center justify-center"}>
+      <div ref={boxRef} className={fill ? "relative min-h-[120px] flex-1" : "relative flex min-h-0 flex-1 items-center justify-center"}>
         <canvas ref={canvasRef} width={fill ? size.w : 460} height={fill ? size.h : 460}
           className={`${fill ? "absolute inset-0 h-full w-full" : ""} cursor-grab rounded active:cursor-grabbing`}
           style={fill ? undefined : { maxWidth: "100%", maxHeight: "100%" }}
@@ -349,7 +349,7 @@ export default function Render3D({
         )}
         <div className="flex justify-between">
           <span>{totalFaces ? `${totalFaces.toLocaleString()} faces` : ""}</span>
-          <span>{fit ? "zoomed" : "true size"} &middot; drag / scroll</span>
+          <span>{fit ? "zoomed" : "true size"} &middot; drag to turn &middot; Ctrl+wheel to zoom</span>
         </div>
       </div>
     </div>

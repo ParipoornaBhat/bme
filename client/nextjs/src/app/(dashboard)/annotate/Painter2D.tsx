@@ -57,6 +57,7 @@ import {
 import { canPaint } from "~/lib/paint-rules";
 import FlagDialog from "./FlagDialog";
 import { pencilCursor } from "~/lib/cursors";
+import { usePaintTools } from "~/lib/usePaintTools";
 
 export type Case2DSlice = {
   caseId: string;
@@ -95,7 +96,8 @@ export default function Painter2D({
   const [selected, setSelected] = useState<Case2DSlice | null>(null);
   const [filter, setFilter] = useState<"all" | "bme" | "non_bme" | "annotated" | "unannotated" | "flagged">("all");
   const [query, setQuery] = useState("");
-  const [tool, setTool] = useState<"brush" | "pencil" | "pan" | "torch">(isCollaborator ? "pan" : "brush");
+  const { tool, erasing: isErasing, drawing, pickTool, toggleEraser, drawWithLabel } =
+    usePaintTools(isCollaborator ? "pan" : "brush");
   // Torch: hides the annotation inside a circle around the cursor so the scan
   // underneath can be seen. Purely visual - it never touches the mask data, so
   // nothing is erased and collaborators are unaffected. Selected as a tool, or
@@ -114,7 +116,6 @@ export default function Painter2D({
   const [protectLesion, setProtectLesion] = useState(true);
   const [activeLabel, setActiveLabel] = useState<number>(1);
   const [brushSize, setBrushSize] = useState(12);
-  const [isErasing, setIsErasing] = useState(false);
   const [saving, setSaving] = useState(false);
   const [savedSuccess, setSavedSuccess] = useState(false);
 
@@ -309,7 +310,7 @@ export default function Painter2D({
       const savedQuery = localStorage.getItem("bme_painter2d_query");
       if (savedQuery) setQuery(savedQuery);
       const savedTool = localStorage.getItem("bme_painter2d_tool") as any;
-      if (savedTool === "brush" || savedTool === "pencil" || savedTool === "pan") setTool(savedTool);
+      if (savedTool === "brush" || savedTool === "pencil" || savedTool === "pan") pickTool(savedTool);
       const savedBrushSize = localStorage.getItem("bme_painter2d_brush_size");
       if (savedBrushSize) setBrushSize(Number(savedBrushSize));
       const savedLabel = localStorage.getItem("bme_painter2d_active_label");
@@ -753,8 +754,10 @@ export default function Painter2D({
     if (pts.length < 2) return;
 
     ctx.save();
+    // Erasing shows as a white outline over a darkened area: what will be
+    // removed, never mistakable for an edema (red) outline.
     const strokeColor = isErasing
-      ? "#ef4444"
+      ? "#ffffff"
       : activeLabel === 1
       ? "#10b981"
       : activeLabel === 2
@@ -762,7 +765,7 @@ export default function Painter2D({
       : "#f59e0b";
 
     const fillColor = isErasing
-      ? "rgba(239, 68, 68, 0.15)"
+      ? "rgba(0, 0, 0, 0.4)"
       : activeLabel === 1
       ? "rgba(16, 185, 129, 0.18)"
       : activeLabel === 2
@@ -1493,15 +1496,15 @@ export default function Painter2D({
           return;
         }
       }
-      if (e.key === "1") { setActiveLabel(1); setIsErasing(false); }
-      else if (e.key === "2") { setActiveLabel(2); setIsErasing(false); }
-      else if (e.key === "3") { setActiveLabel(3); setIsErasing(false); }
-      else if (e.key === "4" || e.key.toLowerCase() === "b") { setTool("brush"); }
-      else if (e.key === "5" || e.key.toLowerCase() === "p") { setTool("pencil"); }
-      else if (e.key === "6" || e.key.toLowerCase() === "h") { setTool("pan"); }
-      else if (e.key === "7") { setTool("torch"); }
+      if (e.key === "1") { setActiveLabel(1); drawWithLabel(); }
+      else if (e.key === "2") { setActiveLabel(2); drawWithLabel(); }
+      else if (e.key === "3") { setActiveLabel(3); drawWithLabel(); }
+      else if (e.key === "4" || e.key.toLowerCase() === "b") { pickTool("brush"); }
+      else if (e.key === "5" || e.key.toLowerCase() === "p") { pickTool("pencil"); }
+      else if (e.key === "6" || e.key.toLowerCase() === "h") { pickTool("pan"); }
+      else if (e.key === "7") { pickTool("torch"); }
       else if (e.key.toLowerCase() === "t" && !e.ctrlKey && !e.metaKey && !e.altKey) { setTorchHeld(true); }
-      else if (e.key === "0" || e.key.toLowerCase() === "e") { setIsErasing((prev) => !prev); }
+      else if (e.key === "0" || e.key.toLowerCase() === "e") { toggleEraser(); }
       else if (e.key === "z" && (e.ctrlKey || e.metaKey) && !e.shiftKey) { e.preventDefault(); undo(); }
       else if (((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "y") || ((e.ctrlKey || e.metaKey) && e.shiftKey && e.key.toLowerCase() === "z")) { e.preventDefault(); redo(); }
       else if (e.key === "s" && (e.ctrlKey || e.metaKey)) { e.preventDefault(); saveMask(); }
@@ -1748,7 +1751,7 @@ export default function Painter2D({
         <div className="flex flex-col gap-2 rounded-lg border border-border bg-card p-3 h-full overflow-hidden">
           {/* Editor Toolbar - Compact Bar vs Full Toolbar */}
           {toolbarCollapsed ? (
-            <div className="flex items-center justify-between gap-2 border-b border-border pb-2.5 overflow-x-auto py-1">
+            <div className="flex items-center justify-between gap-2 border-b border-border pb-2.5 overflow-x-auto py-1 [&_button]:whitespace-nowrap [&_label]:whitespace-nowrap">
               <div className="flex items-center gap-1.5 shrink-0">
                 {sidebarCollapsed && (!isCollaborator || permissions.SLICE_CONTROL) && (
                   <button
@@ -1769,10 +1772,10 @@ export default function Painter2D({
                       {LABELS.map((l) => (
                         <button
                           key={l.id}
-                          onClick={() => { setActiveLabel(l.id); setIsErasing(false); }}
+                          onClick={() => { setActiveLabel(l.id); drawWithLabel(); }}
                           title={`${l.name} (${l.id})`}
                           className={`p-1 rounded transition cursor-pointer ${
-                            !isErasing && activeLabel === l.id ? "bg-primary/20 ring-1 ring-primary" : "hover:bg-muted"
+                            !isErasing && drawing && activeLabel === l.id ? "bg-primary/20 ring-1 ring-primary" : "hover:bg-muted"
                           }`}
                         >
                           <span className="block h-3 w-3 rounded-full" style={{ backgroundColor: l.stroke }} />
@@ -1785,27 +1788,27 @@ export default function Painter2D({
                     {/* Tools */}
                     <button
                       type="button"
-                      onClick={() => { setTool("brush"); setIsErasing(false); }}
+                      onClick={() => { pickTool("brush"); }}
                       title="Brush mode (Key 4 or B)"
                       className={`p-1.5 rounded transition border cursor-pointer ${
-                        tool === "brush" && !isErasing ? "bg-primary text-primary-foreground border-primary font-medium" : "border-border bg-background text-muted-foreground hover:text-foreground"
+                        tool === "brush" ? "bg-primary text-primary-foreground border-primary font-medium" : "border-border bg-background text-muted-foreground hover:text-foreground"
                       }`}
                     >
                       <Paintbrush className="h-3.5 w-3.5" />
                     </button>
                     <button
                       type="button"
-                      onClick={() => { setTool("pencil"); setIsErasing(false); }}
+                      onClick={() => { pickTool("pencil"); }}
                       title="Pencil mode (Key 5 or P)"
                       className={`p-1.5 rounded transition border cursor-pointer ${
-                        tool === "pencil" && !isErasing ? "bg-primary text-primary-foreground border-primary font-medium" : "border-border bg-background text-muted-foreground hover:text-foreground"
+                        tool === "pencil" ? "bg-primary text-primary-foreground border-primary font-medium" : "border-border bg-background text-muted-foreground hover:text-foreground"
                       }`}
                     >
                       <Lasso className="h-3.5 w-3.5" />
                     </button>
                     <button
                       type="button"
-                      onClick={() => setTool("pan")}
+                      onClick={() => pickTool("pan")}
                       title="Hand mode (Key 6 or H)"
                       className={`p-1.5 rounded transition border cursor-pointer ${
                         tool === "pan" ? "bg-primary text-primary-foreground border-primary font-medium" : "border-border bg-background text-muted-foreground hover:text-foreground"
@@ -1815,7 +1818,7 @@ export default function Painter2D({
                     </button>
                     <button
                       type="button"
-                      onClick={() => setTool("torch")}
+                      onClick={() => pickTool("torch")}
                       title="Torch - see the scan under the annotation (Key 7, or hold T with any tool)"
                       className={`p-1.5 rounded transition border cursor-pointer ${
                         tool === "torch" ? "bg-primary text-primary-foreground border-primary font-medium" : "border-border bg-background text-muted-foreground hover:text-foreground"
@@ -1825,7 +1828,7 @@ export default function Painter2D({
                     </button>
                     <button
                       type="button"
-                      onClick={() => setIsErasing((e) => !e)}
+                      onClick={() => toggleEraser()}
                       title="Eraser (Key 0 or E)"
                       className={`p-1.5 rounded transition border cursor-pointer ${
                         isErasing ? "border-destructive bg-destructive/10 text-destructive ring-1 ring-destructive" : "border-border bg-background text-muted-foreground hover:text-foreground"
@@ -1869,7 +1872,7 @@ export default function Painter2D({
                     </div>
                     <button
                       type="button"
-                      onClick={() => setTool((t) => (t === "torch" ? "pan" : "torch"))}
+                      onClick={() => pickTool(tool === "torch" ? "pan" : "torch")}
                       title="Torch - see the scan under the annotation. Nothing is changed. (Key 7, or hold T)"
                       className={`inline-flex items-center gap-1.5 rounded-md px-2.5 py-1 text-xs font-medium border transition cursor-pointer ${
                         tool === "torch" ? "bg-primary text-primary-foreground border-primary" : "border-border bg-background text-muted-foreground hover:text-foreground"
@@ -1968,7 +1971,7 @@ export default function Painter2D({
               </div>
             </div>
           ) : (
-            <div className="flex flex-wrap items-center justify-between gap-3 border-b border-border pb-3">
+            <div className="flex flex-wrap items-center justify-between gap-3 border-b border-border pb-3 [&_button]:whitespace-nowrap [&_label]:whitespace-nowrap">
               {(!isCollaborator || permissions.ANNOTATE) ? (
                 <div className="flex flex-wrap items-center gap-2">
                   {sidebarCollapsed && (!isCollaborator || permissions.SLICE_CONTROL) && (
@@ -1989,9 +1992,9 @@ export default function Painter2D({
                   {LABELS.map((l) => (
                     <button
                       key={l.id}
-                      onClick={() => { setActiveLabel(l.id); setIsErasing(false); }}
+                      onClick={() => { setActiveLabel(l.id); drawWithLabel(); }}
                       className={`inline-flex items-center gap-1.5 rounded-md px-2.5 py-1 text-xs font-medium border transition cursor-pointer ${
-                        !isErasing && activeLabel === l.id
+                        !isErasing && drawing && activeLabel === l.id
                           ? `${l.badge} ring-1 ring-primary`
                           : "border-border bg-background text-muted-foreground hover:text-foreground"
                       }`}
@@ -2007,7 +2010,7 @@ export default function Painter2D({
                   <div className="inline-flex overflow-hidden rounded-md border border-border">
                     <button
                       type="button"
-                      onClick={() => setTool("brush")}
+                      onClick={() => pickTool("brush")}
                       title="Brush mode (Key 4 or B)"
                       className={`inline-flex items-center gap-1.5 px-2.5 py-1 text-xs transition cursor-pointer ${
                         tool === "brush" ? "bg-primary text-primary-foreground font-medium" : "bg-background text-muted-foreground hover:text-foreground"
@@ -2017,7 +2020,7 @@ export default function Painter2D({
                     </button>
                     <button
                       type="button"
-                      onClick={() => setTool("pencil")}
+                      onClick={() => pickTool("pencil")}
                       title="Pencil mode — trace an outline, the inside auto-fills (Key 5 or P)"
                       className={`inline-flex items-center gap-1.5 border-l border-border px-2.5 py-1 text-xs transition cursor-pointer ${
                         tool === "pencil" ? "bg-primary text-primary-foreground font-medium" : "bg-background text-muted-foreground hover:text-foreground"
@@ -2027,7 +2030,7 @@ export default function Painter2D({
                     </button>
                     <button
                       type="button"
-                      onClick={() => setTool("pan")}
+                      onClick={() => pickTool("pan")}
                       title="Hand mode — click & drag to pan canvas (Key 6 or H)"
                       className={`inline-flex items-center gap-1.5 border-l border-border px-2.5 py-1 text-xs transition cursor-pointer ${
                         tool === "pan" ? "bg-primary text-primary-foreground font-medium" : "bg-background text-muted-foreground hover:text-foreground"
@@ -2037,7 +2040,7 @@ export default function Painter2D({
                     </button>
                     <button
                       type="button"
-                      onClick={() => setTool("torch")}
+                      onClick={() => pickTool("torch")}
                       title="Torch - hides the annotation around the cursor so you can see the scan underneath. Nothing is erased. (Key 7, or hold T with any tool)"
                       className={`inline-flex items-center gap-1.5 border-l border-border px-2.5 py-1 text-xs transition cursor-pointer ${
                         tool === "torch" ? "bg-primary text-primary-foreground font-medium" : "bg-background text-muted-foreground hover:text-foreground"
@@ -2048,7 +2051,7 @@ export default function Painter2D({
                   </div>
 
                   <button
-                    onClick={() => setIsErasing((e) => !e)}
+                    onClick={() => toggleEraser()}
                     title="Toggle eraser mode (Key 0 or E)"
                     className={`inline-flex items-center gap-1.5 rounded-md px-2.5 py-1 text-xs font-medium border transition cursor-pointer ${
                       isErasing
@@ -2099,7 +2102,7 @@ export default function Painter2D({
                   </div>
                   <button
                     type="button"
-                    onClick={() => setTool((t) => (t === "torch" ? "pan" : "torch"))}
+                    onClick={() => pickTool(tool === "torch" ? "pan" : "torch")}
                     title="Torch - see the scan under the annotation. Nothing is changed. (Key 7, or hold T)"
                     className={`inline-flex items-center gap-1.5 rounded-md px-2.5 py-1 text-xs font-medium border transition cursor-pointer ${
                       tool === "torch" ? "bg-primary text-primary-foreground border-primary" : "border-border bg-background text-muted-foreground hover:text-foreground"
@@ -2117,7 +2120,7 @@ export default function Painter2D({
                 </div>
               )}
 
-              <div className="flex items-center gap-3">
+              <div className="flex flex-wrap items-center justify-end gap-2">
                 {(!isCollaborator || permissions.ANNOTATE) && tool === "brush" && (
                   <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
                     <Paintbrush className="h-3.5 w-3.5" />

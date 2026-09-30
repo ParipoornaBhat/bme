@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
   Check,
+  Keyboard,
   ChevronDown,
   ChevronLeft,
   ChevronRight,
@@ -58,6 +59,7 @@ import { useGuestUserId, useHostSession, useSessionNotices } from "~/lib/useHost
 import { canPaint } from "~/lib/paint-rules";
 import { wheelZoomFactor } from "~/lib/wheel-zoom";
 import { pencilCursor } from "~/lib/cursors";
+import { usePaintTools } from "~/lib/usePaintTools";
 import { isInTorch, type TorchState } from "~/lib/torch";
 import type { FlagRecord } from "~/lib/flag-store";
 import FlagDialog from "./FlagDialog";
@@ -331,8 +333,8 @@ export default function Viewer({
   const [seriesId, setSeriesId] = useState("");
   const [seg, setSeg] = useState<number>(1);
   const [brush, setBrush] = useState(6);
-  const [erasing, setErasing] = useState(false);
-  const [tool, setTool] = useState<"brush" | "pencil" | "pan" | "torch">(isCollaborator ? "pan" : "brush");
+  const { tool, erasing, drawing, pickTool, toggleEraser, drawWithLabel } =
+    usePaintTools(isCollaborator ? "pan" : "brush");
   const [torchSize, setTorchSize] = useState(48);
   const [torchHeld, setTorchHeld] = useState(false);
   const torchActive = tool === "torch" || torchHeld;
@@ -375,7 +377,7 @@ export default function Viewer({
         if (!isNaN(n) && n >= 8 && n <= 240) setTorchSize(n);
       }
       const savedTool = localStorage.getItem("bme_viewer_tool");
-      if (!isCollaborator && (savedTool === "brush" || savedTool === "pencil" || savedTool === "pan")) setTool(savedTool);
+      if (!isCollaborator && (savedTool === "brush" || savedTool === "pencil" || savedTool === "pan")) pickTool(savedTool);
       const savedBrush = Number(localStorage.getItem("bme_viewer_brush"));
       if (savedBrush >= 1 && savedBrush <= 20) setBrush(savedBrush);
       const savedSeg = Number(localStorage.getItem("bme_viewer_seg"));
@@ -562,10 +564,13 @@ export default function Viewer({
   const viewRefs = useRef<Record<Plane, HTMLDivElement | null>>({
     axial: null, coronal: null, sagittal: null,
   });
+  const [showShortcuts, setShowShortcuts] = useState(false);
   // One view shown full size in place of the four-up, or null for all four.
   const [expanded, setExpanded] = useState<Plane | "3d" | null>(null);
   const expandedRef = useRef(expanded);
   expandedRef.current = expanded;
+  const showShortcutsRef = useRef(showShortcuts);
+  showShortcutsRef.current = showShortcuts;
   const toggleExpanded = (v: Plane | "3d") => setExpanded((cur) => (cur === v ? null : v));
 
   // On a wide screen the four-up is sized to end at the bottom of the window,
@@ -586,7 +591,9 @@ export default function Viewer({
     const scrolled = scroller ? scroller.scrollTop : window.scrollY;
     const viewportBottom = scroller ? scroller.getBoundingClientRect().bottom : window.innerHeight;
     const top = el.getBoundingClientRect().top + scrolled;
-    const h = Math.max(520, Math.floor(viewportBottom - top - 12));
+    // A laptop screen still fits: 400 leaves each view about 200px, and any
+    // one of them can go full size.
+    const h = Math.max(400, Math.floor(viewportBottom - top - 12));
     setGridHeight((cur) => (cur !== null && Math.abs(cur - h) < 2 ? cur : h));
   }, []);
   const painting = useRef(false);
@@ -708,7 +715,8 @@ export default function Viewer({
           i: Math.floor(dims[0] / 2), j: Math.floor(dims[1] / 2), k: Math.floor(dims[2] / 2),
         });
         setCounts([0, 0, 0]);
-        setStatus(`${dims[0]} x ${dims[1]} x ${dims[2]}${note}`);
+        // The dimensions are on the info bar already; the status is the news.
+        setStatus(note ? note.replace(/^ · /, "").replace(/^./, (c) => c.toUpperCase()) : "No saved annotation yet");
         setDirty(false);
       } catch (e) {
         if (!cancelled) setStatus(e instanceof Error ? e.message : "failed to load");
@@ -819,15 +827,17 @@ export default function Viewer({
     // Live pencil trace on the plane being drawn in: the area that will be
     // filled on release, and a solid edge, as in the 2D painter.
     if (pencilPlane.current === p && outline.current.length > 1) {
-      const color = erasing ? "#ef4444" : SEGMENTS.find((x) => x.value === seg)!.color;
+      // Erasing shows as a white outline over a darkened area: what will be
+      // removed, never mistakable for an edema (red) outline.
+      const color = erasing ? "#ffffff" : SEGMENTS.find((x) => x.value === seg)!.color;
       ctx.save();
       ctx.beginPath();
       const [x0, y0] = outline.current[0];
       ctx.moveTo(x0, h - 1 - y0);
       for (const [x, y] of outline.current.slice(1)) ctx.lineTo(x, h - 1 - y);
       ctx.closePath();
-      ctx.globalAlpha = 0.22;
-      ctx.fillStyle = color;
+      ctx.globalAlpha = erasing ? 0.4 : 0.22;
+      ctx.fillStyle = erasing ? "#000000" : color;
       ctx.fill();
       ctx.globalAlpha = 1;
       ctx.strokeStyle = color;
@@ -1550,17 +1560,20 @@ export default function Viewer({
         return;
       }
       if (mod) return;
-      if (e.key === "1") { setSeg(1); setErasing(false); }
-      else if (e.key === "2") { setSeg(2); setErasing(false); }
-      else if (e.key === "3") { setSeg(3); setErasing(false); }
-      else if (e.key === "4" || e.key.toLowerCase() === "b") { setTool("brush"); setErasing(false); }
-      else if (e.key === "5" || e.key.toLowerCase() === "p") { setTool("pencil"); setErasing(false); }
-      else if (e.key === "6" || e.key.toLowerCase() === "h") { setTool("pan"); }
-      else if (e.key === "7") { setTool("torch"); setErasing(false); }
+      if (e.key === "1") { setSeg(1); drawWithLabel(); }
+      else if (e.key === "2") { setSeg(2); drawWithLabel(); }
+      else if (e.key === "3") { setSeg(3); drawWithLabel(); }
+      else if (e.key === "4" || e.key.toLowerCase() === "b") { pickTool("brush"); }
+      else if (e.key === "5" || e.key.toLowerCase() === "p") { pickTool("pencil"); }
+      else if (e.key === "6" || e.key.toLowerCase() === "h") { pickTool("pan"); }
+      else if (e.key === "7") { pickTool("torch"); }
       else if (e.key.toLowerCase() === "t" && !e.ctrlKey && !e.metaKey && !e.altKey) { setTorchHeld(true); }
-      else if (e.key === "0" || e.key.toLowerCase() === "e") setErasing((v) => !v);
+      else if (e.key === "0" || e.key.toLowerCase() === "e") toggleEraser();
       else if (e.key.toLowerCase() === "v") cycleViewRef.current();
       else if (e.key.toLowerCase() === "l") setLocked((v) => !v);
+      else if (e.key === "Escape" && showShortcutsRef.current) {
+        setShowShortcuts(false);
+      }
       else if (e.key === "Escape" && expandedRef.current && !painting.current) {
         setExpanded(null);
       }
@@ -1679,7 +1692,7 @@ export default function Viewer({
       />
       {/* 3D Toolbar - Compact Bar vs Full Toolbar */}
       {toolbarCollapsed ? (
-        <div className="flex items-center justify-between gap-2 rounded-lg border border-border bg-card p-2 overflow-x-auto py-1.5">
+        <div className="flex items-center justify-between gap-2 rounded-lg border border-border bg-card p-2 overflow-x-auto py-1.5 [&_button]:whitespace-nowrap [&_label]:whitespace-nowrap">
           <div className="flex items-center gap-1.5 shrink-0">
             {canAnnotate && (
               <>
@@ -1688,10 +1701,10 @@ export default function Viewer({
                   {SEGMENTS.map((s, i) => (
                     <button
                       key={s.value}
-                      onClick={() => { setSeg(s.value); setErasing(false); }}
+                      onClick={() => { setSeg(s.value); drawWithLabel(); }}
                       title={`${s.label} (Key ${i + 1}) - ${counts[s.value - 1].toLocaleString()} voxels`}
                       className={`p-1 rounded transition cursor-pointer ${
-                        seg === s.value && !erasing ? "bg-primary/20 ring-1 ring-primary" : "hover:bg-muted"
+                        seg === s.value && !erasing && drawing ? "bg-primary/20 ring-1 ring-primary" : "hover:bg-muted"
                       }`}
                     >
                       <span className="block h-3 w-3 rounded-full" style={{ backgroundColor: s.color }} />
@@ -1714,20 +1727,20 @@ export default function Viewer({
               <>
                 <button
                   type="button"
-                  onClick={() => { setTool("brush"); setErasing(false); }}
+                  onClick={() => { pickTool("brush"); }}
                   title="Brush mode (Key 4 or B)"
                   className={`p-1.5 rounded transition border cursor-pointer ${
-                    tool === "brush" && !erasing ? "bg-primary text-primary-foreground border-primary font-medium" : "border-border bg-background text-muted-foreground hover:text-foreground"
+                    tool === "brush" ? "bg-primary text-primary-foreground border-primary font-medium" : "border-border bg-background text-muted-foreground hover:text-foreground"
                   }`}
                 >
                   <Paintbrush className="h-3.5 w-3.5" />
                 </button>
                 <button
                   type="button"
-                  onClick={() => { setTool("pencil"); setErasing(false); }}
+                  onClick={() => { pickTool("pencil"); }}
                   title="Pencil mode (Key 5 or P)"
                   className={`p-1.5 rounded transition border cursor-pointer ${
-                    tool === "pencil" && !erasing ? "bg-primary text-primary-foreground border-primary font-medium" : "border-border bg-background text-muted-foreground hover:text-foreground"
+                    tool === "pencil" ? "bg-primary text-primary-foreground border-primary font-medium" : "border-border bg-background text-muted-foreground hover:text-foreground"
                   }`}
                 >
                   <Lasso className="h-3.5 w-3.5" />
@@ -1738,7 +1751,7 @@ export default function Viewer({
               <>
                 <button
                   type="button"
-                  onClick={() => setTool("pan")}
+                  onClick={() => pickTool("pan")}
                   title="Hand mode (Key 6 or H)"
                   className={`p-1.5 rounded transition border cursor-pointer ${
                     tool === "pan" ? "bg-primary text-primary-foreground border-primary font-medium" : "border-border bg-background text-muted-foreground hover:text-foreground"
@@ -1750,10 +1763,10 @@ export default function Viewer({
             )}
             <button
               type="button"
-              onClick={() => { setTool("torch"); setErasing(false); }}
+              onClick={() => { pickTool("torch"); }}
               title="Torch — see scan under annotation (Key 7, or hold T)"
               className={`p-1.5 rounded transition border cursor-pointer ${
-                tool === "torch" && !erasing ? "bg-primary text-primary-foreground border-primary font-medium" : "border-border bg-background text-muted-foreground hover:text-foreground"
+                tool === "torch" ? "bg-primary text-primary-foreground border-primary font-medium" : "border-border bg-background text-muted-foreground hover:text-foreground"
               }`}
             >
               <Flashlight className="h-3.5 w-3.5" />
@@ -1772,7 +1785,7 @@ export default function Viewer({
               <>
                 <button
                   type="button"
-                  onClick={() => setErasing((e) => !e)}
+                  onClick={() => toggleEraser()}
                   title="Eraser (Key 0 or E)"
                   className={`p-1.5 rounded transition border cursor-pointer ${
                     erasing ? "border-destructive bg-destructive/10 text-destructive ring-1 ring-destructive" : "border-border bg-background text-muted-foreground hover:text-foreground"
@@ -1899,7 +1912,7 @@ export default function Viewer({
           </div>
         </div>
       ) : (
-        <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-border bg-card p-2.5">
+        <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-border bg-card p-2.5 [&_button]:whitespace-nowrap [&_label]:whitespace-nowrap">
           <div className="flex flex-wrap items-center gap-2">
             {canAnnotate && (
               <>
@@ -1909,10 +1922,10 @@ export default function Viewer({
                 {SEGMENTS.map((s, i) => (
                   <button
                     key={s.value}
-                    onClick={() => { setSeg(s.value); setErasing(false); }}
+                    onClick={() => { setSeg(s.value); drawWithLabel(); }}
                     title={`${s.label} (Key ${i + 1})`}
                     className={`inline-flex items-center gap-1.5 rounded-md px-2.5 py-1 text-xs font-medium border transition cursor-pointer ${
-                      seg === s.value && !erasing
+                      seg === s.value && !erasing && drawing
                         ? `${s.badge} ring-1 ring-primary`
                         : "border-border bg-background text-muted-foreground hover:text-foreground"
                     }`}
@@ -1942,7 +1955,7 @@ export default function Viewer({
                 <>
                   <button
                     type="button"
-                    onClick={() => { setTool("brush"); setErasing(false); }}
+                    onClick={() => { pickTool("brush"); }}
                     title="Brush mode (Key 4 or B)"
                     className={`inline-flex items-center gap-1.5 px-2.5 py-1 text-xs transition cursor-pointer ${
                       tool === "brush" ? "bg-primary text-primary-foreground font-medium" : "bg-background text-muted-foreground hover:text-foreground"
@@ -1952,7 +1965,7 @@ export default function Viewer({
                   </button>
                   <button
                     type="button"
-                    onClick={() => { setTool("pencil"); setErasing(false); }}
+                    onClick={() => { pickTool("pencil"); }}
                     title="Pencil mode — trace an outline, the inside auto-fills (Key 5 or P)"
                     className={`inline-flex items-center gap-1.5 border-l border-border px-2.5 py-1 text-xs transition cursor-pointer ${
                       tool === "pencil" ? "bg-primary text-primary-foreground font-medium" : "bg-background text-muted-foreground hover:text-foreground"
@@ -1966,7 +1979,7 @@ export default function Viewer({
                 <>
                   <button
                     type="button"
-                    onClick={() => setTool("pan")}
+                    onClick={() => pickTool("pan")}
                     title="Hand mode — drag to move the view (Key 6 or H)"
                     className={`inline-flex items-center gap-1.5 border-l border-border px-2.5 py-1 text-xs transition cursor-pointer ${
                       tool === "pan" ? "bg-primary text-primary-foreground font-medium" : "bg-background text-muted-foreground hover:text-foreground"
@@ -1978,7 +1991,7 @@ export default function Viewer({
               )}
               <button
                 type="button"
-                onClick={() => { setTool("torch"); setErasing(false); }}
+                onClick={() => { pickTool("torch"); }}
                 title="Torch — see the scan under the annotation (Key 7, or hold T)"
                 className={`inline-flex items-center gap-1.5 border-l border-border px-2.5 py-1 text-xs transition cursor-pointer ${
                   tool === "torch" ? "bg-primary text-primary-foreground font-medium" : "bg-background text-muted-foreground hover:text-foreground"
@@ -1991,7 +2004,7 @@ export default function Viewer({
             {canAnnotate && (
               <>
                 <button
-                  onClick={() => setErasing((e) => !e)}
+                  onClick={() => toggleEraser()}
                   title="Toggle eraser mode (Key 0 or E)"
                   className={`inline-flex items-center gap-1.5 rounded-md px-2.5 py-1 text-xs font-medium border transition cursor-pointer ${
                     erasing
@@ -2042,7 +2055,7 @@ export default function Viewer({
             </button>
           </div>
 
-          <div className="flex items-center gap-3">
+          <div className="flex flex-wrap items-center justify-end gap-2">
             {canAnnotate && tool === "brush" && (
               <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
                 <Paintbrush className="h-3.5 w-3.5" />
@@ -2284,7 +2297,52 @@ export default function Viewer({
         </div>
       )}
 
-      {/* Four-Up: three orthogonal views plus an info panel, as in Slicer */}
+      {/* Info bar: which scan, its geometry, and the latest load/save message. */}
+      <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-0.5 px-1 text-xs text-muted-foreground">
+        <div className="flex items-center gap-3">
+          <span className="font-mono font-medium text-foreground">{caseId}</span>
+          <span className="tabular-nums">
+            {vol.dims.join(" × ")} &middot; {vol.spacing.map((s) => s.toFixed(2)).join(" × ")} mm
+          </span>
+        </div>
+        <div className="flex min-w-0 items-center gap-3">
+          <span className="min-w-0 truncate">{status}</span>
+          <div className="relative shrink-0">
+            <button
+              type="button"
+              onClick={() => setShowShortcuts((v) => !v)}
+              className={`inline-flex items-center gap-1 rounded border px-2 py-0.5 transition ${
+                showShortcuts ? "border-primary text-foreground" : "border-border hover:text-foreground"
+              }`}
+            >
+              <Keyboard className="h-3 w-3" /> Shortcuts
+            </button>
+            {showShortcuts && (
+              <div className="absolute right-0 top-full z-30 mt-1 w-[34rem] max-w-[90vw] rounded-lg border border-border bg-card p-3 text-xs shadow-xl">
+                <div className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-0.5 text-muted-foreground sm:grid-cols-[auto_1fr_auto_1fr]">
+                  <kbd className="font-mono">Ctrl+Z / Ctrl+Y</kbd><span>Undo / redo</span>
+                  <kbd className="font-mono">Ctrl+S</kbd><span>Save</span>
+                  <kbd className="font-mono">1 2 3</kbd><span>Pick label (and draw)</span>
+                  <kbd className="font-mono">B P H 7</kbd><span>Brush / pencil / hand / torch</span>
+                  <kbd className="font-mono">E</kbd><span>Eraser on/off (brush or pencil)</span>
+                  <kbd className="font-mono">T (hold)</kbd><span>Peek under the labels</span>
+                  <kbd className="font-mono">[ ]</kbd><span>Brush or torch size</span>
+                  <kbd className="font-mono">V</kbd><span>Cycle which labels show</span>
+                  <kbd className="font-mono">&uarr;&darr;&larr;&rarr;</kbd><span>Step slice (hovered view)</span>
+                  <kbd className="font-mono">PgUp/PgDn</kbd><span>Step 10 slices</span>
+                  <kbd className="font-mono">Shift+click</kbd><span>Move crosshair</span>
+                  <kbd className="font-mono">L</kbd><span>Lock / link views</span>
+                  <kbd className="font-mono">Ctrl+wheel</kbd><span>Zoom the view (or pinch)</span>
+                  <kbd className="font-mono">Dbl-click title</kbd><span>Full view (Esc to go back)</span>
+                  <kbd className="font-mono">Esc</kbd><span>Discard an outline while tracing</span>
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
+
+      {/* Four-Up: three orthogonal views plus the 3D view, as in Slicer */}
       <div
         ref={gridRef}
         className={`grid gap-2 grid-cols-1 min-h-0 ${expanded ? "" : "md:grid-cols-2 lg:grid-rows-2"}`}
@@ -2455,7 +2513,7 @@ export default function Viewer({
         })}
 
         <div className={`${expanded && expanded !== "3d" ? "hidden" : "flex"} min-h-0 flex-col gap-2 overflow-y-auto`}>
-          <div className={`flex flex-col ${expanded === "3d" ? "min-h-[70vh] flex-1" : "min-h-[260px] flex-1"}`}>
+          <div className="flex min-h-[320px] flex-1 flex-col lg:min-h-0">
             <Render3D
               labels={labels}
               dims={vol.dims}
@@ -2469,33 +2527,9 @@ export default function Viewer({
             />
           </div>
           <SegmentMeasures counts={counts} spacing={vol.spacing} />
-
-          <div className="shrink-0 rounded-lg border border-border bg-card p-3 text-xs">
-            <div className="mb-2 flex items-baseline justify-between">
-              <span className="font-semibold">{caseId}</span>
-              <span className="tabular-nums text-muted-foreground">
-                {vol.dims.join(" x ")} &middot; {vol.spacing.map((s) => s.toFixed(2)).join(" x ")} mm
-              </span>
-            </div>
-            <div className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-0.5 text-muted-foreground">
-              <kbd className="font-mono">Ctrl+Z</kbd><span>Undo</span>
-              <kbd className="font-mono">Ctrl+Y</kbd><span>Redo</span>
-              <kbd className="font-mono">1 2 3</kbd><span>Pick segment</span>
-              <kbd className="font-mono">B P H</kbd><span>Brush / pencil / hand</span>
-              <kbd className="font-mono">Esc</kbd><span>Discard outline while tracing</span>
-              <kbd className="font-mono">E</kbd><span>Erase on/off</span>
-              <kbd className="font-mono">[ ]</kbd><span>Brush size</span>
-              <kbd className="font-mono">&uarr;&darr;&larr;&rarr;</kbd><span>Step slice (hovered view)</span>
-              <kbd className="font-mono">PgUp/PgDn</kbd><span>Step 10 slices</span>
-              <kbd className="font-mono">Shift+click</kbd><span>Move crosshair (always)</span>
-              <kbd className="font-mono">L</kbd><span>Lock / link views</span>
-              <kbd className="font-mono">Ctrl+wheel</kbd><span>Zoom the view (or pinch)</span>
-              <kbd className="font-mono">Dbl-click title</kbd><span>Full view; Esc to go back</span>
-            </div>
-            <p className="mt-2 text-muted-foreground">{status}</p>
-          </div>
         </div>
       </div>
+
 
       {flagModalOpen && (
         <FlagDialog
