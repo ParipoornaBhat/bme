@@ -57,6 +57,7 @@ import { MaskSync, type MaskSyncIO } from "~/lib/mask-sync";
 import { useGuestUserId, useHostSession, useSessionNotices } from "~/lib/useHostSession";
 import { canPaint } from "~/lib/paint-rules";
 import { wheelZoomFactor } from "~/lib/wheel-zoom";
+import { pencilCursor } from "~/lib/cursors";
 import { isInTorch, type TorchState } from "~/lib/torch";
 import type { FlagRecord } from "~/lib/flag-store";
 import FlagDialog from "./FlagDialog";
@@ -2348,6 +2349,9 @@ export default function Viewer({
                   aspectRatio: `${g.mmW} / ${g.mmH}`,
                   maxWidth: "100%", maxHeight: "100%",
                   margin: "0 auto", display: "block",
+                  ...(tool === "pencil"
+                    ? { cursor: pencilCursor(erasing ? "#ffffff" : SEGMENTS.find((x) => x.value === seg)!.color) }
+                    : {}),
                 }}
                 onMouseDown={(e) => {
                   if (tool === "torch") return; // Pitfall-1: mouse down with torch tool does nothing

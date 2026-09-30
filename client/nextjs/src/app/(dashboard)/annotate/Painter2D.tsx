@@ -56,6 +56,7 @@ import {
 } from "~/lib/useOverlayView";
 import { canPaint } from "~/lib/paint-rules";
 import FlagDialog from "./FlagDialog";
+import { pencilCursor } from "~/lib/cursors";
 
 export type Case2DSlice = {
   caseId: string;
@@ -2442,7 +2443,12 @@ export default function Painter2D({
               // re-applies it on the render that follows setImgDim, and
               // assigning canvas.width wipes the canvas - so the mask is
               // cleared a second time, after it has already been drawn.
-              style={{ width: "100%", height: "100%", touchAction: "none", opacity: opacity / 100 }}
+              style={{
+                width: "100%", height: "100%", touchAction: "none", opacity: opacity / 100,
+                ...(tool === "pencil"
+                  ? { cursor: pencilCursor(isErasing ? "#ffffff" : LABELS.find((l) => l.id === activeLabel)?.stroke ?? "#ffffff") }
+                  : {}),
+              }}
               onMouseDown={handleMouseDown}
               onMouseMove={handleMouseMove}
               onMouseUp={handleMouseUp}
