@@ -287,8 +287,8 @@ function SegmentMeasures({
                   {r.label}
                 </td>
                 <td className="py-0.5 text-right">{r.n.toLocaleString()}</td>
-                <td className="py-0.5 text-right">{r.mm3.toFixed(1)}</td>
-                <td className="py-0.5 text-right">{r.cm3.toFixed(2)}</td>
+                <td className="py-0.5 text-right">{r.mm3.toFixed(4)}</td>
+                <td className="py-0.5 text-right">{r.cm3.toFixed(4)}</td>
               </tr>
             ))}
           </tbody>

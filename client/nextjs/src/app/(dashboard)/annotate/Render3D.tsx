@@ -279,7 +279,7 @@ export default function Render3D({
                   >
                     <span className="h-2 w-2 rounded-sm" style={{ background: def.color }} />
                     <span className="tabular-nums">
-                      {def.label}: {((counts[g.value] ?? 0) * voxel).toFixed(0)} mm&sup3;
+                      {def.label}: {((counts[g.value] ?? 0) * voxel).toFixed(4)} mm&sup3;
                     </span>
                   </span>
                 );
@@ -295,7 +295,7 @@ export default function Render3D({
                   className={`inline-flex items-center gap-1 ${off ? "opacity-35" : ""}`}>
                   <span className="h-2 w-2 rounded-sm" style={{ background: def.color }} />
                   <span className="tabular-nums">
-                    {def.label}: {((counts[g.value] ?? 0) * voxel).toFixed(0)} mm&sup3;
+                    {def.label}: {((counts[g.value] ?? 0) * voxel).toFixed(4)} mm&sup3;
                   </span>
                 </button>
               );
