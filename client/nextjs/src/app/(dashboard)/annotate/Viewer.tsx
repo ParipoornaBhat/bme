@@ -60,6 +60,7 @@ import { canPaint } from "~/lib/paint-rules";
 import { wheelZoomFactor } from "~/lib/wheel-zoom";
 import { pencilCursor } from "~/lib/cursors";
 import { usePaintTools } from "~/lib/usePaintTools";
+import { edgePanStep, useAutoPanSetting, useSpaceHeld } from "~/lib/view-pan";
 import { isInTorch, type TorchState } from "~/lib/torch";
 import type { FlagRecord } from "~/lib/flag-store";
 import FlagDialog from "./FlagDialog";
@@ -335,6 +336,8 @@ export default function Viewer({
   const [brush, setBrush] = useState(6);
   const { tool, erasing, drawing, pickTool, toggleEraser, drawWithLabel } =
     usePaintTools(isCollaborator ? "pan" : "brush");
+  const { spaceHeld, spaceHeldRef } = useSpaceHeld();
+  const { autoPan, setAutoPan } = useAutoPanSetting();
   const [torchSize, setTorchSize] = useState(48);
   const [torchHeld, setTorchHeld] = useState(false);
   const torchActive = tool === "torch" || torchHeld;
@@ -1172,15 +1175,21 @@ export default function Viewer({
   };
 
   // ---- painting --------------------------------------------------------
-  const toVoxel = useCallback((p: Plane, ev: React.MouseEvent<HTMLCanvasElement>) => {
-    if (!vol) return null;
-    const rect = ev.currentTarget.getBoundingClientRect();
+  /** The in-plane voxel under a screen point, or null off the image. */
+  const toVoxelAt = useCallback((p: Plane, clientX: number, clientY: number) => {
+    const cv = canvases.current[p];
+    if (!vol || !cv) return null;
+    const rect = cv.getBoundingClientRect();
     const { w, h } = planeGeom(p, vol);
-    const a = Math.floor(((ev.clientX - rect.left) / rect.width) * w);
-    const b = h - 1 - Math.floor(((ev.clientY - rect.top) / rect.height) * h);
+    const a = Math.floor(((clientX - rect.left) / rect.width) * w);
+    const b = h - 1 - Math.floor(((clientY - rect.top) / rect.height) * h);
     if (a < 0 || b < 0 || a >= w || b >= h) return null;
     return { a, b };
   }, [vol, planeGeom]);
+  const toVoxel = useCallback(
+    (p: Plane, ev: React.MouseEvent<HTMLCanvasElement>) => toVoxelAt(p, ev.clientX, ev.clientY),
+    [toVoxelAt],
+  );
 
   /** Move the crosshair so the other two views follow this click. */
   const moveCursor = useCallback((p: Plane, a: number, b: number) => {
@@ -1207,11 +1216,8 @@ export default function Viewer({
   }, [vol, labels, cursor, planeGeom, sliceOf, sampleAt]);
   const strokeHasBone = useRef(false);
 
-  const paintAt = useCallback((p: Plane, ev: React.MouseEvent<HTMLCanvasElement>) => {
+  const paintAt = useCallback((p: Plane, hit: { a: number; b: number }) => {
     if (!vol || !labels) return;
-    const hit = toVoxel(p, ev);
-    if (!hit) return;
-    const { dims } = vol;
     const { w, h } = planeGeom(p, vol);
     const s = sliceOf(p, vol, cursor);
     const r = brush;
@@ -1231,7 +1237,16 @@ export default function Viewer({
     // here changes what the other two views should be showing.
     drawAll();
   }, [vol, labels, cursor, brush, erasing, seg, maskInside, protectLesion,
-      planeGeom, sampleAt, sliceOf, toVoxel, drawAll, markEdited]);
+      planeGeom, sampleAt, sliceOf, drawAll, markEdited]);
+
+  /** Add a point to the pencil outline being traced, skipping repeats. */
+  const traceTo = useCallback((hit: { a: number; b: number }) => {
+    const last = outline.current[outline.current.length - 1];
+    if (!last || last[0] !== hit.a || last[1] !== hit.b) {
+      outline.current.push([hit.a, hit.b]);
+      setOutlineTick((n) => n + 1);
+    }
+  }, []);
 
   /**
    * Pencil: close the traced outline and fill everything inside it.
@@ -1280,6 +1295,83 @@ export default function Viewer({
     scheduleAutoSaveRef.current();
   }, [vol, labels, cursor, erasing, maskInside, protectLesion, seg, planeGeom, sliceOf, sampleAt, drawAll,
       pushUndo, sliceHasBone, recount, markEdited]);
+
+  // ---- strokes ---------------------------------------------------------
+  // A stroke ends when the mouse button is released anywhere, not when the
+  // pointer leaves the image: slipping off the edge mid-trace, or the view
+  // moving under the pointer, must not fill a half-drawn outline.
+  const strokePlane = useRef<Plane | null>(null);
+  const [stroking, setStroking] = useState(false);
+  const lastClient = useRef<{ plane: Plane; x: number; y: number } | null>(null);
+  const areaRefs = useRef<Record<Plane, HTMLDivElement | null>>({ axial: null, coronal: null, sagittal: null });
+
+  const beginStroke = (p: Plane) => {
+    strokePlane.current = p;
+    painting.current = true;
+    setStroking(true);
+  };
+  const endStroke = () => {
+    if (!painting.current) return;
+    const wasTracing = tool === "pencil";
+    painting.current = false;
+    strokePlane.current = null;
+    setStroking(false);
+    if (wasTracing) {
+      commitOutline();
+    } else {
+      drawAll();
+      // Labels are edited in place, so counts are refreshed when a stroke
+      // ends rather than on every mouse move.
+      recount();
+      scheduleAutoSaveRef.current();
+    }
+  };
+  const endStrokeRef = useRef(endStroke);
+  endStrokeRef.current = endStroke;
+  useEffect(() => {
+    const up = () => endStrokeRef.current();
+    window.addEventListener("mouseup", up);
+    return () => window.removeEventListener("mouseup", up);
+  }, []);
+
+  /** Keep drawing under a pointer that is still while the view moves under it. */
+  const followPointer = (p: Plane, x: number, y: number) => {
+    if (!painting.current || strokePlane.current !== p) return;
+    const hit = toVoxelAt(p, x, y);
+    if (!hit) return;
+    if (tool === "pencil") traceTo(hit);
+    else if (tool === "brush") paintAt(p, hit);
+  };
+  const followPointerRef = useRef(followPointer);
+  followPointerRef.current = followPointer;
+
+  // Auto-pan: while drawing, a pointer near the edge of a view slides the
+  // image towards whatever is out of sight, and the stroke carries on.
+  useEffect(() => {
+    if (!stroking || !autoPan) return;
+    let raf = 0;
+    let prev = performance.now();
+    const tick = (now: number) => {
+      const dt = now - prev;
+      prev = now;
+      const ptr = lastClient.current;
+      const p = strokePlane.current;
+      if (ptr && p && ptr.plane === p && painting.current && !spaceHeldRef.current && canZoomPanRef.current) {
+        const area = areaRefs.current[p];
+        const cv = canvases.current[p];
+        if (area && cv) {
+          const step = edgePanStep(ptr, area.getBoundingClientRect(), cv.getBoundingClientRect(), dt);
+          if (step) {
+            setPan((cur) => ({ ...cur, [p]: { x: cur[p].x + step.dx, y: cur[p].y + step.dy } }));
+            followPointerRef.current(p, ptr.x, ptr.y);
+          }
+        }
+      }
+      raf = requestAnimationFrame(tick);
+    };
+    raf = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(raf);
+  }, [stroking, autoPan, spaceHeldRef]);
 
   const clearMask = useCallback(() => {
     if (!labels) return;
@@ -1579,6 +1671,7 @@ export default function Viewer({
       }
       else if (e.key === "Escape") {
         outline.current = []; pencilPlane.current = null; painting.current = false;
+        strokePlane.current = null; setStroking(false);
         setOutlineTick((n) => n + 1); drawAll();
       }
       else if (e.key === "[") {
@@ -2039,6 +2132,19 @@ export default function Viewer({
                   />
                   <span>Protect lesion</span>
                 </label>
+
+                <label
+                  className="flex items-center gap-1.5 text-xs text-muted-foreground cursor-pointer select-none ml-1"
+                  title="While drawing in a zoomed view, slide the image when the pointer nears an edge"
+                >
+                  <input
+                    type="checkbox"
+                    checked={autoPan}
+                    onChange={(e) => setAutoPan(e.target.checked)}
+                    className="rounded border-border accent-primary h-3.5 w-3.5"
+                  />
+                  <span>Auto-pan</span>
+                </label>
               </>
             )}
 
@@ -2333,6 +2439,7 @@ export default function Viewer({
                   <kbd className="font-mono">Shift+click</kbd><span>Move crosshair</span>
                   <kbd className="font-mono">L</kbd><span>Lock / link views</span>
                   <kbd className="font-mono">Ctrl+wheel</kbd><span>Zoom the view (or pinch)</span>
+                  <kbd className="font-mono">Space (hold)</kbd><span>Pan with the mouse, even mid-trace</span>
                   <kbd className="font-mono">Dbl-click title</kbd><span>Full view (Esc to go back)</span>
                   <kbd className="font-mono">Esc</kbd><span>Discard an outline while tracing</span>
                 </div>
@@ -2356,6 +2463,16 @@ export default function Viewer({
             <div key={p}
               ref={(el) => { viewRefs.current[p] = el; }}
               onMouseEnter={() => setActivePlane(p)}
+              onMouseMove={(e) => {
+                // Hold Space and move to pan this view - mid-stroke too.
+                const last = lastClient.current;
+                lastClient.current = { plane: p, x: e.clientX, y: e.clientY };
+                if (spaceHeldRef.current && canZoomPan && last?.plane === p) {
+                  const dx = e.clientX - last.x;
+                  const dy = e.clientY - last.y;
+                  if (dx || dy) setPan((cur) => ({ ...cur, [p]: { x: cur[p].x + dx, y: cur[p].y + dy } }));
+                }
+              }}
               className={`${expanded && expanded !== p ? "hidden" : "flex"} min-h-0 flex-col overflow-hidden rounded-lg border-2 bg-black p-1.5`}
               style={{
                 borderColor: PLANE_COLOR[p],
@@ -2392,13 +2509,14 @@ export default function Viewer({
                   </button>
                 </span>
               </div>
-              <div className="flex min-h-0 flex-1 items-center justify-center overflow-hidden">
+              <div ref={(el) => { areaRefs.current[p] = el; }}
+                className="flex min-h-0 flex-1 items-center justify-center overflow-hidden">
               <div className="flex h-full w-full items-center justify-center"
                 style={{ transform: `translate(${pan[p].x}px, ${pan[p].y}px) scale(${zoom[p]})`, transformOrigin: "center" }}>
               <canvas
                 ref={(el) => { canvases.current[p] = el; }}
                 className={`${
-                  tool === "pan" ? (panning === p ? "cursor-grabbing" : "cursor-grab")
+                  tool === "pan" || (spaceHeld && canZoomPan) ? (panning === p ? "cursor-grabbing" : "cursor-grab")
                     : tool === "torch" ? "cursor-none" : "cursor-crosshair"
                 } rounded`}
                 style={{
@@ -2407,12 +2525,13 @@ export default function Viewer({
                   aspectRatio: `${g.mmW} / ${g.mmH}`,
                   maxWidth: "100%", maxHeight: "100%",
                   margin: "0 auto", display: "block",
-                  ...(tool === "pencil"
+                  ...(tool === "pencil" && !(spaceHeld && canZoomPan)
                     ? { cursor: pencilCursor(erasing ? "#ffffff" : SEGMENTS.find((x) => x.value === seg)!.color) }
                     : {}),
                 }}
                 onMouseDown={(e) => {
                   if (tool === "torch") return; // Pitfall-1: mouse down with torch tool does nothing
+                  if (spaceHeldRef.current) return; // Space is panning, not drawing
                   if (tool === "pan") {
                     if (e.button === 0 && canZoomPan) startPan(p, e);
                     return;
@@ -2427,13 +2546,13 @@ export default function Viewer({
                   if (tool === "pencil") {
                     pencilPlane.current = p;
                     outline.current = [[hit.a, hit.b]];
-                    painting.current = true;
+                    beginStroke(p);
                     setOutlineTick((n) => n + 1);
                   } else {
                     pushUndo();
                     strokeHasBone.current = sliceHasBone(p);
-                    painting.current = true;
-                    paintAt(p, e);
+                    beginStroke(p);
+                    paintAt(p, hit);
                     if (!locked && canMoveSlices) moveCursor(p, hit.a, hit.b);
                   }
                 }}
@@ -2455,40 +2574,17 @@ export default function Viewer({
                       scheduleTorchRedraw(p);
                     }
                   }
-                  if (!painting.current) return;
-                  if (tool === "pencil") {
-                    if (!hit) return;
-                    const last = outline.current[outline.current.length - 1];
-                    // Skip duplicate points so the polygon stays cheap to fill.
-                    if (!last || last[0] !== hit.a || last[1] !== hit.b) {
-                      outline.current.push([hit.a, hit.b]);
-                      setOutlineTick((n) => n + 1);
-                    }
-                  } else if (tool === "brush") {
-                    paintAt(p, e);
-                  }
-                }}
-                onMouseUp={() => {
-                  // Pencil fills the traced outline on release, as in 2D.
-                  const wasTracing = painting.current && tool === "pencil";
-                  const wasBrushing = painting.current && tool === "brush";
-                  painting.current = false;
-                  if (wasTracing) commitOutline();
-                  else drawAll();
-                  // Labels are edited in place, so counts are refreshed when a
-                  // stroke ends rather than on every mouse move.
-                  if (wasBrushing) {
-                    recount();
-                    scheduleAutoSaveRef.current();
-                  }
+                  if (!painting.current || spaceHeldRef.current) return;
+                  // The button was released outside the window, where no
+                  // mouseup reached us: end the stroke now.
+                  if (e.buttons === 0) { endStroke(); return; }
+                  if (!hit || strokePlane.current !== p) return;
+                  if (tool === "pencil") traceTo(hit);
+                  else if (tool === "brush") paintAt(p, hit);
                 }}
                 onMouseLeave={() => {
-                  if (painting.current && tool === "pencil") commitOutline();
-                  else if (painting.current) {
-                    recount();
-                    scheduleAutoSaveRef.current();
-                  }
-                  painting.current = false;
+                  // Leaving the image does not end a stroke; releasing the
+                  // mouse button does, wherever it happens.
                   if (torchRef.current?.plane === p) {
                     torchRef.current = null;
                     draw(p);

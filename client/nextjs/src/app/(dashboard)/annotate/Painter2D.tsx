@@ -58,6 +58,7 @@ import { canPaint } from "~/lib/paint-rules";
 import FlagDialog from "./FlagDialog";
 import { pencilCursor } from "~/lib/cursors";
 import { usePaintTools } from "~/lib/usePaintTools";
+import { edgePanStep, useAutoPanSetting, useSpaceHeld } from "~/lib/view-pan";
 
 export type Case2DSlice = {
   caseId: string;
@@ -98,6 +99,11 @@ export default function Painter2D({
   const [query, setQuery] = useState("");
   const { tool, erasing: isErasing, drawing, pickTool, toggleEraser, drawWithLabel } =
     usePaintTools(isCollaborator ? "pan" : "brush");
+  const { spaceHeld, spaceHeldRef } = useSpaceHeld();
+  const { autoPan, setAutoPan } = useAutoPanSetting();
+  // A stroke or trace in progress, as state so auto-pan can start and stop.
+  const [stroking, setStroking] = useState(false);
+  const lastClientRef = useRef<{ x: number; y: number } | null>(null);
   // Torch: hides the annotation inside a circle around the cursor so the scan
   // underneath can be seen. Purely visual - it never touches the mask data, so
   // nothing is erased and collaborators are unaffected. Selected as a tool, or
@@ -922,6 +928,7 @@ export default function Painter2D({
   const finishLockedDraw = useCallback(() => {
     if (!isLockedDrawRef.current) return;
     isLockedDrawRef.current = false;
+    setStroking(false);
     setIsLockedDraw(false);
     isDrawingRef.current = false;
     lastPosRef.current = null;
@@ -937,6 +944,7 @@ export default function Painter2D({
     (pos: { x: number; y: number }) => {
       if (tool === "pan") return;
       isLockedDrawRef.current = true;
+      setStroking(true);
       setIsLockedDraw(true);
       isDrawingRef.current = true;
 
@@ -1005,15 +1013,20 @@ export default function Painter2D({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [torchActive, torchSize]);
 
-  const getCanvasCoords = (
-    e: React.MouseEvent<HTMLCanvasElement> | React.TouchEvent<HTMLCanvasElement> | Touch,
-  ) => {
+  /** Image pixel under a screen point, clamped to the image. */
+  const coordsAt = (clientX: number, clientY: number) => {
     const canvas = maskCanvasRef.current;
     if (!canvas) return { x: 0, y: 0 };
     const rect = canvas.getBoundingClientRect();
-    const scaleX = canvas.width / rect.width;
-    const scaleY = canvas.height / rect.height;
+    return {
+      x: Math.max(0, Math.min(canvas.width - 1, Math.round((clientX - rect.left) * (canvas.width / rect.width)))),
+      y: Math.max(0, Math.min(canvas.height - 1, Math.round((clientY - rect.top) * (canvas.height / rect.height)))),
+    };
+  };
 
+  const getCanvasCoords = (
+    e: React.MouseEvent<HTMLCanvasElement> | React.TouchEvent<HTMLCanvasElement> | Touch,
+  ) => {
     let clientX = 0;
     let clientY = 0;
     if ("touches" in e) {
@@ -1028,11 +1041,7 @@ export default function Painter2D({
       clientX = e.clientX;
       clientY = e.clientY;
     }
-
-    return {
-      x: Math.max(0, Math.min(canvas.width - 1, Math.round((clientX - rect.left) * scaleX))),
-      y: Math.max(0, Math.min(canvas.height - 1, Math.round((clientY - rect.top) * scaleY))),
-    };
+    return coordsAt(clientX, clientY);
   };
 
   const handleDoubleClick = (e: React.MouseEvent<HTMLCanvasElement>) => {
@@ -1174,6 +1183,7 @@ export default function Painter2D({
   const handleMouseDown = (e: React.MouseEvent<HTMLCanvasElement>) => {
     if (e.button !== 0) return;
     if (tool === "torch") return;
+    if (spaceHeldRef.current) return; // Space is panning, not drawing
 
     if (tool === "pan") {
       if (isCollaborator && !permissions.ZOOM_PAN) return;
@@ -1204,6 +1214,7 @@ export default function Painter2D({
 
     if (tool === "pencil") {
       isDrawingRef.current = true;
+      setStroking(true);
       outlineRef.current = [[pos.x, pos.y]];
       drawOutlineOverlay();
       return;
@@ -1211,8 +1222,32 @@ export default function Painter2D({
 
     pushUndo();
     isDrawingRef.current = true;
+    setStroking(true);
     lastPosRef.current = pos;
     paintAt(pos.x, pos.y);
+    renderMaskToCanvas();
+  };
+
+  /** Continue the pencil outline or the brush stroke to `pos`. */
+  const strokeTo = (pos: { x: number; y: number }) => {
+    if (tool === "pencil") {
+      const pts = outlineRef.current;
+      const last = pts[pts.length - 1];
+      if (!last || Math.hypot(pos.x - last[0], pos.y - last[1]) >= 2) {
+        pts.push([pos.x, pos.y]);
+        drawOutlineOverlay();
+      }
+      return;
+    }
+    const last = lastPosRef.current || pos;
+    // Line interpolation between mouse move steps
+    const dist = Math.hypot(pos.x - last.x, pos.y - last.y);
+    const steps = Math.max(1, Math.ceil(dist / 2));
+    for (let i = 0; i <= steps; i++) {
+      const t = i / steps;
+      paintAt(Math.round(last.x + (pos.x - last.x) * t), Math.round(last.y + (pos.y - last.y) * t));
+    }
+    lastPosRef.current = pos;
     renderMaskToCanvas();
   };
 
@@ -1239,31 +1274,14 @@ export default function Painter2D({
 
     if (isCollaborator && !permissions.ANNOTATE) return;
 
-    if (!isDrawingRef.current) return;
-    const pos = getCanvasCoords(e);
-
-    if (tool === "pencil") {
-      const pts = outlineRef.current;
-      const last = pts[pts.length - 1];
-      if (!last || Math.hypot(pos.x - last[0], pos.y - last[1]) >= 2) {
-        pts.push([pos.x, pos.y]);
-        drawOutlineOverlay();
-      }
+    if (!isDrawingRef.current || spaceHeldRef.current) return;
+    // The button was released outside the window, where no mouseup reached
+    // us: end the stroke now. A locked (double-tap) stroke has no button held.
+    if (e.buttons === 0 && !isLockedDrawRef.current) {
+      handleMouseUp();
       return;
     }
-
-    const last = lastPosRef.current || pos;
-
-    // Line interpolation between mouse move steps
-    const dist = Math.hypot(pos.x - last.x, pos.y - last.y);
-    const steps = Math.max(1, Math.ceil(dist / 2));
-    for (let i = 0; i <= steps; i++) {
-      const t = i / steps;
-      paintAt(Math.round(last.x + (pos.x - last.x) * t), Math.round(last.y + (pos.y - last.y) * t));
-    }
-
-    lastPosRef.current = pos;
-    renderMaskToCanvas();
+    strokeTo(getCanvasCoords(e));
   };
 
   const handleMouseUp = () => {
@@ -1276,6 +1294,7 @@ export default function Painter2D({
     }
     if (!isDrawingRef.current) return;
     isDrawingRef.current = false;
+    setStroking(false);
     lastPosRef.current = null;
 
     if (tool === "pencil") {
@@ -1284,6 +1303,47 @@ export default function Painter2D({
       triggerAutoSaveIfNeeded();
     }
   };
+
+  // A stroke ends when the mouse button is released anywhere, not when the
+  // pointer leaves the image: slipping off the edge mid-trace, or the image
+  // moving under the pointer, must not fill a half-drawn outline.
+  const handleMouseUpRef = useRef(handleMouseUp);
+  handleMouseUpRef.current = handleMouseUp;
+  useEffect(() => {
+    const up = () => handleMouseUpRef.current();
+    window.addEventListener("mouseup", up);
+    return () => window.removeEventListener("mouseup", up);
+  }, []);
+
+  // Auto-pan: while drawing, a pointer near the edge of the viewport slides the
+  // image towards whatever is out of sight, and the stroke carries on.
+  const strokeToRef = useRef(strokeTo);
+  strokeToRef.current = strokeTo;
+  const canZoomPanRef = useRef(true);
+  canZoomPanRef.current = !isCollaborator || permissions.ZOOM_PAN;
+  useEffect(() => {
+    if (!stroking || !autoPan) return;
+    let raf = 0;
+    let prev = performance.now();
+    const tick = (now: number) => {
+      const dt = now - prev;
+      prev = now;
+      const ptr = lastClientRef.current;
+      const area = viewportRef.current;
+      const canvas = maskCanvasRef.current;
+      if (ptr && area && canvas && isDrawingRef.current && !spaceHeldRef.current && canZoomPanRef.current) {
+        const step = edgePanStep(ptr, area.getBoundingClientRect(), canvas.getBoundingClientRect(), dt);
+        if (step) {
+          setPan((cur) => ({ x: cur.x + step.dx, y: cur.y + step.dy }));
+          strokeToRef.current(coordsAt(ptr.x, ptr.y));
+        }
+      }
+      raf = requestAnimationFrame(tick);
+    };
+    raf = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(raf);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [stroking, autoPan]);
 
   const saveMaskInternal = async ({
     isAuto = false,
@@ -2086,6 +2146,19 @@ export default function Painter2D({
                     />
                     <span>Protect lesion</span>
                   </label>
+
+                  <label
+                    className="flex items-center gap-1.5 text-xs text-muted-foreground cursor-pointer select-none ml-1"
+                    title="While drawing on a zoomed image, slide it when the pointer nears an edge"
+                  >
+                    <input
+                      type="checkbox"
+                      checked={autoPan}
+                      onChange={(e) => setAutoPan(e.target.checked)}
+                      className="rounded border-border accent-primary h-3.5 w-3.5"
+                    />
+                    <span>Auto-pan</span>
+                  </label>
                   <div className="mx-1 h-5 w-px bg-border" />
                   <OverlayControls
                     view={view}
@@ -2401,6 +2474,15 @@ export default function Painter2D({
             }
           }}
           onMouseMove={(e) => {
+            // Hold Space and move to pan - mid-stroke too.
+            const last = lastClientRef.current;
+            lastClientRef.current = { x: e.clientX, y: e.clientY };
+            if (spaceHeldRef.current && last && (!isCollaborator || permissions.ZOOM_PAN)) {
+              const dx = e.clientX - last.x;
+              const dy = e.clientY - last.y;
+              if (dx || dy) setPan((cur) => ({ x: cur.x + dx, y: cur.y + dy }));
+              return;
+            }
             if (tool === "pan" && isPanning) {
               if (!isCollaborator || permissions.ZOOM_PAN) {
                 setPan({
@@ -2425,7 +2507,9 @@ export default function Painter2D({
             style={{
               width: imgDim.w || 512,
               height: imgDim.h || 512,
-              transform: `scale(${zoom}) translate(${pan.x}px, ${pan.y}px)`,
+              // Pan is in screen pixels, so a drag moves the image exactly as
+              // far as the pointer at any zoom.
+              transform: `translate(${pan.x}px, ${pan.y}px) scale(${zoom})`,
             }}
           >
             {/* Base MRI image as rock-solid <img> element (never blanks or wipes) */}
@@ -2448,16 +2532,18 @@ export default function Painter2D({
               // cleared a second time, after it has already been drawn.
               style={{
                 width: "100%", height: "100%", touchAction: "none", opacity: opacity / 100,
-                ...(tool === "pencil"
+                ...(tool === "pencil" && !spaceHeld
                   ? { cursor: pencilCursor(isErasing ? "#ffffff" : LABELS.find((l) => l.id === activeLabel)?.stroke ?? "#ffffff") }
                   : {}),
               }}
               onMouseDown={handleMouseDown}
               onMouseMove={handleMouseMove}
-              onMouseUp={handleMouseUp}
               onMouseLeave={() => {
                 clearTorch();
-                handleMouseUp();
+                // Leaving the image does not end a stroke; releasing the mouse
+                // button does. Re-entering starts a fresh segment, so the brush
+                // does not draw a line across from where it left.
+                if (tool === "brush") lastPosRef.current = null;
               }}
               onDoubleClick={handleDoubleClick}
               onTouchStart={handleTouchStart}
@@ -2465,7 +2551,7 @@ export default function Painter2D({
               onTouchEnd={handleTouchEnd}
               onTouchCancel={handleTouchEnd}
               className={`absolute inset-0 block ${
-                tool === "pan" ? (isPanning ? "cursor-grabbing" : "cursor-grab") : tool === "torch" ? "cursor-none" : "cursor-crosshair"
+                tool === "pan" || spaceHeld ? (isPanning ? "cursor-grabbing" : "cursor-grab") : tool === "torch" ? "cursor-none" : "cursor-crosshair"
               }`}
             />
             {/* Live pencil polygon overlay preview canvas */}
