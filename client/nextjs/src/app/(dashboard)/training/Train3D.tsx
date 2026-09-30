@@ -138,7 +138,7 @@ export default function Train3D({
           </div>
           <div className="flex items-center gap-2 text-sm">
             {(["auto", "cuda", "cpu"] as const).map((v) => (
-              <button key={v} disabled={state?.running || (v === "cuda" && torch && !torch.cudaAvailable)}
+              <button key={v} disabled={Boolean(state?.running || (v === "cuda" && torch && !torch.cudaAvailable))}
                 onClick={() => onDevice(v)}
                 className={`rounded-md border px-3 py-2 ${device === v ? "border-primary text-foreground" : "border-border text-muted-foreground"} disabled:opacity-40`}>
                 {v === "auto" ? "Auto" : v === "cuda" ? "GPU" : "CPU"}
