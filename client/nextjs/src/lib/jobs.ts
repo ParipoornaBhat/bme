@@ -19,18 +19,22 @@ import path from "node:path";
  * be permanently blocked by a file nobody remembers writing.
  */
 
-export type JobKind = "classifier" | "segmentation" | "segmentation3d";
+// "suggestion" is the 3D annotate page's AI suggestion run (lib/suggest-queue.ts):
+// inference only, but on the same GPU, so it locks training out and waits for it.
+export type JobKind = "classifier" | "segmentation" | "segmentation3d" | "suggestion";
 
 const PID_FILES: Record<JobKind, string[]> = {
   classifier: ["data", "results2d", "train.pid"],
   segmentation: ["data", "results2dseg", "train.pid"],
   segmentation3d: ["data", "results3d", "train.pid"],
+  suggestion: ["data", "suggest", "run.pid"],
 };
 
 const JOB_NAME: Record<JobKind, string> = {
-  classifier: "Detection",
-  segmentation: "2D segmentation",
-  segmentation3d: "3D segmentation",
+  classifier: "Detection training",
+  segmentation: "2D segmentation training",
+  segmentation3d: "3D segmentation training",
+  suggestion: "An AI suggestion run",
 };
 
 function projectRoot() {
@@ -70,7 +74,7 @@ export function conflictingJob(starting: JobKind): { kind: JobKind; message: str
     return {
       kind: other,
       message:
-        `${JOB_NAME[other]} training is already running. The jobs share one GPU, and starting a ` +
+        `${JOB_NAME[other]} is already running. The jobs share one GPU, and starting a ` +
         `second can exhaust its memory and kill the run partway through. Wait for it to ` +
         `finish, or stop it first.`,
     };

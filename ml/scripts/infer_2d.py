@@ -46,7 +46,7 @@ except ImportError as e:
 
 sys.path.insert(0, str(Path(__file__).parent))
 from gradcam import explain, load_fold, overlay as cam_overlay  # noqa: E402
-from train_2d import CLASSES, IMG_SIZE, NORM_MEAN, NORM_STD  # noqa: E402
+from train_2d import CLASSES, IMG_SIZE, NORM_MEAN, NORM_STD, eval_transform  # noqa: E402
 from train_2d_seg import CHANNELS, IMG_SIZE as SEG_SIZE, UNet  # noqa: E402
 
 THRESHOLD = 0.5
@@ -64,15 +64,29 @@ def read_manifest(p: Path) -> dict | None:
     if not p.exists():
         return None
     try:
-        return json.loads(p.read_text(encoding="utf-8"))
+        # utf-8-sig: a manifest saved by a Windows editor starts with a BOM.
+        return json.loads(p.read_text(encoding="utf-8-sig"))
     except (ValueError, OSError):
         return None
 
 
 # ------------------------------------------------------------------ detection
-def detect(base: Path, img: Image.Image, device: str) -> dict:
+def det_manifest(base: Path) -> dict | None:
     man = read_manifest(base / "data" / "results2d" / "checkpoints" / "manifest.json")
-    if not man or not man.get("folds"):
+    return man if man and man.get("folds") else None
+
+
+def classify_prob(models: list, img: Image.Image, device: str) -> float:
+    """Fold-mean P(BME) with the training preprocessing, without Grad-CAM."""
+    x = eval_transform()(img).unsqueeze(0).to(device)
+    with torch.no_grad():
+        probs = [float(torch.softmax(m(x), 1)[0, 1]) for m in models]
+    return float(np.mean(probs))
+
+
+def detect(base: Path, img: Image.Image, device: str) -> dict:
+    man = det_manifest(base)
+    if not man:
         return {
             "available": False,
             "reason": ("No trained classifier. Train one on the Training page, or run "
@@ -116,9 +130,46 @@ def detect(base: Path, img: Image.Image, device: str) -> dict:
 
 
 # --------------------------------------------------------------- segmentation
-def segment(base: Path, img: Image.Image, device: str) -> dict:
+def seg_manifest(base: Path) -> dict | None:
     man = read_manifest(base / "data" / "results2dseg" / "checkpoints" / "manifest.json")
-    if not man or not man.get("folds"):
+    return man if man and man.get("folds") else None
+
+
+def load_seg_models(base: Path, man: dict, device: str) -> list:
+    ckpt_dir = base / "data" / "results2dseg" / "checkpoints"
+    models = []
+    for e in man["folds"]:
+        ck = torch.load(ckpt_dir / e["file"], map_location=device, weights_only=False)
+        model = UNet().to(device)
+        model.load_state_dict(ck["state_dict"])
+        models.append(model.eval())
+    return models
+
+
+def seg_masks(models: list, img: Image.Image, device: str):
+    """Bone and lesion masks on the SEG_SIZE canvas, plus the fold-mean probabilities."""
+    x = torch.from_numpy(
+        np.asarray(img.convert("L").resize((SEG_SIZE, SEG_SIZE), Image.BILINEAR),
+                   dtype=np.float32) / 255.0
+    )[None, None].to(device)
+    acc = None
+    with torch.no_grad():
+        for model in models:
+            p = torch.sigmoid(model(x))
+            acc = p if acc is None else acc + p
+    prob = (acc / len(models))[0].cpu().numpy()
+
+    bone = prob[0] >= THRESHOLD
+    # Edema outside bone is not edema. This is the same constraint the training
+    # script applies when it scores a fold, so the number shown here and the
+    # reported Dice measure the same thing.
+    lesion = (prob[1] >= THRESHOLD) & bone
+    return bone, lesion, prob
+
+
+def segment(base: Path, img: Image.Image, device: str) -> dict:
+    man = seg_manifest(base)
+    if not man:
         return {
             "available": False,
             "reason": ("No trained segmentation model. It needs painted masks: annotate "
@@ -127,28 +178,7 @@ def segment(base: Path, img: Image.Image, device: str) -> dict:
                        "output is not a result."),
         }
 
-    ckpt_dir = base / "data" / "results2dseg" / "checkpoints"
-    x = torch.from_numpy(
-        np.asarray(img.convert("L").resize((SEG_SIZE, SEG_SIZE), Image.BILINEAR),
-                   dtype=np.float32) / 255.0
-    )[None, None].to(device)
-
-    acc = None
-    for e in man["folds"]:
-        ck = torch.load(ckpt_dir / e["file"], map_location=device, weights_only=False)
-        model = UNet().to(device)
-        model.load_state_dict(ck["state_dict"])
-        model.eval()
-        with torch.no_grad():
-            p = torch.sigmoid(model(x))
-        acc = p if acc is None else acc + p
-    prob = (acc / len(man["folds"]))[0].cpu().numpy()
-
-    bone = prob[0] >= THRESHOLD
-    # Edema outside bone is not edema. This is the same constraint the training
-    # script applies when it scores a fold, so the number shown here and the
-    # reported Dice measure the same thing.
-    lesion = (prob[1] >= THRESHOLD) & bone
+    bone, lesion, prob = seg_masks(load_seg_models(base, man, device), img, device)
 
     n_bone = int(bone.sum())
     n_lesion = int(lesion.sum())

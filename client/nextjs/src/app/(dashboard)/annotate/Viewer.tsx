@@ -27,6 +27,7 @@ import {
   RotateCw,
   Save,
   SlidersHorizontal,
+  Sparkles,
   Trash2,
   Upload,
   Users,
@@ -64,6 +65,7 @@ import { edgePanStep, useAutoPanSetting, useSpaceHeld } from "~/lib/view-pan";
 import { isInTorch, type TorchState } from "~/lib/torch";
 import type { FlagRecord } from "~/lib/flag-store";
 import FlagDialog from "./FlagDialog";
+import { drawSuggestionEdges, useSuggestions } from "./suggestions";
 
 /**
  * Three-plane viewer with painting, modelled on 3D Slicer's Four-Up layout.
@@ -773,6 +775,20 @@ export default function Viewer({
     return c[v.axes[p].slice];
   }, []);
 
+  // ---- AI suggestions ---------------------------------------------------
+  // Model marks for every axial slice, kept apart from `labels` until a slice
+  // is accepted. See ./suggestions.ts.
+  const suggestions = useSuggestions({
+    caseId,
+    series: seriesId,
+    dims: vol?.dims ?? null,
+    axial: vol?.axes.axial ?? null,
+    enabled: !isCollaborator && canAnnotate,
+  });
+  const suggestion = suggestions.suggestion;
+  const suggestJob = suggestions.job;
+  const suggestBusy = suggestJob?.state === "queued" || suggestJob?.state === "running";
+
   // ---- render ----------------------------------------------------------
   const draw = useCallback((p: Plane) => {
     const cv = canvases.current[p];
@@ -808,6 +824,19 @@ export default function Viewer({
         const o = ((h - 1 - b) * w + a) * 4; // flip so anatomy is upright
         img.data[o] = r; img.data[o + 1] = g; img.data[o + 2] = bl; img.data[o + 3] = 255;
       }
+    }
+    // Pending AI suggestion: dotted outline only, the inside stays as painted.
+    if (suggestion && suggestion.caseId === caseId) {
+      drawSuggestionEdges(
+        img, w, h, suggestion, dims, vol.axes.axial.slice,
+        (a, b) => sampleAt(p, vol, a, b, s),
+        {
+          bone: isLabelVisible(1, view),
+          edema: isLabelVisible(2, view),
+          skip: currentTorch ? (a, b) => isInTorch(a, b, p, currentTorch) : undefined,
+        },
+        { bone: SEGMENTS[0].color, edema: SEGMENTS[1].color },
+      );
     }
     ctx.putImageData(img, 0, 0);
 
@@ -892,7 +921,7 @@ export default function Viewer({
       ctx.restore();
     }
   }, [vol, labels, cursor, seg, erasing, outlineTick, planeGeom, sampleAt, cursorInPlane, sliceOf, view, opacity,
-      collabToken]);
+      collabToken, suggestion, caseId]);
 
   const drawAll = useCallback(() => { PLANES.forEach(draw); }, [draw]);
   useEffect(() => { drawAll(); }, [drawAll]);
@@ -1383,6 +1412,47 @@ export default function Viewer({
     scheduleAutoSaveRef.current();
     toast.info("Cleared 3D canvas mask");
   }, [labels, pushUndo, drawAll, markEdited]);
+
+  /**
+   * Copy one axial slice of the suggestion into the real mask. Voxels the
+   * model left empty are not touched, and Protect lesion holds as it does for
+   * the brush. One undo step, and saved like any other edit.
+   */
+  const acceptSuggestion = useCallback((s: number) => {
+    if (!suggestion || !vol || !labels || suggestion.caseId !== caseId) return;
+    if (suggestion.decisions[s] !== "pending") return;
+    const { w, h } = planeGeom("axial", vol);
+    pushUndo();
+    for (let b = 0; b < h; b++)
+      for (let a = 0; a < w; a++) {
+        const f = sampleAt("axial", vol, a, b, s);
+        const v = suggestion.labels[f];
+        if (v && canPaint(labels[f], v, { erasing: false, insideBone: false, hasBone: false, protectLesion })) {
+          labels[f] = v;
+        }
+      }
+    markEdited();
+    recount();
+    suggestions.decide(s, "accepted");
+    scheduleAutoSaveRef.current();
+  }, [suggestion, suggestions.decide, vol, labels, caseId, planeGeom, sampleAt, pushUndo, protectLesion,
+      markEdited, recount]);
+
+  /** Move the axial view to the next (or previous) slice still waiting for a decision. */
+  const gotoPendingSlice = (dir: 1 | -1) => {
+    if (!suggestion || !vol) return;
+    const ax = vol.axes.axial.slice;
+    const n = suggestion.decisions.length;
+    const from = axisVal(cursor, ax);
+    for (let k = 1; k <= n; k++) {
+      const s = (from + dir * k + n) % n;
+      if (suggestion.decisions[s] === "pending") {
+        setCursor((c) => setAxis(c, ax, s));
+        setActivePlane("axial");
+        return;
+      }
+    }
+  };
 
   const deleteMask = async (ask = true) => {
     if (ask && !confirm(`Delete saved 3D mask for ${caseId}?`)) return;
@@ -1926,6 +1996,17 @@ export default function Viewer({
                 </button>
               </>
             )}
+            {!isCollaborator && canAnnotate && (
+              <button
+                type="button"
+                onClick={() => void suggestions.request()}
+                disabled={suggestBusy}
+                title="AI suggestions: run the 2D models on every axial slice of this scan"
+                className="p-1.5 rounded border border-violet-500/40 bg-violet-500/10 text-violet-300 hover:bg-violet-500/20 transition cursor-pointer disabled:opacity-40"
+              >
+                {suggestBusy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Sparkles className="h-3.5 w-3.5" />}
+              </button>
+            )}
             {!isCollaborator && (
               <>
                 <button
@@ -2302,6 +2383,19 @@ export default function Viewer({
               </div>
             )}
 
+            {!isCollaborator && canAnnotate && (
+              <button
+                type="button"
+                onClick={() => void suggestions.request()}
+                disabled={suggestBusy}
+                title="Run the 2D models on every axial slice of this scan. The marks are suggestions: nothing changes until you accept a slice."
+                className="inline-flex items-center gap-1 rounded border border-violet-500/40 bg-violet-500/10 px-2 py-1 text-xs text-violet-300 hover:bg-violet-500/20 transition cursor-pointer disabled:opacity-40"
+              >
+                {suggestBusy ? <Loader2 className="h-3 w-3 animate-spin" /> : <Sparkles className="h-3 w-3" />}
+                <span className="hidden sm:inline">AI suggestions</span>
+              </button>
+            )}
+
             {!isCollaborator && (
               <>
                 {/* Import from 3D Slicer */}
@@ -2402,6 +2496,64 @@ export default function Viewer({
           </button>
         </div>
       )}
+
+      {(suggestJob || suggestion) && (() => {
+        const count = (d: string) => suggestion?.decisions.filter((x) => x === d).length ?? 0;
+        return (
+          <div className="flex flex-wrap items-center justify-between gap-2 rounded-md border border-violet-500/40 bg-violet-500/10 px-3 py-1.5 text-xs text-violet-200">
+            <div className="flex min-w-0 items-center gap-2">
+              <Sparkles className="h-3.5 w-3.5 shrink-0 text-violet-300" />
+              {suggestion ? (
+                <span>
+                  <strong>AI suggestions</strong> ({suggestion.models}): {count("pending")} axial slices to review,
+                  {" "}{count("accepted")} accepted, {count("rejected")} rejected or empty. The dotted outlines are
+                  not saved; Accept copies that slice into your mask.
+                </span>
+              ) : suggestJob?.state === "queued" ? (
+                <span>
+                  AI suggestions queued: {suggestJob.waiting ??
+                    (suggestJob.position > 0 ? `${suggestJob.position} ahead of you` : "next in line")}
+                </span>
+              ) : suggestJob?.state === "running" ? (
+                <span>
+                  Running the 2D models on the axial slices
+                  {suggestJob.progress ? ` (${suggestJob.progress.done}/${suggestJob.progress.total})` : ""}…
+                </span>
+              ) : suggestJob?.state === "failed" ? (
+                <span>AI suggestions failed: {suggestJob.error}</span>
+              ) : (
+                <span>AI suggestions {suggestJob?.state}</span>
+              )}
+            </div>
+            <div className="flex shrink-0 items-center gap-1.5">
+              {suggestion && count("pending") > 0 && (
+                <>
+                  <button type="button" onClick={() => gotoPendingSlice(-1)} title="Previous slice to review"
+                    className="rounded border border-violet-500/40 p-0.5 hover:bg-violet-500/20">
+                    <ChevronLeft className="h-3.5 w-3.5" />
+                  </button>
+                  <button type="button" onClick={() => gotoPendingSlice(1)} title="Next slice to review"
+                    className="rounded border border-violet-500/40 p-0.5 hover:bg-violet-500/20">
+                    <ChevronRight className="h-3.5 w-3.5" />
+                  </button>
+                </>
+              )}
+              {suggestBusy ? (
+                <button type="button" onClick={() => void suggestions.cancel()}
+                  className="rounded bg-violet-500/20 px-2 py-0.5 text-[11px] font-medium hover:bg-violet-500/30">
+                  Cancel
+                </button>
+              ) : (
+                <button type="button" onClick={suggestions.discard}
+                  title="Drop every suggestion still waiting. Slices already accepted stay in your mask."
+                  className="rounded bg-violet-500/20 px-2 py-0.5 text-[11px] font-medium hover:bg-violet-500/30">
+                  {suggestion ? "Discard" : "Dismiss"}
+                </button>
+              )}
+            </div>
+          </div>
+        );
+      })()}
 
       {/* Info bar: which scan, its geometry, and the latest load/save message. */}
       <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-0.5 px-1 text-xs text-muted-foreground">
@@ -2604,6 +2756,44 @@ export default function Viewer({
                   setCursor((c) => setAxis(c, g.axis.slice, v));
                 }}
                 className="mt-1 w-full shrink-0" />
+              {p === "axial" && suggestion && suggestion.slices[s] && (() => {
+                const d = suggestion.decisions[s];
+                const info = suggestion.slices[s];
+                const marked = info.bone + info.lesion > 0;
+                return (
+                  <div className="mt-1 flex shrink-0 flex-wrap items-center justify-between gap-1 px-1 text-[10px] text-neutral-300">
+                    <span className="tabular-nums">
+                      Suggestion: bone {info.bone.toLocaleString()} px · edema {info.lesion.toLocaleString()} px
+                      {info.prob !== null ? ` · BME ${info.prob >= 0.5 ? "present" : "absent"} (${info.prob.toFixed(2)})` : ""}
+                    </span>
+                    {d === "pending" ? (
+                      <span className="flex items-center gap-1">
+                        <button type="button" onClick={() => acceptSuggestion(s)}
+                          title="Copy this slice's suggested bone and edema into the mask"
+                          className="rounded border border-emerald-600 bg-emerald-600/20 px-1.5 py-0.5 text-emerald-300 hover:bg-emerald-600/30">
+                          Accept
+                        </button>
+                        <button type="button" onClick={() => suggestions.decide(s, "rejected")}
+                          title="Drop this slice's suggestion; the mask is not changed"
+                          className="rounded border border-neutral-600 px-1.5 py-0.5 hover:bg-neutral-800">
+                          Reject
+                        </button>
+                      </span>
+                    ) : (
+                      <span className="flex items-center gap-1">
+                        <span className="text-neutral-500">{marked ? d : "nothing marked"}</span>
+                        {marked && (
+                          <button type="button" onClick={() => suggestions.decide(s, "pending")}
+                            title="Show this slice's suggestion again"
+                            className="rounded border border-neutral-600 px-1.5 py-0.5 hover:bg-neutral-800">
+                            Restore
+                          </button>
+                        )}
+                      </span>
+                    )}
+                  </div>
+                );
+              })()}
             </div>
           );
         })}

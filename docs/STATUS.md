@@ -4,7 +4,7 @@
 If you are picking this project up cold (new chat, new teammate, new machine), read this
 file first, then [SUMMARY.md](SUMMARY.md) for the full picture, then [PRD.md](PRD.md).
 
-Last updated: **2026-09-30**
+Last updated: **2026-10-03**
 
 ---
 
@@ -62,6 +62,25 @@ Phases are defined in [PRD.md](PRD.md) §8.
 ## Do this next
 
 In order. Each step's output is the next step's input.
+
+0. **AI suggestions on the 3D annotate page (2026-10-03).** "AI suggestions" in the 3D
+   toolbar runs the shared 2D models on every **axial** slice of the open scan (axial axis
+   from the affine, same rule as `deriveAxes()` in `Viewer.tsx`; the viewer refuses the
+   result if the server's axes differ). U-Net `unet.pt` (fold 3) marks bone and edema, edema
+   kept inside bone; yes/no `yesno.pt` (fold 2) gives a per-slice present/absent. Coronal and
+   sagittal are never sent to a model; they show cuts through the stacked axial result.
+   Suggestions are dotted outlines only, held apart from the real labels and never saved;
+   **Accept** under the axial view copies that slice into the mask (one undo step, Protect
+   lesion applies), **Reject** drops it. Runs go through one FIFO queue in the web server
+   (`lib/suggest-queue.ts`, `ml/scripts/suggest_3d.py`): one at a time, waiting while any
+   training holds the GPU, and training refuses to start while a run is live
+   (`data/suggest/run.pid`). A job is visible only to the sign-in session that asked for it;
+   results stay in `data/suggest/` for an hour. Team members only, not review guests.
+   The two checkpoints now in `data/results2d/checkpoints` and `data/results2dseg/checkpoints`
+   are single folds (`yesno.pt`, `unet.pt`) with new manifests, so the `/results` test page
+   also uses one fold each now, not the five-fold average. The old `fold*.pt` files are still
+   on disk but no longer listed. **The production server on :3000 needs `pnpm build` and a
+   restart to serve this.**
 
 0. **Slicer export audited (2026-09-30): [SLICER_EXPORT_AUDIT.md](SLICER_EXPORT_AUDIT.md).**
    Markings themselves are sound (readable, non-empty, on the scan grid, axial). The packaging
@@ -288,6 +307,7 @@ Carried from [PRD.md](PRD.md) §10, updated with what the data answered.
 | ~~3D save failed `size mismatch` on a full labelmap~~ | **Fixed 2026-09-29** | Next.js middleware dropped the body past 10 MB. A 624×768×22 mask is ~10.1 MB, so the tail never reached `write_seg.py`. Limit is `experimental.middlewareClientMaxBodySize: 256mb`. Restart `pnpm dev` after pulling. |
 | ~~3D viewer lacked under-annotation peek capability~~ | **Fixed 2026-09-24** | Added 3D Torch tool (key 7) and hold-`T` peek with radius ring, non-destructive to volume label buffer. |
 | Five 2D masks saved before the canvas-noise fix contain flipped pixels (worst: NBME-2D-002_s000, 84; also BME-2D-005_s000, BME-2D-009_s001/s002/s003) | Label noise in training data | Repair pending: back up, dry-run, revert only pixels that differ from all 8 neighbours. |
+| **2D models on 3D axial slices: domain shift, unmeasured** (added 2026-10-03) | The 2D models were trained on 94 exported pictures, not MRI volumes. On BME-001 the yes/no model said present (0.76-1.00) on every one of 22 slices, including slices with no edema, and suggested edema overlapped the Slicer outline at Dice 0.44 (one case, a sanity check, not an evaluation) | Treat suggestions as a drafting aid. Do not report their numbers. Measure on a few annotated cases before relying on them |
 | Two machines serve the same tunnel hostname | Guests land on either machine at random; sessions/logins don't carry across | Run the tunnel on one machine only. Use pnpm build + pnpm start for guest sessions. |
 | Review sessions live in server memory | A restart of the API ends every open review | Acceptable for a demo tool; persist them if reviews ever need to survive restarts. |
 | `/api/collaborate/session/<token>` answers without auth | Anyone holding a token sees participant names | Minor; it serves no study data. Trim the response if it matters. |
