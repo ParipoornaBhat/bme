@@ -63,6 +63,15 @@ Phases are defined in [PRD.md](PRD.md) §8.
 
 In order. Each step's output is the next step's input.
 
+0. **Slicer export audited (2026-09-30): [SLICER_EXPORT_AUDIT.md](SLICER_EXPORT_AUDIT.md).**
+   Markings themselves are sound (readable, non-empty, on the scan grid, axial). The packaging
+   is not: same patient in two folders (BME-032/033 and BME-052/054 are one patient each, and
+   BME-003 shares its scan with skipped folder 11), 24 markings never uploaded, 11 markings
+   whose scan is only in DICOM (10 recoverable), one folder with two patients. **Merge the
+   duplicate patients before any 3D training.** Four duplicate folders carry `exclude.json`
+   in `~/Downloads/slicer-import/bme/`; nothing reads it yet. Questions for the student are
+   at the end of the audit.
+
 0. **3D annotate tab now matches 2D (2026-09-30).** Hand/pan per view (6 / H), pencil fills
    on release, Auto Save, flag a case for review (stored in `data/annotations3d_flags.json`,
    with the view and slice it was raised on), case list filters (bme / annotated / flagged…),
@@ -259,6 +268,7 @@ Carried from [PRD.md](PRD.md) §10, updated with what the data answered.
 | **2D case-level AUC jumped 0.658 → 0.961 when the dataset was rebuilt** | A number that good on this task, from 18 positive patients, is more likely a dataset shortcut than a modelling win | Two leaks measured on 2026-09-04. **(a)** `BME-2D-005` and `BME-2D-008` carry a **red ellipse drawn around the lesion**, burned into the pixels — 2/25 BME files, 0/69 non-BME. **(b)** A burned-in yellow A/P orientation overlay appears in **19/69 non-BME (28%)** but **1/25 BME (4%)**, and the two folders are framed and cropped differently — different exporters. Neither alone explains 0.96, but together they make it indefensible. **Before quoting anything: retrain on a centre crop excluding the borders, and drop or repair the two ellipse images.** |
 | 18 BME patients is the whole 2D positive pool | 3–4 positives per validation fold; the per-fold spread is wider than most effects | Always report mean ± std with n stated. Never quote one fold. |
 | **3D set is 55 BME-positive cases, no negatives** | A segmenter trained only on positives has never seen a knee without edema; FP rate on normal scans is unmeasured | Get non-BME scans into the Slicer export, or keep the old NBME cases' volumes |
+| **Same patient imported twice in the 3D set** | BME-032/033 and BME-052/054 are one patient each; a patient-level split can put one copy in train and the other in validation | Merge each pair's markings into one case ([SLICER_EXPORT_AUDIT.md](SLICER_EXPORT_AUDIT.md) §1) |
 | **3D Slicer cases have BME but no bone marrow** | `seg2nifti.py` rejects them until bone is painted | Paint bone in the 3D tab with Protect lesion on |
 | **2D review links are not limited to one case** | A 2D guest can read any 2D slice while admitted; 3D links are checked against their case | Needs a 2D session to name its case; left as it was |
 | **Every case filename carries a patient name** | PHI exposure | Fixed by step 1. Data is gitignored, so nothing has leaked. |
