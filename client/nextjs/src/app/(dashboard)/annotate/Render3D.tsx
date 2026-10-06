@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Box, Expand, Loader2, Maximize2, Shrink } from "lucide-react";
+import { Pinch } from "~/lib/pinch";
 import { wheelZoomFactor } from "~/lib/wheel-zoom";
 
 /**
@@ -56,7 +57,10 @@ export default function Render3D({
   const [pitch, setPitch] = useState(-0.32);
   const [zoom, setZoom] = useState(1);
   const [fit, setFit] = useState(false);
-  const drag = useRef<{ x: number; y: number } | null>(null);
+  const drag = useRef<{ id: number; x: number; y: number } | null>(null);
+  // One finger turns the surface, two pinch to zoom.
+  const pinch = useRef(new Pinch());
+  const pinchZoom0 = useRef(1);
   // The canvas is drawn at the size of the space it has, so it stays sharp
   // when the view is expanded.
   const boxRef = useRef<HTMLDivElement | null>(null);
@@ -281,22 +285,30 @@ export default function Render3D({
       <div ref={boxRef} className={fill ? "relative min-h-[120px] flex-1" : "relative flex min-h-0 flex-1 items-center justify-center"}>
         <canvas ref={canvasRef} width={fill ? size.w : 460} height={fill ? size.h : 460}
           className={`${fill ? "absolute inset-0 h-full w-full" : ""} cursor-grab rounded active:cursor-grabbing`}
-          style={fill ? undefined : { maxWidth: "100%", maxHeight: "100%" }}
+          style={{ ...(fill ? {} : { maxWidth: "100%", maxHeight: "100%" }), touchAction: "none" }}
           onPointerDown={(e) => {
-            drag.current = { x: e.clientX, y: e.clientY };
             e.currentTarget.setPointerCapture(e.pointerId);
+            if (e.pointerType === "touch") {
+              pinch.current.down(e);
+              if (pinch.current.active) { drag.current = null; pinchZoom0.current = zoom; return; }
+            }
+            drag.current = { id: e.pointerId, x: e.clientX, y: e.clientY };
           }}
           onPointerMove={(e) => {
+            if (e.pointerType === "touch") {
+              const f = pinch.current.move(e);
+              if (f) { setZoom(Math.max(0.4, Math.min(8, pinchZoom0.current * f.scale))); return; }
+            }
             const start = drag.current;
-            if (!start) return;
+            if (!start || start.id !== e.pointerId) return;
             const dx = e.clientX - start.x;
             const dy = e.clientY - start.y;
-            drag.current = { x: e.clientX, y: e.clientY };
+            drag.current = { id: e.pointerId, x: e.clientX, y: e.clientY };
             setYaw((v) => v + dx * 0.01);
             setPitch((v) => Math.max(-1.45, Math.min(1.45, v + dy * 0.01)));
           }}
-          onPointerUp={() => { drag.current = null; }}
-          onPointerCancel={() => { drag.current = null; }}
+          onPointerUp={(e) => { pinch.current.up(e); drag.current = null; }}
+          onPointerCancel={(e) => { pinch.current.up(e); drag.current = null; }}
         />
         {!built && (
           <div className="pointer-events-none absolute inset-0 flex items-center justify-center px-5 text-center text-[11px] text-neutral-500">
@@ -349,7 +361,7 @@ export default function Render3D({
         )}
         <div className="flex justify-between">
           <span>{totalFaces ? `${totalFaces.toLocaleString()} faces` : ""}</span>
-          <span>{fit ? "zoomed" : "true size"} &middot; drag to turn &middot; Ctrl+wheel to zoom</span>
+          <span>{fit ? "zoomed" : "true size"} &middot; drag to turn &middot; Ctrl+wheel or pinch to zoom</span>
         </div>
       </div>
     </div>

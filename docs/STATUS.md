@@ -90,6 +90,14 @@ In order. Each step's output is the next step's input.
    duplicate patients before any 3D training.** Four duplicate folders carry `exclude.json`
    in `~/Downloads/slicer-import/bme/`; nothing reads it yet. Questions for the student are
    at the end of the audit.
+   **Imported (2026-10-03):** the 61 clean folders were packed into
+   `~/Downloads/slicer-import/newbme/` (one zip per case: the marked scan + its marking, plus
+   `name.json`; also `newbme.zip` for the team Drive) and imported as **BME-001..BME-061**
+   after `pnpm data:3d:erase` (the five cases there before were copies of Drive folders 1-5).
+   The 61 are the 55 earlier imports minus the five same-patient folders (21, 22a, 7a, 8,
+   12a), plus 15a, 23 and nine cases whose scan was rebuilt from DICOM. Teammates, for the
+   same IDs: `pnpm data:3d:erase`, copy the folders from `newbme.zip` into `data/newbme/`,
+   then `pnpm data:process`. **Next:** paint bone marrow on BME-001..061 in the 3D tab.
 
 0. **3D annotate tab now matches 2D (2026-09-30).** Hand/pan per view (6 / H), pencil fills
    on release, Auto Save, flag a case for review (stored in `data/annotations3d_flags.json`,
@@ -307,6 +315,7 @@ Carried from [PRD.md](PRD.md) §10, updated with what the data answered.
 | ~~3D save failed `size mismatch` on a full labelmap~~ | **Fixed 2026-09-29** | Next.js middleware dropped the body past 10 MB. A 624×768×22 mask is ~10.1 MB, so the tail never reached `write_seg.py`. Limit is `experimental.middlewareClientMaxBodySize: 256mb`. Restart `pnpm dev` after pulling. |
 | ~~3D viewer lacked under-annotation peek capability~~ | **Fixed 2026-09-24** | Added 3D Torch tool (key 7) and hold-`T` peek with radius ring, non-destructive to volume label buffer. |
 | Five 2D masks saved before the canvas-noise fix contain flipped pixels (worst: NBME-2D-002_s000, 84; also BME-2D-005_s000, BME-2D-009_s001/s002/s003) | Label noise in training data | Repair pending: back up, dry-run, revert only pixels that differ from all 8 neighbours. |
+| **3D annotate touch and stylus support is untested on a real tablet** (added 2026-10-03) | Pointer events replace mouse events in the slice views: one finger or a pen draws, two fingers pinch-zoom and pan; after a pen is first used, a finger pans instead of drawing (palm rejection). 3D surface: one finger turns, two pinch. Only typechecked | Try it on a tablet with a pen and a finger: brush, pencil, pinch mid-stroke (the stroke should be undone), palm on screen while the pen draws |
 | **2D models on 3D axial slices: domain shift, unmeasured** (added 2026-10-03) | The 2D models were trained on 94 exported pictures, not MRI volumes. On BME-001 the yes/no model said present (0.76-1.00) on every one of 22 slices, including slices with no edema, and suggested edema overlapped the Slicer outline at Dice 0.44 (one case, a sanity check, not an evaluation) | Treat suggestions as a drafting aid. Do not report their numbers. Measure on a few annotated cases before relying on them |
 | Two machines serve the same tunnel hostname | Guests land on either machine at random; sessions/logins don't carry across | Run the tunnel on one machine only. Use pnpm build + pnpm start for guest sessions. |
 | Review sessions live in server memory | A restart of the API ends every open review | Acceptable for a demo tool; persist them if reviews ever need to survive restarts. |

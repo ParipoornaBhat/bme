@@ -60,6 +60,7 @@ import { useGuestUserId, useHostSession, useSessionNotices } from "~/lib/useHost
 import { canPaint } from "~/lib/paint-rules";
 import { wheelZoomFactor } from "~/lib/wheel-zoom";
 import { pencilCursor } from "~/lib/cursors";
+import { Pinch } from "~/lib/pinch";
 import { usePaintTools } from "~/lib/usePaintTools";
 import { edgePanStep, useAutoPanSetting, useSpaceHeld } from "~/lib/view-pan";
 import { isInTorch, type TorchState } from "~/lib/torch";
@@ -1177,26 +1178,37 @@ export default function Viewer({
   // ---- pan -------------------------------------------------------------
   // Dragging is followed on the window, so the view keeps moving when the
   // pointer runs off the canvas mid-drag.
-  const panStart = useRef<{ plane: Plane; x: number; y: number; ox: number; oy: number } | null>(null);
-  const startPan = useCallback((p: Plane, e: React.MouseEvent) => {
-    panStart.current = { plane: p, x: e.clientX, y: e.clientY, ox: pan[p].x, oy: pan[p].y };
+  const panStart = useRef<{ id: number; plane: Plane; x: number; y: number; ox: number; oy: number } | null>(null);
+  const startPan = useCallback((p: Plane, e: React.PointerEvent) => {
+    panStart.current = { id: e.pointerId, plane: p, x: e.clientX, y: e.clientY, ox: pan[p].x, oy: pan[p].y };
     setPanning(p);
   }, [pan]);
+  const stopPan = useCallback(() => { panStart.current = null; setPanning(null); }, []);
   useEffect(() => {
     if (!panning) return;
-    const move = (e: MouseEvent) => {
+    const move = (e: PointerEvent) => {
       const st = panStart.current;
-      if (!st) return;
+      if (!st || st.id !== e.pointerId) return;
       setPan((cur) => ({ ...cur, [st.plane]: { x: st.ox + e.clientX - st.x, y: st.oy + e.clientY - st.y } }));
     };
-    const up = () => { panStart.current = null; setPanning(null); };
-    window.addEventListener("mousemove", move);
-    window.addEventListener("mouseup", up);
+    const up = (e: PointerEvent) => { if (panStart.current?.id === e.pointerId) stopPan(); };
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", up);
+    window.addEventListener("pointercancel", up);
     return () => {
-      window.removeEventListener("mousemove", move);
-      window.removeEventListener("mouseup", up);
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", up);
+      window.removeEventListener("pointercancel", up);
     };
-  }, [panning]);
+  }, [panning, stopPan]);
+
+  // ---- touch -----------------------------------------------------------
+  // Two fingers pinch to zoom and drag to pan. One finger draws, until a
+  // stylus has been used: from then on a finger pans and the pen draws, so a
+  // palm resting on the screen does not paint.
+  const penSeen = useRef(false);
+  const pinches = useRef<Record<Plane, Pinch>>({ axial: new Pinch(), coronal: new Pinch(), sagittal: new Pinch() });
+  const pinchStart = useRef<{ plane: Plane; zoom: number; pan: { x: number; y: number }; cx: number; cy: number } | null>(null);
 
   const resetView = (p: Plane) => {
     setZoom((z) => ({ ...z, [p]: 1 }));
@@ -1216,7 +1228,7 @@ export default function Viewer({
     return { a, b };
   }, [vol, planeGeom]);
   const toVoxel = useCallback(
-    (p: Plane, ev: React.MouseEvent<HTMLCanvasElement>) => toVoxelAt(p, ev.clientX, ev.clientY),
+    (p: Plane, ev: React.PointerEvent<HTMLCanvasElement>) => toVoxelAt(p, ev.clientX, ev.clientY),
     [toVoxelAt],
   );
 
@@ -1334,8 +1346,13 @@ export default function Viewer({
   const lastClient = useRef<{ plane: Plane; x: number; y: number } | null>(null);
   const areaRefs = useRef<Record<Plane, HTMLDivElement | null>>({ axial: null, coronal: null, sagittal: null });
 
-  const beginStroke = (p: Plane) => {
+  // The pointer drawing the stroke. Other fingers, or a palm under the pen,
+  // neither extend nor end it.
+  const strokePointer = useRef<{ id: number; type: string } | null>(null);
+
+  const beginStroke = (p: Plane, e: React.PointerEvent) => {
     strokePlane.current = p;
+    strokePointer.current = { id: e.pointerId, type: e.pointerType };
     painting.current = true;
     setStroking(true);
   };
@@ -1344,6 +1361,7 @@ export default function Viewer({
     const wasTracing = tool === "pencil";
     painting.current = false;
     strokePlane.current = null;
+    strokePointer.current = null;
     setStroking(false);
     if (wasTracing) {
       commitOutline();
@@ -1355,12 +1373,33 @@ export default function Viewer({
       scheduleAutoSaveRef.current();
     }
   };
+  /**
+   * A second finger landing mid-stroke means a pinch, not a drawing: drop the
+   * outline, or put back what the brush already painted.
+   */
+  const cancelStroke = () => {
+    if (!painting.current) return;
+    if (tool === "brush" && labels) {
+      const before = undoStack.current.pop();
+      if (before) { labels.set(before); markEdited(); recount(); }
+    }
+    outline.current = []; pencilPlane.current = null; painting.current = false;
+    strokePlane.current = null; strokePointer.current = null; setStroking(false);
+    setOutlineTick((n) => n + 1); drawAll();
+  };
   const endStrokeRef = useRef(endStroke);
   endStrokeRef.current = endStroke;
   useEffect(() => {
-    const up = () => endStrokeRef.current();
-    window.addEventListener("mouseup", up);
-    return () => window.removeEventListener("mouseup", up);
+    const up = (e: PointerEvent) => {
+      if (strokePointer.current && strokePointer.current.id !== e.pointerId) return;
+      endStrokeRef.current();
+    };
+    window.addEventListener("pointerup", up);
+    window.addEventListener("pointercancel", up);
+    return () => {
+      window.removeEventListener("pointerup", up);
+      window.removeEventListener("pointercancel", up);
+    };
   }, []);
 
   /** Keep drawing under a pointer that is still while the view moves under it. */
@@ -2592,6 +2631,8 @@ export default function Viewer({
                   <kbd className="font-mono">L</kbd><span>Lock / link views</span>
                   <kbd className="font-mono">Ctrl+wheel</kbd><span>Zoom the view (or pinch)</span>
                   <kbd className="font-mono">Space (hold)</kbd><span>Pan with the mouse, even mid-trace</span>
+                  <kbd className="font-mono">Two fingers</kbd><span>Pinch to zoom, drag to pan (touch)</span>
+                  <kbd className="font-mono">One finger</kbd><span>Draws; pans once a stylus has been used</span>
                   <kbd className="font-mono">Dbl-click title</kbd><span>Full view (Esc to go back)</span>
                   <kbd className="font-mono">Esc</kbd><span>Discard an outline while tracing</span>
                 </div>
@@ -2615,7 +2656,8 @@ export default function Viewer({
             <div key={p}
               ref={(el) => { viewRefs.current[p] = el; }}
               onMouseEnter={() => setActivePlane(p)}
-              onMouseMove={(e) => {
+              onPointerMove={(e) => {
+                if (strokePointer.current && strokePointer.current.id !== e.pointerId) return;
                 // Hold Space and move to pan this view - mid-stroke too.
                 const last = lastClient.current;
                 lastClient.current = { plane: p, x: e.clientX, y: e.clientY };
@@ -2662,7 +2704,38 @@ export default function Viewer({
                 </span>
               </div>
               <div ref={(el) => { areaRefs.current[p] = el; }}
-                className="flex min-h-0 flex-1 items-center justify-center overflow-hidden">
+                className="flex min-h-0 flex-1 items-center justify-center overflow-hidden"
+                style={{ touchAction: "none" }}
+                // Capture phase, so the canvas below already knows a pinch has
+                // begun when the second finger's pointerdown reaches it.
+                onPointerDownCapture={(e) => {
+                  if (e.pointerType !== "touch") return;
+                  if (painting.current && strokePointer.current?.type === "pen") return; // palm under the pen
+                  const pz = pinches.current[p];
+                  pz.down(e);
+                  if (!pz.active) return;
+                  cancelStroke();
+                  stopPan();
+                  const r = e.currentTarget.getBoundingClientRect();
+                  pinchStart.current = { plane: p, zoom: zoom[p], pan: pan[p], cx: r.left + r.width / 2, cy: r.top + r.height / 2 };
+                }}
+                onPointerMove={(e) => {
+                  if (e.pointerType !== "touch") return;
+                  const f = pinches.current[p].move(e);
+                  const st = pinchStart.current;
+                  if (!f || !st || st.plane !== p || !canZoomPan) return;
+                  // Zoom about the fingers: the image point under the starting
+                  // midpoint stays under the current one.
+                  const z = clampZoom(st.zoom * f.scale);
+                  const k = z / st.zoom;
+                  setZoom((cur) => ({ ...cur, [p]: z }));
+                  setPan((cur) => ({ ...cur, [p]: {
+                    x: f.mid.x - st.cx - k * (f.mid0.x - st.cx - st.pan.x),
+                    y: f.mid.y - st.cy - k * (f.mid0.y - st.cy - st.pan.y),
+                  } }));
+                }}
+                onPointerUp={(e) => { if (e.pointerType === "touch") pinches.current[p].up(e); }}
+                onPointerCancel={(e) => { if (e.pointerType === "touch") pinches.current[p].up(e); }}>
               <div className="flex h-full w-full items-center justify-center"
                 style={{ transform: `translate(${pan[p].x}px, ${pan[p].y}px) scale(${zoom[p]})`, transformOrigin: "center" }}>
               <canvas
@@ -2680,11 +2753,19 @@ export default function Viewer({
                   ...(tool === "pencil" && !(spaceHeld && canZoomPan)
                     ? { cursor: pencilCursor(erasing ? "#ffffff" : SEGMENTS.find((x) => x.value === seg)!.color) }
                     : {}),
+                  touchAction: "none",
                 }}
-                onMouseDown={(e) => {
+                onPointerDown={(e) => {
+                  setActivePlane(p);
+                  const touch = e.pointerType === "touch";
+                  if (e.pointerType === "pen") {
+                    penSeen.current = true;
+                    if (panStart.current) stopPan(); // the pen wins over a resting palm
+                  }
+                  if (touch && (pinches.current[p].count > 1 || painting.current)) return;
                   if (tool === "torch") return; // Pitfall-1: mouse down with torch tool does nothing
                   if (spaceHeldRef.current) return; // Space is panning, not drawing
-                  if (tool === "pan") {
+                  if (tool === "pan" || (touch && (penSeen.current || !canAnnotate))) {
                     if (e.button === 0 && canZoomPan) startPan(p, e);
                     return;
                   }
@@ -2698,17 +2779,17 @@ export default function Viewer({
                   if (tool === "pencil") {
                     pencilPlane.current = p;
                     outline.current = [[hit.a, hit.b]];
-                    beginStroke(p);
+                    beginStroke(p, e);
                     setOutlineTick((n) => n + 1);
                   } else {
                     pushUndo();
                     strokeHasBone.current = sliceHasBone(p);
-                    beginStroke(p);
+                    beginStroke(p, e);
                     paintAt(p, hit);
                     if (!locked && canMoveSlices) moveCursor(p, hit.a, hit.b);
                   }
                 }}
-                onMouseMove={(e) => {
+                onPointerMove={(e) => {
                   const hit = toVoxel(p, e);
                   if (hit && collabToken && collab.connected) {
                     const g = planeGeom(p, vol);
@@ -2727,16 +2808,17 @@ export default function Viewer({
                     }
                   }
                   if (!painting.current || spaceHeldRef.current) return;
+                  if (strokePointer.current?.id !== e.pointerId) return;
                   // The button was released outside the window, where no
-                  // mouseup reached us: end the stroke now.
+                  // pointerup reached us: end the stroke now.
                   if (e.buttons === 0) { endStroke(); return; }
                   if (!hit || strokePlane.current !== p) return;
                   if (tool === "pencil") traceTo(hit);
                   else if (tool === "brush") paintAt(p, hit);
                 }}
-                onMouseLeave={() => {
+                onPointerLeave={() => {
                   // Leaving the image does not end a stroke; releasing the
-                  // mouse button does, wherever it happens.
+                  // mouse button or lifting the pen does, wherever it happens.
                   if (torchRef.current?.plane === p) {
                     torchRef.current = null;
                     draw(p);
