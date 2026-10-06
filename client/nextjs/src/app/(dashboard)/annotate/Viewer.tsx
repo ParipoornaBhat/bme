@@ -1433,6 +1433,7 @@ export default function Viewer({
   const strokePointer = useRef<{ id: number; type: string } | null>(null);
 
   const beginStroke = (p: Plane, e: React.PointerEvent) => {
+    window.getSelection()?.removeAllRanges();
     strokePlane.current = p;
     strokePointer.current = { id: e.pointerId, type: e.pointerType };
     painting.current = true;
@@ -2983,11 +2984,15 @@ export default function Viewer({
       )}
 
       {/* Four-Up: three orthogonal views plus the 3D view, as in Slicer */}
+      {/* Unselectable, and no native drags: with a canvas inside a page
+          selection (a stray drag, Ctrl+A), pressing the brush dragged a
+          ghost copy of the slice and the stroke stopped after one dot. */}
       <div
         ref={gridRef}
+        onDragStart={(e) => e.preventDefault()}
         className={focusOn
-          ? `grid min-h-0 flex-1 gap-1 ${expanded ? "grid-cols-1" : "grid-cols-2 grid-rows-2"}`
-          : `grid gap-2 grid-cols-1 min-h-0 ${expanded ? "" : "md:grid-cols-2 lg:grid-rows-2"}`}
+          ? `grid min-h-0 flex-1 select-none gap-1 ${expanded ? "grid-cols-1" : "grid-cols-2 grid-rows-2"}`
+          : `grid select-none gap-2 grid-cols-1 min-h-0 ${expanded ? "" : "md:grid-cols-2 lg:grid-rows-2"}`}
         style={!focusOn && gridHeight !== null ? { height: gridHeight } : undefined}
       >
         {PLANES.map((p) => {
