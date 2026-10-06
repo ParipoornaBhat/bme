@@ -3,7 +3,8 @@
 import { useEffect, useMemo, useState } from "react";
 import { Boxes, CheckCircle2, ChevronLeft, ChevronRight, Circle, Download, Flag, Layers, Search, Users } from "lucide-react";
 import type { FlagRecord } from "~/lib/flag-store";
-import Viewer from "./Viewer";
+import { useFocusMode } from "~/lib/useFocusMode";
+import Viewer, { type ViewerView } from "./Viewer";
 import Painter2D from "./Painter2D";
 
 type Case = {
@@ -47,6 +48,8 @@ export default function AnnotatePage() {
   const [needFrom, setNeedFrom] = useState<string[]>([]);
   const [caseListCollapsed, setCaseListCollapsed] = useState(false);
   const [casesState, setCasesState] = useState<"loading" | "ready" | "error">("loading");
+  // Held here, not in the viewer: the viewer is remounted on every case switch.
+  const focus = useFocusMode<ViewerView>();
 
   // Restore tab and filters from localStorage
   useEffect(() => {
@@ -154,6 +157,11 @@ export default function AnnotatePage() {
   );
 
   const done = cases.filter((c) => c.annotated).length;
+
+  // Previous and next follow the list as filtered on screen.
+  const at = visible.findIndex((c) => c.id === selected);
+  const prevCase = at > 0 ? visible[at - 1].id : null;
+  const nextCase = at < visible.length - 1 ? visible[at + 1].id : null;
 
   return (
     <div className="flex flex-col gap-2 h-full">
@@ -390,6 +398,9 @@ export default function AnnotatePage() {
                 onSaved={load}
                 savedOnDisk={cases.find((c) => c.id === selected)?.annotated ?? false}
                 flag={cases.find((c) => c.id === selected)?.flag ?? null}
+                focus={focus}
+                onPrevCase={prevCase ? () => handleSelectCase(prevCase) : undefined}
+                onNextCase={nextCase ? () => handleSelectCase(nextCase) : undefined}
               />
             ) : (
               <div className="flex h-96 items-center justify-center rounded-lg border border-dashed border-border text-sm text-muted-foreground">

@@ -1,9 +1,11 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import {
   Check,
   Keyboard,
+  LayoutGrid,
   ChevronDown,
   ChevronLeft,
   ChevronRight,
@@ -17,7 +19,9 @@ import {
   Link2Off,
   Loader2,
   Lock,
+  Maximize,
   Maximize2,
+  Minimize,
   Minimize2,
   Minus,
   Paintbrush,
@@ -67,6 +71,7 @@ import { isInTorch, type TorchState } from "~/lib/torch";
 import type { FlagRecord } from "~/lib/flag-store";
 import FlagDialog from "./FlagDialog";
 import { drawSuggestionEdges, useSuggestions } from "./suggestions";
+import { useFocusMode, type FocusMode } from "~/lib/useFocusMode";
 
 /**
  * Three-plane viewer with painting, modelled on 3D Slicer's Four-Up layout.
@@ -100,6 +105,8 @@ export const SEGMENTS = [
 
 type Plane = "axial" | "coronal" | "sagittal";
 const PLANES: Plane[] = ["axial", "coronal", "sagittal"];
+/** A view that can be shown on its own: one of the planes, or the 3D render. */
+export type ViewerView = Plane | "3d";
 
 // Slicer's slice-view colours. Familiar to anyone who has used it, and they
 // make "which view am I in" answerable at a glance.
@@ -307,6 +314,38 @@ function SegmentMeasures({
   );
 }
 
+function RailButton({
+  active = false,
+  title,
+  onClick,
+  disabled,
+  children,
+}: {
+  active?: boolean | "danger";
+  title: string;
+  onClick: () => void;
+  disabled?: boolean;
+  children: React.ReactNode;
+}) {
+  return (
+    <button
+      type="button"
+      title={title}
+      onClick={onClick}
+      disabled={disabled}
+      className={`flex h-7 w-8 shrink-0 cursor-pointer items-center justify-center rounded-md border transition disabled:cursor-default disabled:opacity-30 ${
+        active === "danger"
+          ? "border-destructive bg-destructive/10 text-destructive"
+          : active
+          ? "border-primary bg-primary text-primary-foreground"
+          : "border-transparent text-muted-foreground hover:bg-muted hover:text-foreground"
+      }`}
+    >
+      {children}
+    </button>
+  );
+}
+
 export default function Viewer({
   caseId,
   onSaved,
@@ -315,6 +354,9 @@ export default function Viewer({
   collabToken: externalCollabToken,
   isCollaborator = false,
   collaboratorUserName,
+  focus: focusFromPage,
+  onPrevCase,
+  onNextCase,
 }: {
   caseId: string;
   onSaved?: () => void;
@@ -326,6 +368,11 @@ export default function Viewer({
   collabToken?: string;
   isCollaborator?: boolean;
   collaboratorUserName?: string;
+  /** Focus mode owned by the page, so it outlives the viewer across case switches. */
+  focus?: FocusMode<ViewerView>;
+  /** Neighbouring cases in the page's list; absent at either end. */
+  onPrevCase?: () => void;
+  onNextCase?: () => void;
 }) {
   const { data: session } = useSession();
   const [vol, setVol] = useState<Vol | null>(null);
@@ -572,8 +619,35 @@ export default function Viewer({
     axial: null, coronal: null, sagittal: null,
   });
   const [showShortcuts, setShowShortcuts] = useState(false);
+  const ownFocus = useFocusMode<ViewerView>();
+  const focus = focusFromPage ?? ownFocus;
+  const focusOn = focus.active;
+  const focusExitRef = useRef(focus.exit);
+  focusExitRef.current = focus.exit;
+  const focusToggleRef = useRef(focus.toggle);
+  focusToggleRef.current = focus.toggle;
+  const focusOnRef = useRef(focusOn);
+  focusOnRef.current = focusOn;
+  const [focusMenuOpen, setFocusMenuOpen] = useState(false);
+  // The viewer is portalled through a node of its own, which sits in place
+  // normally and is moved to <body> in focus mode. Moving the node, rather
+  // than rendering into a different parent, keeps the canvases and the 3D
+  // context alive; and from <body> the focus layer is not trapped under the
+  // dashboard header by the stacking context the page content sits in.
+  const [stage, setStage] = useState<HTMLDivElement | null>(null);
+  const [slot, setSlot] = useState<HTMLDivElement | null>(null);
+  useEffect(() => {
+    const d = document.createElement("div");
+    setStage(d);
+    return () => d.remove();
+  }, []);
+  useLayoutEffect(() => {
+    const parent = focusOn ? document.body : slot;
+    if (stage && parent && stage.parentNode !== parent) parent.appendChild(stage);
+  }, [stage, slot, focusOn]);
   // One view shown full size in place of the four-up, or null for all four.
-  const [expanded, setExpanded] = useState<Plane | "3d" | null>(null);
+  const expanded = focus.solo;
+  const setExpanded = focus.setSolo;
   const expandedRef = useRef(expanded);
   expandedRef.current = expanded;
   const showShortcutsRef = useRef(showShortcuts);
@@ -1780,8 +1854,15 @@ export default function Viewer({
       else if (e.key === "0" || e.key.toLowerCase() === "e") toggleEraser();
       else if (e.key.toLowerCase() === "v") cycleViewRef.current();
       else if (e.key.toLowerCase() === "l") setLocked((v) => !v);
+      else if (e.key.toLowerCase() === "f" && !painting.current) focusToggleRef.current();
       else if (e.key === "Escape" && showShortcutsRef.current) {
         setShowShortcuts(false);
+      }
+      // Esc leaves focus mode outright, not one layout at a time: in browser
+      // fullscreen the browser takes Esc and leaves anyway.
+      else if (e.key === "Escape" && focusOnRef.current && !painting.current) {
+        setFocusMenuOpen(false);
+        focusExitRef.current();
       }
       else if (e.key === "Escape" && expandedRef.current && !painting.current) {
         setExpanded(null);
@@ -1844,6 +1925,27 @@ export default function Viewer({
     if (screen) return screen;
   }
 
+  const changeProtectLesion = (on: boolean) => {
+    setProtectLesion(on);
+    try {
+      localStorage.setItem("bme_protect_lesion", String(on));
+    } catch {}
+  };
+  const changeAutoSave = (on: boolean) => {
+    setAutoSave(on);
+    try {
+      localStorage.setItem("bme_viewer_autosave", on ? "true" : "false");
+    } catch { /* ignore */ }
+    if (on) toast.success("Auto Save enabled");
+    else toast.info("Auto Save disabled");
+  };
+  // Switching case drops edits that are neither saved nor queued for auto save.
+  const switchCase = (go?: () => void) => {
+    if (!go) return;
+    if (dirty && !autoSave && !confirm(`${caseId} has unsaved changes. Switch case and lose them?`)) return;
+    go();
+  };
+
   const guestHeader = isCollaborator && (
     <CollaborationViewerHeader
       caseId={caseId}
@@ -1857,21 +1959,228 @@ export default function Viewer({
     />
   );
 
+  const placed = (content: React.ReactNode) => (
+    <>
+      <div ref={setSlot} />
+      {stage && createPortal(content, stage)}
+    </>
+  );
+
   if (busy) {
-    return (
-      <div className="flex h-96 items-center justify-center gap-2 text-sm text-muted-foreground">
+    return placed(
+      <div className={`flex items-center justify-center gap-2 text-sm text-muted-foreground ${
+        focusOn ? "fixed inset-0 z-50 bg-background" : "h-96"
+      }`}>
         <Loader2 className="h-4 w-4 animate-spin" /> {status}
       </div>
     );
   }
   if (!vol) {
-    return <div className="rounded-lg border border-dashed p-10 text-center text-sm text-muted-foreground">{status}</div>;
+    return placed(
+      <div className={focusOn ? "fixed inset-0 z-50 flex items-center justify-center bg-background p-10 text-sm text-muted-foreground" : "rounded-lg border border-dashed p-10 text-center text-sm text-muted-foreground"}>
+        {status}
+        {focusOn && (
+          <button type="button" onClick={focus.exit} className="ml-3 rounded border border-border px-2 py-1 text-xs hover:text-foreground">
+            Leave focus mode
+          </button>
+        )}
+      </div>
+    );
   }
 
-  return (
-    <div ref={rootRef} className="space-y-2">
-      {guestHeader}
-      {seriesChoices.length > 1 && (
+  const railCheck = (label: string, checked: boolean, onChange: (on: boolean) => void, title?: string) => (
+    <label className="flex cursor-pointer select-none items-center gap-2 text-muted-foreground hover:text-foreground" title={title}>
+      <input
+        type="checkbox"
+        checked={checked}
+        onChange={(e) => onChange(e.target.checked)}
+        className="h-3.5 w-3.5 rounded border-border accent-primary"
+      />
+      <span>{label}</span>
+    </label>
+  );
+  const railDivider = <div className="my-1 h-px w-6 shrink-0 bg-border" />;
+  const stepTorch = (d: number) => setTorchSize((t) => {
+    const next = Math.min(240, Math.max(8, t + d));
+    try { localStorage.setItem("bme_viewer_torch_size", String(next)); } catch {}
+    return next;
+  });
+  const railSize = (what: string, value: number, step: (d: number) => void) => (
+    <div className="flex shrink-0 flex-col items-center">
+      <RailButton title={`Larger ${what} (])`} onClick={() => step(1)}><Plus className="h-3 w-3" /></RailButton>
+      <span className="text-[10px] tabular-nums text-muted-foreground" title={`${what} size`}>{value}</span>
+      <RailButton title={`Smaller ${what} ([)`} onClick={() => step(-1)}><Minus className="h-3 w-3" /></RailButton>
+    </div>
+  );
+
+  // Focus mode keeps only what painting needs within reach. Settings that are
+  // set once per session sit behind one button; anything destructive or
+  // session-level (delete, import, collaboration) is left to the normal view.
+  const focusRail = focusOn && (
+    <div className="flex w-12 shrink-0 flex-col items-center gap-0.5 overflow-y-auto border-r border-border bg-card py-2">
+      {canAnnotate && (
+        <>
+          {SEGMENTS.map((sg, i) => (
+            <button
+              key={sg.value}
+              type="button"
+              onClick={() => { setSeg(sg.value); drawWithLabel(); }}
+              title={`${sg.label} (Key ${i + 1}) - ${counts[sg.value - 1].toLocaleString()} voxels`}
+              className={`flex h-7 w-8 shrink-0 cursor-pointer items-center justify-center rounded-md transition ${
+                seg === sg.value && !erasing && drawing ? "bg-muted ring-1 ring-primary" : "hover:bg-muted"
+              }`}
+            >
+              <span className="block h-3.5 w-3.5 rounded-full" style={{ backgroundColor: sg.color }} />
+            </button>
+          ))}
+          {railDivider}
+          <RailButton active={tool === "brush"} title="Brush (Key 4 or B)" onClick={() => pickTool("brush")}>
+            <Paintbrush className="h-4 w-4" />
+          </RailButton>
+          <RailButton active={tool === "pencil"} title="Pencil: trace an outline, the inside fills (Key 5 or P)" onClick={() => pickTool("pencil")}>
+            <Lasso className="h-4 w-4" />
+          </RailButton>
+        </>
+      )}
+      {canZoomPan && (
+        <RailButton active={tool === "pan"} title="Hand: drag to move the view (Key 6 or H)" onClick={() => pickTool("pan")}>
+          <Hand className="h-4 w-4" />
+        </RailButton>
+      )}
+      <RailButton active={tool === "torch"} title="Torch: see the scan under the labels (Key 7, or hold T)" onClick={() => pickTool("torch")}>
+        <Flashlight className="h-4 w-4" />
+      </RailButton>
+      {canAnnotate && (
+        <RailButton active={erasing ? "danger" : false} title="Eraser (Key 0 or E)" onClick={() => toggleEraser()}>
+          <Eraser className="h-4 w-4" />
+        </RailButton>
+      )}
+      {torchActive
+        ? railSize("torch", torchSize, (d) => stepTorch(d * 8))
+        : canAnnotate && tool === "brush" && railSize("brush", brush, (d) => setBrush((b) => Math.min(20, Math.max(1, b + d))))}
+      {canAnnotate && (
+        <>
+          {railDivider}
+          <RailButton title="Undo (Ctrl+Z)" onClick={undo}><RotateCcw className="h-4 w-4" /></RailButton>
+          <RailButton title="Redo (Ctrl+Y)" onClick={redo}><RotateCw className="h-4 w-4" /></RailButton>
+        </>
+      )}
+
+      <div className="flex-1" />
+
+      <RailButton active={expanded === null} title="All four views (double-click a view to show it alone)" onClick={() => setExpanded(null)}>
+        <LayoutGrid className="h-4 w-4" />
+      </RailButton>
+      <div className="grid shrink-0 grid-cols-2 gap-0.5">
+        {([...PLANES, "3d"] as const).map((v) => (
+          <button
+            key={v}
+            type="button"
+            onClick={() => setExpanded(v)}
+            title={v === "3d" ? "3D view alone" : `${v[0].toUpperCase()}${v.slice(1)} view alone`}
+            className={`flex h-6 w-5 cursor-pointer items-center justify-center rounded border text-[10px] font-bold transition ${
+              expanded === v ? "bg-muted" : "border-transparent hover:bg-muted"
+            }`}
+            style={v === "3d" ? undefined : { color: PLANE_COLOR[v], borderColor: expanded === v ? PLANE_COLOR[v] : undefined }}
+          >
+            {v === "3d" ? "3D" : v[0].toUpperCase()}
+          </button>
+        ))}
+      </div>
+      {railDivider}
+
+      {(onPrevCase || onNextCase) && (
+        <RailButton title="Previous case" disabled={!onPrevCase} onClick={() => switchCase(onPrevCase)}>
+          <ChevronUp className="h-4 w-4" />
+        </RailButton>
+      )}
+      <span className="w-full truncate px-0.5 text-center font-mono text-[9px] text-muted-foreground" title={caseId}>
+        {caseId}
+      </span>
+      {(onPrevCase || onNextCase) && (
+        <RailButton title="Next case" disabled={!onNextCase} onClick={() => switchCase(onNextCase)}>
+          <ChevronDown className="h-4 w-4" />
+        </RailButton>
+      )}
+      {canAnnotate && (
+        <RailButton
+          active={dirty && !saving}
+          title={saving ? "Saving…" : dirty ? "Save (Ctrl+S)" : autoSaveStatus || status}
+          onClick={() => { if (dirty && !saving) void save(); }}
+        >
+          {saving ? <Loader2 className="h-4 w-4 animate-spin" />
+            : dirty ? <Save className="h-4 w-4" />
+            : <Check className="h-4 w-4 text-emerald-500" />}
+        </RailButton>
+      )}
+      <RailButton active={focusMenuOpen} title="View and painting settings" onClick={() => setFocusMenuOpen((v) => !v)}>
+        <SlidersHorizontal className="h-4 w-4" />
+      </RailButton>
+      {focusMenuOpen && (
+        <>
+          <div className="fixed inset-0 z-10" onClick={() => setFocusMenuOpen(false)} />
+          <div className="fixed bottom-2 left-14 z-20 w-72 space-y-3 rounded-lg border border-border bg-card p-3 text-xs shadow-xl">
+            <div className="[&>div]:flex-wrap [&>div]:gap-y-2">
+              <OverlayControls view={view} setView={setView} opacity={opacity} setOpacity={setOpacity} compact />
+            </div>
+            {canAnnotate && (
+              <div className="space-y-1.5">
+                {railCheck("Only inside bone", maskInside, setMaskInside)}
+                {railCheck("Protect lesion", protectLesion, changeProtectLesion)}
+                {railCheck("Auto-pan", autoPan, setAutoPan, "While drawing in a zoomed view, slide the image when the pointer nears an edge")}
+                {railCheck("Dotted pencil trace", pencilDotted, setPencilDotted)}
+                {railCheck("Auto Save", autoSave, changeAutoSave)}
+              </div>
+            )}
+            <button
+              type="button"
+              onClick={() => setLocked((v) => !v)}
+              title="Key L"
+              className={`flex w-full cursor-pointer items-center gap-2 rounded-md border px-2 py-1 text-left transition ${
+                locked ? "border-border text-muted-foreground hover:text-foreground" : "border-primary bg-primary/20 text-primary"
+              }`}
+            >
+              {locked ? <Link2Off className="h-3.5 w-3.5" /> : <Link2 className="h-3.5 w-3.5" />}
+              {locked ? "Crosshair stays put while painting" : "Crosshair follows the brush"}
+            </button>
+            {canAnnotate && (
+              <button
+                type="button"
+                onClick={() => { setFocusMenuOpen(false); setFlagModalOpen(true); }}
+                className={`flex w-full cursor-pointer items-center gap-2 rounded-md border px-2 py-1 transition ${
+                  flag ? "border-amber-500/50 bg-amber-500/15 text-amber-500" : "border-border text-muted-foreground hover:text-foreground"
+                }`}
+              >
+                <Flag className={`h-3.5 w-3.5 ${flag ? "fill-amber-500" : ""}`} />
+                {flag ? `Flagged: ${flag.reason || "Not Sure"}` : "Flag case"}
+              </button>
+            )}
+            {!isCollaborator && canAnnotate && (
+              <button
+                type="button"
+                onClick={() => { setFocusMenuOpen(false); void suggestions.request(); }}
+                disabled={suggestBusy}
+                className="flex w-full cursor-pointer items-center gap-2 rounded-md border border-violet-500/40 bg-violet-500/10 px-2 py-1 text-violet-300 transition hover:bg-violet-500/20 disabled:opacity-40"
+              >
+                {suggestBusy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Sparkles className="h-3.5 w-3.5" />}
+                AI suggestions
+              </button>
+            )}
+          </div>
+        </>
+      )}
+      <RailButton title="Leave focus mode (F or Esc)" onClick={() => { setFocusMenuOpen(false); focus.exit(); }}>
+        <Minimize className="h-4 w-4" />
+      </RailButton>
+    </div>
+  );
+
+  return placed(
+    <div ref={rootRef} className={focusOn ? "fixed inset-0 z-50 flex bg-background text-foreground" : undefined}>
+      {focusRail}
+      <div className={focusOn ? "flex min-w-0 flex-1 flex-col gap-1 p-1" : "space-y-2"}>
+      {!focusOn && guestHeader}
+      {!focusOn && seriesChoices.length > 1 && (
         <div className="flex flex-wrap items-center gap-1.5">
           {seriesChoices.map((s) => (
             <button
@@ -1900,8 +2209,8 @@ export default function Viewer({
           if (f) void importSlicer(f);
         }}
       />
-      {/* 3D Toolbar - Compact Bar vs Full Toolbar */}
-      {toolbarCollapsed ? (
+      {/* 3D Toolbar - Compact Bar vs Full Toolbar; focus mode has its own rail */}
+      {focusOn ? null : toolbarCollapsed ? (
         <div className="flex items-center justify-between gap-2 rounded-lg border border-border bg-card p-2 overflow-x-auto py-1.5 [&_button]:whitespace-nowrap [&_label]:whitespace-nowrap">
           <div className="flex items-center gap-1.5 shrink-0">
             {canAnnotate && (
@@ -2124,6 +2433,14 @@ export default function Viewer({
             )}
             <button
               type="button"
+              onClick={focus.enter}
+              title="Focus mode: full screen with only the painting tools (F)"
+              className="p-1.5 rounded border border-border bg-background text-muted-foreground hover:text-foreground transition cursor-pointer"
+            >
+              <Maximize className="h-3.5 w-3.5" />
+            </button>
+            <button
+              type="button"
               onClick={() => setToolbarCollapsed(false)}
               title="Expand full toolbar"
               className="p-1.5 rounded border border-border bg-background text-muted-foreground hover:text-foreground transition cursor-pointer ml-1"
@@ -2250,12 +2567,7 @@ export default function Viewer({
                   <input
                     type="checkbox"
                     checked={protectLesion}
-                    onChange={(e) => {
-                      setProtectLesion(e.target.checked);
-                      try {
-                        localStorage.setItem("bme_protect_lesion", String(e.target.checked));
-                      } catch {}
-                    }}
+                    onChange={(e) => changeProtectLesion(e.target.checked)}
                     className="rounded border-border accent-primary h-3.5 w-3.5"
                   />
                   <span>Protect lesion</span>
@@ -2400,14 +2712,7 @@ export default function Viewer({
                     <input
                       type="checkbox"
                       checked={autoSave}
-                      onChange={(e) => {
-                        setAutoSave(e.target.checked);
-                        try {
-                          localStorage.setItem("bme_viewer_autosave", e.target.checked ? "true" : "false");
-                        } catch { /* ignore */ }
-                        if (e.target.checked) toast.success("Auto Save enabled");
-                        else toast.info("Auto Save disabled");
-                      }}
+                      onChange={(e) => changeAutoSave(e.target.checked)}
                       className="rounded border-border accent-primary h-3.5 w-3.5"
                     />
                     <span className="font-medium">Auto Save</span>
@@ -2525,6 +2830,16 @@ export default function Viewer({
               </>
             )}
 
+            <button
+              type="button"
+              onClick={focus.enter}
+              title="Focus mode: full screen with only the painting tools (F)"
+              className="inline-flex items-center gap-1 rounded border border-border bg-background px-2 py-1 text-xs text-muted-foreground hover:text-foreground transition cursor-pointer"
+            >
+              <Maximize className="h-3 w-3" />
+              <span>Focus</span>
+            </button>
+
             {/* Collapse Toolbar Toggle */}
             <button
               type="button"
@@ -2538,7 +2853,7 @@ export default function Viewer({
         </div>
       )}
 
-      {flag && (
+      {!focusOn && flag && (
         <div className="flex items-center justify-between rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-1.5 text-xs text-amber-400">
           <div className="flex items-center gap-2">
             <Flag className="h-3.5 w-3.5 fill-amber-400 text-amber-400 shrink-0" />
@@ -2617,6 +2932,7 @@ export default function Viewer({
       })()}
 
       {/* Info bar: which scan, its geometry, and the latest load/save message. */}
+      {!focusOn && (
       <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-0.5 px-1 text-xs text-muted-foreground">
         <div className="flex items-center gap-3">
           <span className="font-mono font-medium text-foreground">{caseId}</span>
@@ -2657,18 +2973,22 @@ export default function Viewer({
                   <kbd className="font-mono">One finger</kbd><span>Draws; pans once a stylus has been used</span>
                   <kbd className="font-mono">Dbl-click title</kbd><span>Full view (Esc to go back)</span>
                   <kbd className="font-mono">Esc</kbd><span>Discard an outline while tracing</span>
+                  <kbd className="font-mono">F</kbd><span>Focus mode: full screen, tools only</span>
                 </div>
               </div>
             )}
           </div>
         </div>
       </div>
+      )}
 
       {/* Four-Up: three orthogonal views plus the 3D view, as in Slicer */}
       <div
         ref={gridRef}
-        className={`grid gap-2 grid-cols-1 min-h-0 ${expanded ? "" : "md:grid-cols-2 lg:grid-rows-2"}`}
-        style={gridHeight !== null ? { height: gridHeight } : undefined}
+        className={focusOn
+          ? `grid min-h-0 flex-1 gap-1 ${expanded ? "grid-cols-1" : "grid-cols-2 grid-rows-2"}`
+          : `grid gap-2 grid-cols-1 min-h-0 ${expanded ? "" : "md:grid-cols-2 lg:grid-rows-2"}`}
+        style={!focusOn && gridHeight !== null ? { height: gridHeight } : undefined}
       >
         {PLANES.map((p) => {
           const g = planeGeom(p, vol);
@@ -2718,7 +3038,7 @@ export default function Viewer({
                   </button>
                   <span className="ml-1 tabular-nums text-neutral-400">{s + 1}/{depth}</span>
                   <button type="button"
-                    title={expanded === p ? "Back to all four views (Esc)" : "Full view"}
+                    title={expanded === p ? `Back to all four views${focusOn ? "" : " (Esc)"}` : "Full view"}
                     onClick={() => toggleExpanded(p)}
                     className="ml-1 rounded border border-neutral-700 px-1 text-neutral-300 hover:bg-neutral-800">
                     {expanded === p ? <Minimize2 className="h-2.5 w-2.5" /> : <Maximize2 className="h-2.5 w-2.5" />}
@@ -2916,7 +3236,7 @@ export default function Viewer({
               fill
             />
           </div>
-          <SegmentMeasures counts={counts} spacing={vol.spacing} />
+          {!focusOn && <SegmentMeasures counts={counts} spacing={vol.spacing} />}
         </div>
       </div>
 
@@ -2967,6 +3287,7 @@ export default function Viewer({
           </div>
         </div>
       )}
+      </div>
     </div>
   );
 }
