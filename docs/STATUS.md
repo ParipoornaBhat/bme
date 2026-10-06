@@ -4,7 +4,7 @@
 If you are picking this project up cold (new chat, new teammate, new machine), read this
 file first, then [SUMMARY.md](SUMMARY.md) for the full picture, then [PRD.md](PRD.md).
 
-Last updated: **2026-10-03**
+Last updated: **2026-10-07**
 
 ---
 
@@ -62,6 +62,19 @@ Phases are defined in [PRD.md](PRD.md) §8.
 ## Do this next
 
 In order. Each step's output is the next step's input.
+
+0. **Team annotation split and merge (2026-10-07).** Bone painting is split by case:
+   Aditi 1-2, 6-26 · Paripoorna 3-5, 54-59 · Reegan 27-47, 60-61 · Elvin 48-53 (the
+   split lives in `TEAM` in `ml/scripts/team_annotations.py`). Elvin's laptop is the hub.
+   Every laptop runs `team_annotations.py assign . --apply` once, to fill `assigned_to` in
+   the worklist. A teammate runs `export . --who <name>`, which zips only their cases with bone
+   painted into `data/exports/`. The hub runs `import . <zip>` (dry run, then `--apply`).
+   Import refuses a case painted on a different scan or owned by someone else, keeps the
+   local file on a conflict (unless `--prefer-incoming`), and backs up anything it replaces
+   to `data/annotations_backup/<stamp>/`. Tested on a scratch copy only; the real worklist
+   has not been changed. No overlap set yet, so no inter-rater Dice.
+   As of today, this laptop has bone painted on 11 cases. 469 axial slices carry edema across the 61 cases;
+   66 of them also have bone painted.
 
 0. **AI suggestions on the 3D annotate page (2026-10-03).** "AI suggestions" in the 3D
    toolbar runs the shared 2D models on every **axial** slice of the open scan (axial axis
