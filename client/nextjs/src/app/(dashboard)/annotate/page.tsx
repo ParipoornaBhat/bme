@@ -164,7 +164,7 @@ export default function AnnotatePage() {
   const nextCase = at < visible.length - 1 ? visible[at + 1].id : null;
 
   return (
-    <div className="flex flex-col gap-2 h-full">
+    <div className="flex min-h-0 flex-1 flex-col gap-2">
       <div className="flex flex-wrap items-center justify-between gap-3 border-b border-border pb-1">
         <div className="flex items-center gap-3">
           <h1 className="text-base font-bold tracking-tight">Annotate</h1>
@@ -205,7 +205,7 @@ export default function AnnotatePage() {
         </div>
       )}
 
-      <div className="flex-1 min-h-0">
+      <div className="flex min-h-0 flex-1 flex-col">
         {tab === "2d" && <Painter2D />}
 
       {/* Mobile/Tablet Case List Toggle for 3D */}
@@ -229,9 +229,11 @@ export default function AnnotatePage() {
       )}
 
       {tab === "3d" && (
-        <div className={`grid gap-3 ${caseListCollapsed ? "grid-cols-1" : "lg:grid-cols-[230px_minmax(0,1fr)]"}`}>
+        // On a wide screen the case list and the viewer share the window
+        // height, and only the list scrolls, so the toolbar never leaves view.
+        <div className={`grid gap-3 lg:min-h-0 lg:flex-1 lg:grid-rows-[minmax(0,1fr)] ${caseListCollapsed ? "grid-cols-1" : "lg:grid-cols-[230px_minmax(0,1fr)]"}`}>
           {!caseListCollapsed && (
-            <div className="space-y-3 rounded-lg border border-border bg-card p-2.5">
+            <div className="flex min-h-0 flex-col gap-3 rounded-lg border border-border bg-card p-2.5">
               <div className="flex items-center gap-1.5">
                 <div className="relative flex-1">
                   <Search className="absolute left-2.5 top-2.5 h-4 w-4 text-muted-foreground" />
@@ -292,8 +294,7 @@ export default function AnnotatePage() {
                 })}
               </div>
 
-              <div className="space-y-1 overflow-y-auto rounded-lg border border-border p-1"
-                style={{ maxHeight: "min(calc(100vh - 250px), 1100px)" }}>
+              <div className="max-h-[min(calc(100vh_-_250px),1100px)] space-y-1 overflow-y-auto rounded-lg border border-border p-1 lg:max-h-none lg:min-h-0 lg:flex-1">
                 {visible.map((c) => (
                   <button
                     key={c.id}
@@ -354,7 +355,7 @@ export default function AnnotatePage() {
                 )}
               </div>
 
-              <p className="text-xs text-muted-foreground">
+              <p className="shrink-0 text-[11px] leading-snug text-muted-foreground">
                 <span className="mr-2 inline-block h-2 w-2 rounded-full bg-rose-500" />BME
                 <span className="ml-3 mr-2 inline-block h-2 w-2 rounded-full bg-slate-400" />No BME
                 <br />
@@ -366,7 +367,7 @@ export default function AnnotatePage() {
             </div>
           )}
 
-          <div>
+          <div className="flex min-h-0 flex-col">
             {caseListCollapsed && (
               <div className="mb-2 hidden lg:flex items-center">
                 <button

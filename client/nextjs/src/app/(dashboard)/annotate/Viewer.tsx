@@ -10,6 +10,7 @@ import {
   ChevronLeft,
   ChevronRight,
   ChevronUp,
+  Ellipsis,
   Eraser,
   Flag,
   Flashlight,
@@ -280,35 +281,21 @@ function SegmentMeasures({
     const mm3 = n * voxel;
     return { ...s, n, mm3, cm3: mm3 / 1000 };
   }).filter((r) => r.n > 0);
+  // One line under the 3D view; voxel counts and mm³ are in the tooltip.
   return (
-    <div className="shrink-0 rounded-lg border border-border bg-card p-3 text-xs">
-      <div className="mb-2 font-semibold">Annotated region</div>
+    <div className="flex shrink-0 flex-wrap items-center gap-x-4 gap-y-1 rounded-lg border border-border bg-card px-3 py-1.5 text-xs">
+      <span className="font-semibold">Annotated</span>
       {rows.length === 0 ? (
-        <p className="text-muted-foreground">Nothing painted yet.</p>
+        <span className="text-muted-foreground">nothing painted yet</span>
       ) : (
-        <table className="w-full tabular-nums">
-          <thead>
-            <tr className="text-left text-muted-foreground">
-              <th className="pb-1 font-medium">Segment</th>
-              <th className="pb-1 text-right font-medium">Voxels</th>
-              <th className="pb-1 text-right font-medium">mm³</th>
-              <th className="pb-1 text-right font-medium">cm³</th>
-            </tr>
-          </thead>
-          <tbody>
-            {rows.map((r) => (
-              <tr key={r.value}>
-                <td className="py-0.5">
-                  <span className="mr-1.5 inline-block h-2 w-2 rounded-sm" style={{ background: r.color }} />
-                  {r.label}
-                </td>
-                <td className="py-0.5 text-right">{r.n.toLocaleString()}</td>
-                <td className="py-0.5 text-right">{r.mm3.toFixed(4)}</td>
-                <td className="py-0.5 text-right">{r.cm3.toFixed(4)}</td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
+        rows.map((r) => (
+          <span key={r.value} className="inline-flex items-center gap-1.5 tabular-nums"
+            title={`${r.n.toLocaleString()} voxels · ${r.mm3.toFixed(1)} mm³`}>
+            <span className="inline-block h-2 w-2 rounded-sm" style={{ background: r.color }} />
+            <span className="text-muted-foreground">{r.label}</span>
+            <span className="font-medium">{r.cm3.toFixed(2)} cm³</span>
+          </span>
+        ))
       )}
     </div>
   );
@@ -628,7 +615,9 @@ export default function Viewer({
   focusToggleRef.current = focus.toggle;
   const focusOnRef = useRef(focusOn);
   focusOnRef.current = focusOn;
-  const [focusMenuOpen, setFocusMenuOpen] = useState(false);
+  // The settings panel, opened from the toolbar or the focus rail.
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [moreOpen, setMoreOpen] = useState(false);
   // The viewer is portalled through a node of its own, which sits in place
   // normally and is moved to <body> in focus mode. Moving the node, rather
   // than rendering into a different parent, keeps the canvases and the 3D
@@ -638,6 +627,7 @@ export default function Viewer({
   const [slot, setSlot] = useState<HTMLDivElement | null>(null);
   useEffect(() => {
     const d = document.createElement("div");
+    d.className = "flex min-h-0 flex-1 flex-col";
     setStage(d);
     return () => d.remove();
   }, []);
@@ -654,29 +644,6 @@ export default function Viewer({
   showShortcutsRef.current = showShortcuts;
   const toggleExpanded = (v: Plane | "3d") => setExpanded((cur) => (cur === v ? null : v));
 
-  // On a wide screen the four-up is sized to end at the bottom of the window,
-  // so the views fit without scrolling the page. Measured rather than a fixed
-  // calc(): the toolbar wraps to one or two rows, and banners come and go.
-  const gridRef = useRef<HTMLDivElement | null>(null);
-  const rootRef = useRef<HTMLDivElement | null>(null);
-  const [gridHeight, setGridHeight] = useState<number | null>(null);
-  const fitGrid = useCallback(() => {
-    const el = gridRef.current;
-    if (!el) return;
-    if (window.innerWidth < 1024) {
-      setGridHeight(null);
-      return;
-    }
-    let scroller: HTMLElement | null = el.parentElement;
-    while (scroller && !/(auto|scroll)/.test(getComputedStyle(scroller).overflowY)) scroller = scroller.parentElement;
-    const scrolled = scroller ? scroller.scrollTop : window.scrollY;
-    const viewportBottom = scroller ? scroller.getBoundingClientRect().bottom : window.innerHeight;
-    const top = el.getBoundingClientRect().top + scrolled;
-    // A laptop screen still fits: 400 leaves each view about 200px, and any
-    // one of them can go full size.
-    const h = Math.max(400, Math.floor(viewportBottom - top - 12));
-    setGridHeight((cur) => (cur !== null && Math.abs(cur - h) < 2 ? cur : h));
-  }, []);
   const painting = useRef(false);
   const pencilPlane = useRef<Plane | null>(null);
   const undoStack = useRef<Uint8Array[]>([]);
@@ -1245,18 +1212,6 @@ export default function Viewer({
     return () => cleanups.forEach((fn) => fn());
   }, [vol]);
 
-  useEffect(() => {
-    if (!vol) return;
-    fitGrid();
-    const ro = new ResizeObserver(() => fitGrid());
-    if (rootRef.current) ro.observe(rootRef.current);
-    window.addEventListener("resize", fitGrid);
-    return () => {
-      ro.disconnect();
-      window.removeEventListener("resize", fitGrid);
-    };
-  }, [vol, fitGrid]);
-
   // ---- pan -------------------------------------------------------------
   // Dragging is followed on the window, so the view keeps moving when the
   // pointer runs off the canvas mid-drag.
@@ -1469,6 +1424,21 @@ export default function Viewer({
     outline.current = []; pencilPlane.current = null; painting.current = false;
     strokePlane.current = null; strokePointer.current = null; setStroking(false);
     setOutlineTick((n) => n + 1); drawAll();
+  };
+  // The undo snapshots of the last two brush strokes. A double-click to open a
+  // view full size starts two strokes first; their dots are taken back.
+  const recentTaps = useRef<{ at: number; snap: Uint8Array }[]>([]);
+  const takeBackDoubleClickDots = () => {
+    const taps = recentTaps.current;
+    recentTaps.current = [];
+    const st = undoStack.current;
+    if (taps.length < 2 || !labels) return;
+    const [a, b] = taps;
+    if (b.at - a.at > 600 || st[st.length - 1] !== b.snap || st[st.length - 2] !== a.snap) return;
+    st.length -= 2;
+    labels.set(a.snap);
+    markEdited(); recount(); drawAll();
+    scheduleAutoSaveRef.current();
   };
   const endStrokeRef = useRef(endStroke);
   endStrokeRef.current = endStroke;
@@ -1862,7 +1832,7 @@ export default function Viewer({
       // Esc leaves focus mode outright, not one layout at a time: in browser
       // fullscreen the browser takes Esc and leaves anyway.
       else if (e.key === "Escape" && focusOnRef.current && !painting.current) {
-        setFocusMenuOpen(false);
+        setSettingsOpen(false);
         focusExitRef.current();
       }
       else if (e.key === "Escape" && expandedRef.current && !painting.current) {
@@ -1962,7 +1932,7 @@ export default function Viewer({
 
   const placed = (content: React.ReactNode) => (
     <>
-      <div ref={setSlot} />
+      <div ref={setSlot} className="flex min-h-0 flex-1 flex-col" />
       {stage && createPortal(content, stage)}
     </>
   );
@@ -2014,6 +1984,67 @@ export default function Viewer({
     </div>
   );
 
+  const paintTools = [
+    { id: "brush", Icon: Paintbrush, title: "Brush (Key 4 or B)", show: canAnnotate },
+    { id: "pencil", Icon: Lasso, title: "Pencil: trace an outline, the inside fills (Key 5 or P)", show: canAnnotate },
+    { id: "pan", Icon: Hand, title: "Hand: drag to move the view (Key 6 or H)", show: canZoomPan },
+    { id: "torch", Icon: Flashlight, title: "Torch: see the scan under the labels (Key 7, or hold T)", show: true },
+  ] as const;
+
+  // What is set once and then left alone. Shared by the toolbar's Settings
+  // button and the focus rail; the rail also carries Flag and AI suggestions,
+  // which the toolbar shows as buttons of their own.
+  const settingsBody = (withActions: boolean) => (
+    <>
+      <div className="[&>div]:flex-wrap [&>div]:gap-y-2">
+        <OverlayControls view={view} setView={setView} opacity={opacity} setOpacity={setOpacity} compact />
+      </div>
+      {canAnnotate && (
+        <div className="space-y-1.5">
+          {railCheck("Only inside bone", maskInside, setMaskInside)}
+          {railCheck("Protect lesion", protectLesion, changeProtectLesion)}
+          {railCheck("Auto-pan", autoPan, setAutoPan, "While drawing in a zoomed view, slide the image when the pointer nears an edge")}
+          {railCheck("Dotted pencil trace", pencilDotted, setPencilDotted, "While tracing, show only a dotted outline instead of a solid edge over a tinted fill preview")}
+          {railCheck("Auto Save", autoSave, changeAutoSave, "Save the mask shortly after each edit")}
+        </div>
+      )}
+      <button
+        type="button"
+        onClick={() => setLocked((v) => !v)}
+        title="Key L"
+        className={`flex w-full cursor-pointer items-center gap-2 rounded-md border px-2 py-1 text-left transition ${
+          locked ? "border-border text-muted-foreground hover:text-foreground" : "border-primary bg-primary/20 text-primary"
+        }`}
+      >
+        {locked ? <Link2Off className="h-3.5 w-3.5" /> : <Link2 className="h-3.5 w-3.5" />}
+        {locked ? "Crosshair stays put while painting" : "Crosshair follows the brush"}
+      </button>
+      {withActions && canAnnotate && (
+        <button
+          type="button"
+          onClick={() => { setSettingsOpen(false); setFlagModalOpen(true); }}
+          className={`flex w-full cursor-pointer items-center gap-2 rounded-md border px-2 py-1 transition ${
+            flag ? "border-amber-500/50 bg-amber-500/15 text-amber-500" : "border-border text-muted-foreground hover:text-foreground"
+          }`}
+        >
+          <Flag className={`h-3.5 w-3.5 ${flag ? "fill-amber-500" : ""}`} />
+          {flag ? `Flagged: ${flag.reason || "Not Sure"}` : "Flag case"}
+        </button>
+      )}
+      {withActions && !isCollaborator && canAnnotate && (
+        <button
+          type="button"
+          onClick={() => { setSettingsOpen(false); void suggestions.request(); }}
+          disabled={suggestBusy}
+          className="flex w-full cursor-pointer items-center gap-2 rounded-md border border-violet-500/40 bg-violet-500/10 px-2 py-1 text-violet-300 transition hover:bg-violet-500/20 disabled:opacity-40"
+        >
+          {suggestBusy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Sparkles className="h-3.5 w-3.5" />}
+          AI suggestions
+        </button>
+      )}
+    </>
+  );
+
   // Focus mode keeps only what painting needs within reach. Settings that are
   // set once per session sit behind one button; anything destructive or
   // session-level (delete, import, collaboration) is left to the normal view.
@@ -2035,22 +2066,13 @@ export default function Viewer({
             </button>
           ))}
           {railDivider}
-          <RailButton active={tool === "brush"} title="Brush (Key 4 or B)" onClick={() => pickTool("brush")}>
-            <Paintbrush className="h-4 w-4" />
-          </RailButton>
-          <RailButton active={tool === "pencil"} title="Pencil: trace an outline, the inside fills (Key 5 or P)" onClick={() => pickTool("pencil")}>
-            <Lasso className="h-4 w-4" />
-          </RailButton>
         </>
       )}
-      {canZoomPan && (
-        <RailButton active={tool === "pan"} title="Hand: drag to move the view (Key 6 or H)" onClick={() => pickTool("pan")}>
-          <Hand className="h-4 w-4" />
+      {paintTools.filter((t) => t.show).map(({ id, Icon, title }) => (
+        <RailButton key={id} active={tool === id} title={title} onClick={() => pickTool(id)}>
+          <Icon className="h-4 w-4" />
         </RailButton>
-      )}
-      <RailButton active={tool === "torch"} title="Torch: see the scan under the labels (Key 7, or hold T)" onClick={() => pickTool("torch")}>
-        <Flashlight className="h-4 w-4" />
-      </RailButton>
+      ))}
       {canAnnotate && (
         <RailButton active={erasing ? "danger" : false} title="Eraser (Key 0 or E)" onClick={() => toggleEraser()}>
           <Eraser className="h-4 w-4" />
@@ -2114,72 +2136,27 @@ export default function Viewer({
             : <Check className="h-4 w-4 text-emerald-500" />}
         </RailButton>
       )}
-      <RailButton active={focusMenuOpen} title="View and painting settings" onClick={() => setFocusMenuOpen((v) => !v)}>
+      <RailButton active={settingsOpen} title="View and painting settings" onClick={() => setSettingsOpen((v) => !v)}>
         <SlidersHorizontal className="h-4 w-4" />
       </RailButton>
-      {focusMenuOpen && (
+      {settingsOpen && (
         <>
-          <div className="fixed inset-0 z-10" onClick={() => setFocusMenuOpen(false)} />
+          <div className="fixed inset-0 z-10" onClick={() => setSettingsOpen(false)} />
           <div className="fixed bottom-2 left-14 z-20 w-72 space-y-3 rounded-lg border border-border bg-card p-3 text-xs shadow-xl">
-            <div className="[&>div]:flex-wrap [&>div]:gap-y-2">
-              <OverlayControls view={view} setView={setView} opacity={opacity} setOpacity={setOpacity} compact />
-            </div>
-            {canAnnotate && (
-              <div className="space-y-1.5">
-                {railCheck("Only inside bone", maskInside, setMaskInside)}
-                {railCheck("Protect lesion", protectLesion, changeProtectLesion)}
-                {railCheck("Auto-pan", autoPan, setAutoPan, "While drawing in a zoomed view, slide the image when the pointer nears an edge")}
-                {railCheck("Dotted pencil trace", pencilDotted, setPencilDotted)}
-                {railCheck("Auto Save", autoSave, changeAutoSave)}
-              </div>
-            )}
-            <button
-              type="button"
-              onClick={() => setLocked((v) => !v)}
-              title="Key L"
-              className={`flex w-full cursor-pointer items-center gap-2 rounded-md border px-2 py-1 text-left transition ${
-                locked ? "border-border text-muted-foreground hover:text-foreground" : "border-primary bg-primary/20 text-primary"
-              }`}
-            >
-              {locked ? <Link2Off className="h-3.5 w-3.5" /> : <Link2 className="h-3.5 w-3.5" />}
-              {locked ? "Crosshair stays put while painting" : "Crosshair follows the brush"}
-            </button>
-            {canAnnotate && (
-              <button
-                type="button"
-                onClick={() => { setFocusMenuOpen(false); setFlagModalOpen(true); }}
-                className={`flex w-full cursor-pointer items-center gap-2 rounded-md border px-2 py-1 transition ${
-                  flag ? "border-amber-500/50 bg-amber-500/15 text-amber-500" : "border-border text-muted-foreground hover:text-foreground"
-                }`}
-              >
-                <Flag className={`h-3.5 w-3.5 ${flag ? "fill-amber-500" : ""}`} />
-                {flag ? `Flagged: ${flag.reason || "Not Sure"}` : "Flag case"}
-              </button>
-            )}
-            {!isCollaborator && canAnnotate && (
-              <button
-                type="button"
-                onClick={() => { setFocusMenuOpen(false); void suggestions.request(); }}
-                disabled={suggestBusy}
-                className="flex w-full cursor-pointer items-center gap-2 rounded-md border border-violet-500/40 bg-violet-500/10 px-2 py-1 text-violet-300 transition hover:bg-violet-500/20 disabled:opacity-40"
-              >
-                {suggestBusy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Sparkles className="h-3.5 w-3.5" />}
-                AI suggestions
-              </button>
-            )}
+            {settingsBody(true)}
           </div>
         </>
       )}
-      <RailButton title="Leave focus mode (F or Esc)" onClick={() => { setFocusMenuOpen(false); focus.exit(); }}>
+      <RailButton title="Leave focus mode (F or Esc)" onClick={() => { setSettingsOpen(false); focus.exit(); }}>
         <Minimize className="h-4 w-4" />
       </RailButton>
     </div>
   );
 
   return placed(
-    <div ref={rootRef} className={focusOn ? "fixed inset-0 z-50 flex bg-background text-foreground" : undefined}>
+    <div className={focusOn ? "fixed inset-0 z-50 flex bg-background text-foreground" : "flex min-h-0 flex-1 flex-col"}>
       {focusRail}
-      <div className={focusOn ? "flex min-w-0 flex-1 flex-col gap-1 p-1" : "space-y-2"}>
+      <div className={focusOn ? "flex min-w-0 flex-1 flex-col gap-1 p-1" : "flex min-h-0 flex-1 flex-col gap-2"}>
       {!focusOn && guestHeader}
       {!focusOn && seriesChoices.length > 1 && (
         <div className="flex flex-wrap items-center gap-1.5">
@@ -2451,19 +2428,17 @@ export default function Viewer({
           </div>
         </div>
       ) : (
-        <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-border bg-card p-2.5 [&_button]:whitespace-nowrap [&_label]:whitespace-nowrap">
+        <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-2 rounded-lg border border-border bg-card px-2.5 py-2 text-xs [&_button]:whitespace-nowrap">
           <div className="flex flex-wrap items-center gap-2">
-            {canAnnotate && (
-              <>
-                <span className="text-xs font-semibold uppercase tracking-wider text-muted-foreground mr-1">
-                  Label:
-                </span>
+            {canAnnotate ? (
+              <div className="flex items-center gap-1">
                 {SEGMENTS.map((s, i) => (
                   <button
                     key={s.value}
+                    type="button"
                     onClick={() => { setSeg(s.value); drawWithLabel(); }}
                     title={`${s.label} (Key ${i + 1})`}
-                    className={`inline-flex items-center gap-1.5 rounded-md px-2.5 py-1 text-xs font-medium border transition cursor-pointer ${
+                    className={`inline-flex items-center gap-1.5 rounded-md border px-2 py-1 font-medium transition cursor-pointer ${
                       seg === s.value && !erasing && drawing
                         ? `${s.badge} ring-1 ring-primary`
                         : "border-border bg-background text-muted-foreground hover:text-foreground"
@@ -2471,142 +2446,70 @@ export default function Viewer({
                   >
                     <span className="h-2 w-2 rounded-full" style={{ backgroundColor: s.color }} />
                     {s.label}
-                    <span className="text-[10px] opacity-60 tabular-nums">
-                      ({counts[s.value - 1].toLocaleString()})
-                    </span>
+                    <span className="text-[10px] tabular-nums opacity-60">{counts[s.value - 1].toLocaleString()}</span>
                   </button>
                 ))}
-    
-                <div className="mx-1 h-5 w-px bg-border" />
-              </>
-            )}
-
-            {!canAnnotate && (
-              <div className="flex items-center gap-2 rounded-md bg-blue-500/10 border border-blue-500/20 px-3 py-1 text-xs text-blue-400 font-medium">
-                <Lock className="h-3.5 w-3.5 text-blue-400" />
+              </div>
+            ) : (
+              <div className="flex items-center gap-2 rounded-md border border-blue-500/20 bg-blue-500/10 px-3 py-1 font-medium text-blue-400">
+                <Lock className="h-3.5 w-3.5" />
                 <span>Read-Only Review Mode — Drawing locked by Master</span>
               </div>
             )}
 
-            {/* Tool Mode: Brush vs Pencil vs Hand vs Torch */}
-            <div className="inline-flex overflow-hidden rounded-md border border-border">
-              {canAnnotate && (
-                <>
-                  <button
-                    type="button"
-                    onClick={() => { pickTool("brush"); }}
-                    title="Brush mode (Key 4 or B)"
-                    className={`inline-flex items-center gap-1.5 px-2.5 py-1 text-xs transition cursor-pointer ${
-                      tool === "brush" ? "bg-primary text-primary-foreground font-medium" : "bg-background text-muted-foreground hover:text-foreground"
-                    }`}
-                  >
-                    <Paintbrush className="h-3 w-3" /> Brush <span className="text-[10px] opacity-60">(4)</span>
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => { pickTool("pencil"); }}
-                    title="Pencil mode — trace an outline, the inside auto-fills (Key 5 or P)"
-                    className={`inline-flex items-center gap-1.5 border-l border-border px-2.5 py-1 text-xs transition cursor-pointer ${
-                      tool === "pencil" ? "bg-primary text-primary-foreground font-medium" : "bg-background text-muted-foreground hover:text-foreground"
-                    }`}
-                  >
-                    <Lasso className="h-3 w-3" /> Pencil <span className="text-[10px] opacity-60">(5)</span>
-                  </button>
-                </>
-              )}
-              {canZoomPan && (
-                <>
-                  <button
-                    type="button"
-                    onClick={() => pickTool("pan")}
-                    title="Hand mode — drag to move the view (Key 6 or H)"
-                    className={`inline-flex items-center gap-1.5 border-l border-border px-2.5 py-1 text-xs transition cursor-pointer ${
-                      tool === "pan" ? "bg-primary text-primary-foreground font-medium" : "bg-background text-muted-foreground hover:text-foreground"
-                    }`}
-                  >
-                    <Hand className="h-3 w-3" /> Hand <span className="text-[10px] opacity-60">(6)</span>
-                  </button>
-                </>
-              )}
-              <button
-                type="button"
-                onClick={() => { pickTool("torch"); }}
-                title="Torch — see the scan under the annotation (Key 7, or hold T)"
-                className={`inline-flex items-center gap-1.5 border-l border-border px-2.5 py-1 text-xs transition cursor-pointer ${
-                  tool === "torch" ? "bg-primary text-primary-foreground font-medium" : "bg-background text-muted-foreground hover:text-foreground"
-                }`}
-              >
-                <Flashlight className="h-3 w-3" /> Torch <span className="text-[10px] opacity-60">(7)</span>
-              </button>
-            </div>
+            <div className="h-5 w-px bg-border" />
 
-            {canAnnotate && (
-              <>
+            <div className="inline-flex overflow-hidden rounded-md border border-border">
+              {paintTools.filter((t) => t.show).map(({ id, Icon, title }, i) => (
                 <button
-                  onClick={() => toggleEraser()}
-                  title="Toggle eraser mode (Key 0 or E)"
-                  className={`inline-flex items-center gap-1.5 rounded-md px-2.5 py-1 text-xs font-medium border transition cursor-pointer ${
-                    erasing
-                      ? "border-destructive bg-destructive/10 text-destructive ring-1 ring-destructive"
-                      : "border-border bg-background text-muted-foreground hover:text-foreground"
+                  key={id}
+                  type="button"
+                  onClick={() => pickTool(id)}
+                  title={title}
+                  className={`px-2 py-1.5 transition cursor-pointer ${i > 0 ? "border-l border-border" : ""} ${
+                    tool === id ? "bg-primary text-primary-foreground" : "bg-background text-muted-foreground hover:text-foreground"
                   }`}
                 >
-                  <Eraser className="h-3.5 w-3.5" /> Eraser <span className="text-[10px] opacity-60">(0)</span>
+                  <Icon className="h-3.5 w-3.5" />
                 </button>
-    
-                <label className="flex items-center gap-1.5 text-xs text-muted-foreground cursor-pointer select-none ml-1">
-                  <input
-                    type="checkbox"
-                    checked={maskInside}
-                    onChange={(e) => setMaskInside(e.target.checked)}
-                    className="rounded border-border accent-primary h-3.5 w-3.5"
-                  />
-                  <span>Only inside bone</span>
-                </label>
-    
-                <label className="flex items-center gap-1.5 text-xs text-muted-foreground cursor-pointer select-none ml-1">
-                  <input
-                    type="checkbox"
-                    checked={protectLesion}
-                    onChange={(e) => changeProtectLesion(e.target.checked)}
-                    className="rounded border-border accent-primary h-3.5 w-3.5"
-                  />
-                  <span>Protect lesion</span>
-                </label>
-
-                <label
-                  className="flex items-center gap-1.5 text-xs text-muted-foreground cursor-pointer select-none ml-1"
-                  title="While drawing in a zoomed view, slide the image when the pointer nears an edge"
-                >
-                  <input
-                    type="checkbox"
-                    checked={autoPan}
-                    onChange={(e) => setAutoPan(e.target.checked)}
-                    className="rounded border-border accent-primary h-3.5 w-3.5"
-                  />
-                  <span>Auto-pan</span>
-                </label>
-              </>
+              ))}
+            </div>
+            {canAnnotate && (
+              <button
+                type="button"
+                onClick={() => toggleEraser()}
+                title="Eraser (Key 0 or E)"
+                className={`rounded-md border px-2 py-1.5 transition cursor-pointer ${
+                  erasing
+                    ? "border-destructive bg-destructive/10 text-destructive ring-1 ring-destructive"
+                    : "border-border bg-background text-muted-foreground hover:text-foreground"
+                }`}
+              >
+                <Eraser className="h-3.5 w-3.5" />
+              </button>
             )}
 
-            <button
-              type="button"
-              onClick={() => setLocked((v) => !v)}
-              title={locked ? "Views locked: painting leaves other slices unchanged (Key L)" : "Views linked: clicking moves crosshair across all planes (Key L)"}
-              className={`inline-flex items-center gap-1.5 rounded-md border px-2 py-1 text-xs transition cursor-pointer ${
-                locked ? "border-border bg-background text-muted-foreground hover:text-foreground" : "border-primary bg-primary/20 text-primary font-medium"
-              }`}
-            >
-              {locked ? <Link2Off className="h-3 w-3" /> : <Link2 className="h-3 w-3" />}
-              <span>{locked ? "Locked" : "Linked"}</span>
-            </button>
-          </div>
-
-          <div className="flex flex-wrap items-center justify-end gap-2">
-            {canAnnotate && tool === "brush" && (
-              <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
+            {torchActive ? (
+              <label className="flex items-center gap-1.5 text-muted-foreground" title="Torch size ([ and ])">
+                <Flashlight className="h-3.5 w-3.5" />
+                <input
+                  type="range"
+                  min={8}
+                  max={240}
+                  step={4}
+                  value={torchSize}
+                  onChange={(e) => {
+                    const v = Number(e.target.value);
+                    setTorchSize(v);
+                    try { localStorage.setItem("bme_viewer_torch_size", String(v)); } catch {}
+                  }}
+                  className="w-20 accent-primary"
+                />
+                <span className="w-9 tabular-nums">{torchSize}px</span>
+              </label>
+            ) : canAnnotate && tool === "brush" && (
+              <label className="flex items-center gap-1.5 text-muted-foreground" title="Brush size ([ and ])">
                 <Paintbrush className="h-3.5 w-3.5" />
-                <span>Size: {brush}px</span>
                 <input
                   type="range"
                   min={1}
@@ -2615,139 +2518,68 @@ export default function Viewer({
                   onChange={(e) => setBrush(Number(e.target.value))}
                   className="w-20 accent-primary"
                 />
-              </div>
-            )}
-            {canAnnotate && tool === "pencil" && (
-              <label
-                className="flex items-center gap-1.5 text-xs text-muted-foreground cursor-pointer select-none"
-                title="While tracing, show only a dotted outline instead of a solid edge over a tinted fill preview"
-              >
-                <input
-                  type="checkbox"
-                  checked={pencilDotted}
-                  onChange={(e) => setPencilDotted(e.target.checked)}
-                  className="rounded border-border accent-primary h-3.5 w-3.5"
-                />
-                <span>Dotted trace</span>
+                <span className="w-9 tabular-nums">{brush}px</span>
               </label>
             )}
-            {tool === "torch" && (
-              <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
-                <Flashlight className="h-3.5 w-3.5" />
-                <span>Torch: {torchSize}px</span>
-                <input
-                  type="range"
-                  min={8}
-                  max={240}
-                  step={4}
-                  value={torchSize}
-                  onChange={(e) => {
-                    const s = Number(e.target.value);
-                    setTorchSize(s);
-                    try { localStorage.setItem("bme_viewer_torch_size", String(s)); } catch {}
-                  }}
-                  className="w-20 accent-primary"
-                />
-              </div>
-            )}
-
-            {/* Overlay View and Opacity Controls */}
-            <OverlayControls
-              view={view}
-              setView={setView}
-              opacity={opacity}
-              setOpacity={setOpacity}
-            />
 
             {canAnnotate && (
-              <>
-                {/* Undo & Redo */}
-                <div className="inline-flex overflow-hidden rounded-md border border-border">
-                  <button
-                    type="button"
-                    onClick={undo}
-                    title="Undo (Ctrl+Z)"
-                    className="inline-flex items-center gap-1 bg-background px-2 py-1 text-xs text-muted-foreground hover:text-foreground hover:bg-muted transition cursor-pointer"
-                  >
-                    <RotateCcw className="h-3 w-3" /> Undo
-                  </button>
-                  <button
-                    type="button"
-                    onClick={redo}
-                    title="Redo (Ctrl+Y)"
-                    className="inline-flex items-center gap-1 border-l border-border bg-background px-2 py-1 text-xs text-muted-foreground hover:text-foreground hover:bg-muted transition cursor-pointer"
-                  >
-                    <RotateCw className="h-3 w-3" /> Redo
-                  </button>
-                </div>
-              </>
-            )}
-
-            {canAnnotate && (
-              <>
-                {/* Flag Case */}
+              <div className="inline-flex overflow-hidden rounded-md border border-border">
                 <button
                   type="button"
-                  onClick={() => setFlagModalOpen(true)}
-                  title={flag ? `Flagged: ${flag.reason || "Not Sure"}` : "Flag this case for review (e.g. Not Sure)"}
-                  className={`inline-flex items-center gap-1.5 rounded-md px-2.5 py-1 text-xs font-medium border transition cursor-pointer ${
-                    flag
-                      ? "border-amber-500/50 bg-amber-500/15 text-amber-500 hover:bg-amber-500/25 ring-1 ring-amber-500/30"
-                      : "border-border bg-background text-muted-foreground hover:text-foreground"
-                  }`}
+                  onClick={undo}
+                  title="Undo (Ctrl+Z)"
+                  className="bg-background px-2 py-1.5 text-muted-foreground transition hover:bg-muted hover:text-foreground cursor-pointer"
                 >
-                  <Flag className={`h-3.5 w-3.5 ${flag ? "fill-amber-500 text-amber-500" : ""}`} />
-                  <span>{flag ? "Flagged" : "Flag"}</span>
+                  <RotateCcw className="h-3.5 w-3.5" />
                 </button>
-              </>
+                <button
+                  type="button"
+                  onClick={redo}
+                  title="Redo (Ctrl+Y)"
+                  className="border-l border-border bg-background px-2 py-1.5 text-muted-foreground transition hover:bg-muted hover:text-foreground cursor-pointer"
+                >
+                  <RotateCw className="h-3.5 w-3.5" />
+                </button>
+              </div>
             )}
+          </div>
 
-            {canAnnotate && (
-              <>
-                {/* Auto Save */}
-                <div className="flex items-center gap-1.5 border-l border-border pl-2">
-                  <label
-                    className="flex items-center gap-1.5 text-xs text-muted-foreground cursor-pointer select-none"
-                    title="Auto-save the 3D mask shortly after each stroke/edit"
-                  >
-                    <input
-                      type="checkbox"
-                      checked={autoSave}
-                      onChange={(e) => changeAutoSave(e.target.checked)}
-                      className="rounded border-border accent-primary h-3.5 w-3.5"
-                    />
-                    <span className="font-medium">Auto Save</span>
-                  </label>
-                  {autoSaveStatus && (
-                    <span className="text-[10px] text-muted-foreground font-mono truncate max-w-[160px]">
-                      {autoSaveStatus}
-                    </span>
-                  )}
-                </div>
-              </>
-            )}
-
-            {/* Collaboration Button (host) vs Participant Indicator (guest) */}
-            {!isCollaborator ? (
+          <div className="flex flex-wrap items-center gap-1.5">
+            <div className="relative">
               <button
                 type="button"
-                onClick={() => host.start(caseId, "3d")}
-                disabled={host.starting}
-                className="inline-flex items-center gap-1.5 rounded-md border border-blue-500/40 bg-blue-500/10 px-2.5 py-1 text-xs font-semibold text-blue-400 hover:bg-blue-500/20 transition-all cursor-pointer"
+                onClick={() => setSettingsOpen((v) => !v)}
+                title="Label view, opacity and painting settings"
+                className={`inline-flex items-center gap-1.5 rounded-md border px-2 py-1 transition cursor-pointer ${
+                  settingsOpen ? "border-primary text-foreground" : "border-border bg-background text-muted-foreground hover:text-foreground"
+                }`}
               >
-                <Users className="h-3.5 w-3.5" />
-                <span>{collabToken ? "Collab Panel" : "Start Collaboration"}</span>
-                {collab.joinRequests.length > 0 && (
-                  <span className="ml-1 flex h-4 min-w-4 px-1 items-center justify-center rounded-full bg-red-500 text-[10px] font-bold text-white">
-                    {collab.joinRequests.length}
-                  </span>
-                )}
+                <SlidersHorizontal className="h-3.5 w-3.5" />
+                <span>Settings</span>
               </button>
-            ) : (
-              <div className="flex items-center gap-1.5 rounded-md border border-blue-500/30 bg-blue-500/10 px-2.5 py-1 text-xs font-medium text-blue-300">
-                <Users className="h-3.5 w-3.5" />
-                <span>Review Session ({collab.participants.length})</span>
-              </div>
+              {settingsOpen && (
+                <>
+                  <div className="fixed inset-0 z-20" onClick={() => setSettingsOpen(false)} />
+                  <div className="absolute left-0 top-full z-30 mt-1 w-72 space-y-3 rounded-lg border border-border bg-card p-3 shadow-xl">
+                    {settingsBody(false)}
+                  </div>
+                </>
+              )}
+            </div>
+
+            {canAnnotate && (
+              <button
+                type="button"
+                onClick={() => setFlagModalOpen(true)}
+                title={flag ? `Flagged: ${flag.reason || "Not Sure"}` : "Flag this case for review (e.g. Not Sure)"}
+                className={`rounded-md border px-2 py-1.5 transition cursor-pointer ${
+                  flag
+                    ? "border-amber-500/50 bg-amber-500/15 text-amber-500 hover:bg-amber-500/25"
+                    : "border-border bg-background text-muted-foreground hover:text-foreground"
+                }`}
+              >
+                <Flag className={`h-3.5 w-3.5 ${flag ? "fill-amber-500" : ""}`} />
+              </button>
             )}
 
             {!isCollaborator && canAnnotate && (
@@ -2756,97 +2588,126 @@ export default function Viewer({
                 onClick={() => void suggestions.request()}
                 disabled={suggestBusy}
                 title="Run the 2D models on every axial slice of this scan. The marks are suggestions: nothing changes until you accept a slice."
-                className="inline-flex items-center gap-1 rounded border border-violet-500/40 bg-violet-500/10 px-2 py-1 text-xs text-violet-300 hover:bg-violet-500/20 transition cursor-pointer disabled:opacity-40"
+                className="inline-flex items-center gap-1 rounded-md border border-violet-500/40 bg-violet-500/10 px-2 py-1 text-violet-300 transition hover:bg-violet-500/20 cursor-pointer disabled:opacity-40"
               >
-                {suggestBusy ? <Loader2 className="h-3 w-3 animate-spin" /> : <Sparkles className="h-3 w-3" />}
-                <span className="hidden sm:inline">AI suggestions</span>
+                {suggestBusy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Sparkles className="h-3.5 w-3.5" />}
+                <span>AI</span>
               </button>
             )}
 
-            {!isCollaborator && (
-              <>
-                {/* Import from 3D Slicer */}
-                <button
-                  type="button"
-                  onClick={() => importInput.current?.click()}
-                  disabled={importing}
-                  title="Import a .seg.nrrd saved in 3D Slicer"
-                  className="inline-flex items-center gap-1 rounded border border-border bg-background px-2 py-1 text-xs text-muted-foreground hover:text-foreground transition cursor-pointer disabled:opacity-40"
-                >
-                  {importing ? <Loader2 className="h-3 w-3 animate-spin" /> : <Upload className="h-3 w-3" />}
-                  <span className="hidden sm:inline">Import from Slicer</span>
-                </button>
-              </>
-            )}
-
-            {canDelete && (
-              <>
-                {/* Clear Mask Button */}
-                <button
-                  onClick={clearMask}
-                  title="Clear current 3D canvas mask"
-                  className="inline-flex items-center gap-1 rounded border border-border bg-background px-2 py-1 text-xs text-muted-foreground hover:text-destructive transition cursor-pointer"
-                >
-                  <Trash2 className="h-3 w-3" />
-                </button>
-              </>
-            )}
-
-            {/* Delete Saved Mask */}
-            {hasSaved && canDelete && (
+            {!isCollaborator ? (
               <button
                 type="button"
-                onClick={() => deleteMask()}
-                disabled={deletingMask}
-                title="Delete saved 3D mask permanently from server"
-                className="inline-flex items-center gap-1 rounded border border-destructive/40 bg-destructive/10 px-2 py-1 text-xs text-destructive hover:bg-destructive/20 transition cursor-pointer"
+                onClick={() => host.start(caseId, "3d")}
+                disabled={host.starting}
+                title={collabToken ? "Collaboration panel" : "Start a live review with a radiologist"}
+                className="relative inline-flex items-center gap-1 rounded-md border border-blue-500/40 bg-blue-500/10 px-2 py-1 font-medium text-blue-400 transition hover:bg-blue-500/20 cursor-pointer"
               >
-                <XCircle className="h-3 w-3" />
-                <span className="hidden sm:inline">Delete Mask</span>
+                <Users className="h-3.5 w-3.5" />
+                <span>{collabToken ? "Collab" : "Collaborate"}</span>
+                {collab.joinRequests.length > 0 && (
+                  <span className="flex h-4 min-w-4 items-center justify-center rounded-full bg-red-500 px-1 text-[10px] font-bold text-white">
+                    {collab.joinRequests.length}
+                  </span>
+                )}
               </button>
+            ) : (
+              <div className="flex items-center gap-1.5 rounded-md border border-blue-500/30 bg-blue-500/10 px-2 py-1 font-medium text-blue-300">
+                <Users className="h-3.5 w-3.5" />
+                <span>Review Session ({collab.participants.length})</span>
+              </div>
+            )}
+
+            {(!isCollaborator || canDelete) && (
+              <div className="relative">
+                <button
+                  type="button"
+                  onClick={() => setMoreOpen((v) => !v)}
+                  title="Import, clear or delete the mask"
+                  className={`rounded-md border px-2 py-1.5 transition cursor-pointer ${
+                    moreOpen ? "border-primary text-foreground" : "border-border bg-background text-muted-foreground hover:text-foreground"
+                  }`}
+                >
+                  {importing || deletingMask ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Ellipsis className="h-3.5 w-3.5" />}
+                </button>
+                {moreOpen && (
+                  <>
+                    <div className="fixed inset-0 z-20" onClick={() => setMoreOpen(false)} />
+                    <div className="absolute right-0 top-full z-30 mt-1 w-56 space-y-1 rounded-lg border border-border bg-card p-1.5 shadow-xl">
+                      {!isCollaborator && (
+                        <button
+                          type="button"
+                          onClick={() => { setMoreOpen(false); importInput.current?.click(); }}
+                          disabled={importing}
+                          className="flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-muted-foreground transition hover:bg-muted hover:text-foreground cursor-pointer disabled:opacity-40"
+                        >
+                          <Upload className="h-3.5 w-3.5" /> Import from 3D Slicer
+                        </button>
+                      )}
+                      {canDelete && (
+                        <button
+                          type="button"
+                          onClick={() => { setMoreOpen(false); clearMask(); }}
+                          title="Clear what is painted on screen; the saved file is untouched until you save"
+                          className="flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-muted-foreground transition hover:bg-muted hover:text-destructive cursor-pointer"
+                        >
+                          <Trash2 className="h-3.5 w-3.5" /> Clear the mask
+                        </button>
+                      )}
+                      {hasSaved && canDelete && (
+                        <button
+                          type="button"
+                          onClick={() => { setMoreOpen(false); void deleteMask(); }}
+                          disabled={deletingMask}
+                          title="Delete the saved 3D mask permanently from the server"
+                          className="flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-destructive transition hover:bg-destructive/10 cursor-pointer disabled:opacity-40"
+                        >
+                          <XCircle className="h-3.5 w-3.5" /> Delete saved mask
+                        </button>
+                      )}
+                    </div>
+                  </>
+                )}
+              </div>
             )}
 
             {canAnnotate && (
-              <>
-                {/* Save Mask */}
-                <button
-                  onClick={save}
-                  disabled={saving || !dirty}
-                  title="Save 3D Mask (Ctrl+S)"
-                  className={`inline-flex items-center gap-1.5 rounded-md px-3 py-1 text-xs font-medium transition cursor-pointer ${
-                    savedSuccess
-                      ? "bg-emerald-600 text-white"
-                      : "bg-primary text-primary-foreground hover:bg-primary/90 disabled:opacity-40"
-                  }`}
-                >
-                  {saving ? (
-                    <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                  ) : savedSuccess ? (
-                    <Check className="h-3.5 w-3.5" />
-                  ) : (
-                    <Save className="h-3.5 w-3.5" />
-                  )}
-                  {savedSuccess ? "Saved!" : dirty ? "Save Mask" : "Saved"}
-                </button>
-              </>
+              <button
+                type="button"
+                onClick={save}
+                disabled={saving || !dirty}
+                title="Save 3D Mask (Ctrl+S)"
+                className={`inline-flex items-center gap-1.5 rounded-md px-3 py-1 font-medium transition cursor-pointer ${
+                  savedSuccess
+                    ? "bg-emerald-600 text-white"
+                    : "bg-primary text-primary-foreground hover:bg-primary/90 disabled:opacity-40"
+                }`}
+              >
+                {saving ? (
+                  <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                ) : savedSuccess ? (
+                  <Check className="h-3.5 w-3.5" />
+                ) : (
+                  <Save className="h-3.5 w-3.5" />
+                )}
+                {savedSuccess ? "Saved!" : dirty ? "Save" : "Saved"}
+              </button>
             )}
 
             <button
               type="button"
               onClick={focus.enter}
               title="Focus mode: full screen with only the painting tools (F)"
-              className="inline-flex items-center gap-1 rounded border border-border bg-background px-2 py-1 text-xs text-muted-foreground hover:text-foreground transition cursor-pointer"
+              className="inline-flex items-center gap-1 rounded-md border border-border bg-background px-2 py-1 text-muted-foreground transition hover:text-foreground cursor-pointer"
             >
-              <Maximize className="h-3 w-3" />
+              <Maximize className="h-3.5 w-3.5" />
               <span>Focus</span>
             </button>
-
-            {/* Collapse Toolbar Toggle */}
             <button
               type="button"
               onClick={() => setToolbarCollapsed(true)}
               title="Collapse to compact toolbar"
-              className="p-1 rounded border border-border bg-background text-muted-foreground hover:text-foreground transition cursor-pointer"
+              className="rounded-md border border-border bg-background p-1.5 text-muted-foreground transition hover:text-foreground cursor-pointer"
             >
               <ChevronUp className="h-3.5 w-3.5" />
             </button>
@@ -2942,7 +2803,10 @@ export default function Viewer({
           </span>
         </div>
         <div className="flex min-w-0 items-center gap-3">
-          <span className="min-w-0 truncate">{status}</span>
+          <span className="min-w-0 truncate" title={status}>{status}</span>
+          {autoSave && autoSaveStatus && (
+            <span className="shrink-0 font-mono text-[10px]">{autoSaveStatus}</span>
+          )}
           <div className="relative shrink-0">
             <button
               type="button"
@@ -2972,7 +2836,7 @@ export default function Viewer({
                   <kbd className="font-mono">Space (hold)</kbd><span>Pan with the mouse, even mid-trace</span>
                   <kbd className="font-mono">Two fingers</kbd><span>Pinch to zoom, drag to pan (touch)</span>
                   <kbd className="font-mono">One finger</kbd><span>Draws; pans once a stylus has been used</span>
-                  <kbd className="font-mono">Dbl-click title</kbd><span>Full view (Esc to go back)</span>
+                  <kbd className="font-mono">Double-click</kbd><span>View full size, and back</span>
                   <kbd className="font-mono">Esc</kbd><span>Discard an outline while tracing</span>
                   <kbd className="font-mono">F</kbd><span>Focus mode: full screen, tools only</span>
                 </div>
@@ -2984,16 +2848,16 @@ export default function Viewer({
       )}
 
       {/* Four-Up: three orthogonal views plus the 3D view, as in Slicer */}
+      {/* On a wide screen it fills the window down to the bottom edge; 400px
+          still leaves each view about 200px on a short laptop screen. */}
       {/* Unselectable, and no native drags: with a canvas inside a page
           selection (a stray drag, Ctrl+A), pressing the brush dragged a
           ghost copy of the slice and the stroke stopped after one dot. */}
       <div
-        ref={gridRef}
         onDragStart={(e) => e.preventDefault()}
         className={focusOn
           ? `grid min-h-0 flex-1 select-none gap-1 ${expanded ? "grid-cols-1" : "grid-cols-2 grid-rows-2"}`
-          : `grid select-none gap-2 grid-cols-1 min-h-0 ${expanded ? "" : "md:grid-cols-2 lg:grid-rows-2"}`}
-        style={!focusOn && gridHeight !== null ? { height: gridHeight } : undefined}
+          : `grid select-none gap-2 grid-cols-1 lg:min-h-[400px] lg:flex-1 ${expanded ? "" : "md:grid-cols-2 lg:grid-rows-2"}`}
       >
         {PLANES.map((p) => {
           const g = planeGeom(p, vol);
@@ -3014,39 +2878,47 @@ export default function Viewer({
                   if (dx || dy) setPan((cur) => ({ ...cur, [p]: { x: cur[p].x + dx, y: cur[p].y + dy } }));
                 }
               }}
+              onDoubleClick={(e) => {
+                const t = e.target as HTMLElement;
+                if (t.closest("button, input")) return;
+                takeBackDoubleClickDots();
+                toggleExpanded(p);
+              }}
               className={`${expanded && expanded !== p ? "hidden" : "flex"} min-h-0 flex-col overflow-hidden rounded-lg border-2 bg-black p-1.5`}
               style={{
                 borderColor: PLANE_COLOR[p],
                 opacity: activePlane === p ? 1 : 0.94,
                 boxShadow: activePlane === p ? `0 0 0 1px ${PLANE_COLOR[p]}` : undefined,
               }}>
-              <div className="mb-1 flex shrink-0 select-none items-center justify-between gap-1 px-1 text-[10px] uppercase tracking-wider"
-                style={{ color: PLANE_COLOR[p] }}
-                onDoubleClick={() => toggleExpanded(p)}
-                title="Double-click for full view">
-                <span>{p}</span>
-                <span className="flex items-center gap-0.5">
-                  <button type="button" disabled={!canZoomPan} title="Zoom out"
-                    onClick={() => setZoom((z) => ({ ...z, [p]: clampZoom(z[p] - 0.25) }))}
-                    className="rounded border border-neutral-700 px-1 text-neutral-300 hover:bg-neutral-800">
-                    <Minus className="h-2.5 w-2.5" />
-                  </button>
-                  <button type="button" disabled={!canZoomPan} title="Reset zoom and pan"
-                    onClick={() => resetView(p)}
-                    className="w-8 rounded border border-neutral-700 text-[9px] tabular-nums text-neutral-300 hover:bg-neutral-800">
-                    {zoom[p].toFixed(1)}x
-                  </button>
-                  <button type="button" disabled={!canZoomPan} title="Zoom in"
-                    onClick={() => setZoom((z) => ({ ...z, [p]: clampZoom(z[p] + 0.25) }))}
-                    className="rounded border border-neutral-700 px-1 text-neutral-300 hover:bg-neutral-800">
-                    <Plus className="h-2.5 w-2.5" />
-                  </button>
-                  <span className="ml-1 tabular-nums text-neutral-400">{s + 1}/{depth}</span>
+              <div className="mb-1 flex h-6 shrink-0 select-none items-center justify-between gap-2 px-1"
+                title="Double-click the view for full size">
+                <span className="flex items-center gap-2">
+                  <span className="text-[11px] font-semibold uppercase tracking-wider" style={{ color: PLANE_COLOR[p] }}>{p}</span>
+                  <span className="text-[11px] tabular-nums text-neutral-400">{s + 1} / {depth}</span>
+                </span>
+                <span className="flex items-center gap-1">
+                  <span className="inline-flex h-5 items-center overflow-hidden rounded border border-neutral-700 text-neutral-300">
+                    <button type="button" disabled={!canZoomPan} title="Zoom out"
+                      onClick={() => setZoom((z) => ({ ...z, [p]: clampZoom(z[p] - 0.25) }))}
+                      className="flex h-full items-center px-1 hover:bg-neutral-800 disabled:opacity-40">
+                      <Minus className="h-3 w-3" />
+                    </button>
+                    <button type="button" disabled={!canZoomPan} title="Reset zoom and pan"
+                      onClick={() => resetView(p)}
+                      className="h-full w-9 border-x border-neutral-700 text-[10px] tabular-nums hover:bg-neutral-800 disabled:opacity-40">
+                      {zoom[p].toFixed(1)}x
+                    </button>
+                    <button type="button" disabled={!canZoomPan} title="Zoom in"
+                      onClick={() => setZoom((z) => ({ ...z, [p]: clampZoom(z[p] + 0.25) }))}
+                      className="flex h-full items-center px-1 hover:bg-neutral-800 disabled:opacity-40">
+                      <Plus className="h-3 w-3" />
+                    </button>
+                  </span>
                   <button type="button"
-                    title={expanded === p ? `Back to all four views${focusOn ? "" : " (Esc)"}` : "Full view"}
+                    title={expanded === p ? `Back to all four views${focusOn ? "" : " (Esc)"}` : "Full view (or double-click the view)"}
                     onClick={() => toggleExpanded(p)}
-                    className="ml-1 rounded border border-neutral-700 px-1 text-neutral-300 hover:bg-neutral-800">
-                    {expanded === p ? <Minimize2 className="h-2.5 w-2.5" /> : <Maximize2 className="h-2.5 w-2.5" />}
+                    className="flex h-5 w-6 items-center justify-center rounded border border-neutral-700 text-neutral-300 hover:bg-neutral-800 hover:text-white">
+                    {expanded === p ? <Minimize2 className="h-3 w-3" /> : <Maximize2 className="h-3 w-3" />}
                   </button>
                 </span>
               </div>
@@ -3130,6 +3002,10 @@ export default function Viewer({
                     setOutlineTick((n) => n + 1);
                   } else {
                     pushUndo();
+                    recentTaps.current = [
+                      ...recentTaps.current.slice(-1),
+                      { at: e.timeStamp, snap: undoStack.current[undoStack.current.length - 1] },
+                    ];
                     strokeHasBone.current = sliceHasBone(p);
                     beginStroke(p, e);
                     paintAt(p, hit);

@@ -256,27 +256,32 @@ export default function Render3D({
   const totalFaces = (built ?? []).reduce((n, g) => n + g.quads.length, 0);
 
   return (
-    <div className={`flex min-h-0 flex-col overflow-hidden rounded-lg border-2 border-neutral-700 bg-black p-1.5 ${fill ? "flex-1" : ""}`}>
-      <div className="mb-1 flex shrink-0 select-none items-center justify-between gap-1 px-1 text-[10px] uppercase tracking-wider text-neutral-400"
-        onDoubleClick={onToggleExpand}
-        title="Double-click for full view">
-        <span className="inline-flex items-center gap-1"><Box className="h-3 w-3" /> 3D</span>
-        <span className="flex items-center gap-1">
+    <div className={`flex min-h-0 flex-col overflow-hidden rounded-lg border-2 border-neutral-700 bg-black p-1.5 ${fill ? "flex-1" : ""}`}
+      onDoubleClick={(e) => {
+        if (onToggleExpand && !(e.target as HTMLElement).closest("button")) onToggleExpand();
+      }}>
+      <div className="mb-1 flex h-6 shrink-0 select-none items-center justify-between gap-2 px-1 text-neutral-400"
+        title={onToggleExpand ? "Double-click the view for full size" : undefined}>
+        <span className="inline-flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wider">
+          <Box className="h-3.5 w-3.5" /> 3D
+        </span>
+        <span className="flex items-center gap-1 text-[11px]">
           <button onClick={() => setFit((v) => !v)} disabled={!built}
             title={fit ? "Show at true size in the volume" : "Zoom to what is painted"}
-            className={`inline-flex items-center gap-0.5 rounded border px-1 py-0.5 normal-case tracking-normal disabled:opacity-40 ${
-              fit ? "border-primary text-primary" : "border-neutral-600 text-neutral-300 hover:bg-neutral-800"}`}>
-            <Maximize2 className="h-2.5 w-2.5" /> Fit
+            className={`inline-flex h-5 items-center gap-1 rounded border px-1.5 disabled:opacity-40 ${
+              fit ? "border-primary text-primary" : "border-neutral-700 text-neutral-300 hover:bg-neutral-800"}`}>
+            <Maximize2 className="h-3 w-3" /> Fit
           </button>
           <button onClick={build} disabled={building}
-            className="rounded border border-neutral-600 px-1.5 py-0.5 normal-case tracking-normal text-neutral-300 hover:bg-neutral-800 disabled:opacity-40">
+            className={`h-5 rounded border px-2 disabled:opacity-40 ${
+              built ? "border-neutral-700 text-neutral-300 hover:bg-neutral-800" : "border-primary bg-primary/15 text-primary hover:bg-primary/25"}`}>
             {building ? "Building…" : built ? "Rebuild" : "Build"}
           </button>
           {onToggleExpand && (
             <button type="button" onClick={onToggleExpand}
-              title={expanded ? "Back to all four views (Esc)" : "Full view"}
-              className="rounded border border-neutral-600 px-1 py-0.5 text-neutral-300 hover:bg-neutral-800">
-              {expanded ? <Shrink className="h-2.5 w-2.5" /> : <Expand className="h-2.5 w-2.5" />}
+              title={expanded ? "Back to all four views" : "Full view (or double-click the view)"}
+              className="flex h-5 w-6 items-center justify-center rounded border border-neutral-700 text-neutral-300 hover:bg-neutral-800 hover:text-white">
+              {expanded ? <Shrink className="h-3 w-3" /> : <Expand className="h-3 w-3" />}
             </button>
           )}
         </span>
@@ -311,15 +316,18 @@ export default function Render3D({
           onPointerCancel={(e) => { pinch.current.up(e); drag.current = null; }}
         />
         {!built && (
-          <div className="pointer-events-none absolute inset-0 flex items-center justify-center px-5 text-center text-[11px] text-neutral-500">
-            {building
-              ? <span className="inline-flex items-center gap-2"><Loader2 className="h-3.5 w-3.5 animate-spin" /> building surface…</span>
-              : "Press Build to see everything painted, in 3D."}
+          <div className="pointer-events-none absolute inset-x-0 bottom-3 flex justify-center px-5 text-center text-[11px] text-neutral-400">
+            <span className="inline-flex items-center gap-2 rounded-full border border-neutral-800 bg-black/80 px-3 py-1">
+              {building
+                ? <><Loader2 className="h-3.5 w-3.5 animate-spin" /> building surface…</>
+                : "Press Build to see everything painted, in 3D"}
+            </span>
           </div>
         )}
       </div>
 
-      <div className="mt-1 shrink-0 space-y-0.5 px-1 text-[9px] text-neutral-500">
+      <div className="mt-1 flex shrink-0 flex-wrap items-center justify-between gap-x-3 gap-y-0.5 px-1 text-[10px] text-neutral-500"
+        title={totalFaces ? `${totalFaces.toLocaleString()} faces` : undefined}>
         {built && built.length > 0 ? (
           <div className="flex flex-wrap gap-x-2.5 gap-y-0.5">
             {built.map((g) => {
@@ -359,10 +367,7 @@ export default function Render3D({
         ) : (
           <div>volume {mm.map((v) => v.toFixed(0)).join(" x ")} mm</div>
         )}
-        <div className="flex justify-between">
-          <span>{totalFaces ? `${totalFaces.toLocaleString()} faces` : ""}</span>
-          <span>{fit ? "zoomed" : "true size"} &middot; drag to turn &middot; Ctrl+wheel or pinch to zoom</span>
-        </div>
+        <span>{fit ? "zoomed" : "true size"} &middot; drag to turn &middot; Ctrl+wheel or pinch to zoom</span>
       </div>
     </div>
   );
