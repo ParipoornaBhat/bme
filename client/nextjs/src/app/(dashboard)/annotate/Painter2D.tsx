@@ -57,7 +57,7 @@ import {
 import { canPaint } from "~/lib/paint-rules";
 import FlagDialog from "./FlagDialog";
 import { pencilCursor } from "~/lib/cursors";
-import { usePaintTools } from "~/lib/usePaintTools";
+import { usePaintTools, usePencilDottedSetting } from "~/lib/usePaintTools";
 import { edgePanStep, useAutoPanSetting, useSpaceHeld } from "~/lib/view-pan";
 
 export type Case2DSlice = {
@@ -101,6 +101,7 @@ export default function Painter2D({
     usePaintTools(isCollaborator ? "pan" : "brush");
   const { spaceHeld, spaceHeldRef } = useSpaceHeld();
   const { autoPan, setAutoPan } = useAutoPanSetting();
+  const { pencilDotted, setPencilDotted } = usePencilDottedSetting();
   // A stroke or trace in progress, as state so auto-pan can start and stop.
   const [stroking, setStroking] = useState(false);
   const lastClientRef = useRef<{ x: number; y: number } | null>(null);
@@ -779,21 +780,22 @@ export default function Painter2D({
       : "rgba(245, 158, 11, 0.20)";
 
     // Draw polygon fill preview
-    ctx.fillStyle = fillColor;
-    ctx.beginPath();
-    ctx.moveTo(pts[0][0], pts[0][1]);
-    for (let i = 1; i < pts.length; i++) {
-      ctx.lineTo(pts[i][0], pts[i][1]);
+    if (!pencilDotted) {
+      ctx.fillStyle = fillColor;
+      ctx.beginPath();
+      ctx.moveTo(pts[0][0], pts[0][1]);
+      for (let i = 1; i < pts.length; i++) {
+        ctx.lineTo(pts[i][0], pts[i][1]);
+      }
+      ctx.closePath();
+      ctx.fill();
     }
-    ctx.closePath();
-    ctx.fill();
 
-    // Draw clear, solid, non-dotted boundary line
     ctx.strokeStyle = strokeColor;
     ctx.lineWidth = 2.5;
     ctx.lineJoin = "round";
     ctx.lineCap = "round";
-    ctx.setLineDash([]); // SOLID line, NOT dotted
+    ctx.setLineDash(pencilDotted ? [0, 6] : []);
 
     ctx.beginPath();
     ctx.moveTo(pts[0][0], pts[0][1]);
@@ -803,7 +805,7 @@ export default function Painter2D({
     ctx.stroke();
 
     ctx.restore();
-  }, [isErasing, activeLabel]);
+  }, [isErasing, activeLabel, pencilDotted]);
 
   // Painting drawing logic
   const paintAt = (cx: number, cy: number) => {
@@ -2207,6 +2209,20 @@ export default function Painter2D({
                       className="w-20 accent-primary"
                     />
                   </div>
+                )}
+                {(!isCollaborator || permissions.ANNOTATE) && tool === "pencil" && (
+                  <label
+                    className="flex items-center gap-1.5 text-xs text-muted-foreground cursor-pointer select-none"
+                    title="While tracing, show only a dotted outline instead of a solid edge over a tinted fill preview"
+                  >
+                    <input
+                      type="checkbox"
+                      checked={pencilDotted}
+                      onChange={(e) => setPencilDotted(e.target.checked)}
+                      className="rounded border-border accent-primary h-3.5 w-3.5"
+                    />
+                    <span>Dotted trace</span>
+                  </label>
                 )}
                 {tool === "torch" && (
                   <div className="flex items-center gap-1.5 text-xs text-muted-foreground">

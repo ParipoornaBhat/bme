@@ -61,7 +61,7 @@ import { canPaint } from "~/lib/paint-rules";
 import { wheelZoomFactor } from "~/lib/wheel-zoom";
 import { pencilCursor } from "~/lib/cursors";
 import { Pinch } from "~/lib/pinch";
-import { usePaintTools } from "~/lib/usePaintTools";
+import { usePaintTools, usePencilDottedSetting } from "~/lib/usePaintTools";
 import { edgePanStep, useAutoPanSetting, useSpaceHeld } from "~/lib/view-pan";
 import { isInTorch, type TorchState } from "~/lib/torch";
 import type { FlagRecord } from "~/lib/flag-store";
@@ -341,6 +341,7 @@ export default function Viewer({
     usePaintTools(isCollaborator ? "pan" : "brush");
   const { spaceHeld, spaceHeldRef } = useSpaceHeld();
   const { autoPan, setAutoPan } = useAutoPanSetting();
+  const { pencilDotted, setPencilDotted } = usePencilDottedSetting();
   const [torchSize, setTorchSize] = useState(48);
   const [torchHeld, setTorchHeld] = useState(false);
   const torchActive = tool === "torch" || torchHeld;
@@ -857,24 +858,31 @@ export default function Viewer({
     ctx.stroke();
     ctx.restore();
 
-    // Live pencil trace on the plane being drawn in: the area that will be
-    // filled on release, and a solid edge, as in the 2D painter.
+    // Live pencil trace on the plane being drawn in, as in the 2D painter:
+    // either a dotted edge alone, or a solid edge over the area that will be
+    // filled on release.
     if (pencilPlane.current === p && outline.current.length > 1) {
-      // Erasing shows as a white outline over a darkened area: what will be
+      // Erasing shows as a white outline (over a darkened area): what will be
       // removed, never mistakable for an edema (red) outline.
       const color = erasing ? "#ffffff" : SEGMENTS.find((x) => x.value === seg)!.color;
+      const lw = Math.max(1.5, Math.round(w / 300));
       ctx.save();
       ctx.beginPath();
       const [x0, y0] = outline.current[0];
       ctx.moveTo(x0, h - 1 - y0);
       for (const [x, y] of outline.current.slice(1)) ctx.lineTo(x, h - 1 - y);
       ctx.closePath();
-      ctx.globalAlpha = erasing ? 0.4 : 0.22;
-      ctx.fillStyle = erasing ? "#000000" : color;
-      ctx.fill();
-      ctx.globalAlpha = 1;
+      if (!pencilDotted) {
+        ctx.globalAlpha = erasing ? 0.4 : 0.22;
+        ctx.fillStyle = erasing ? "#000000" : color;
+        ctx.fill();
+        ctx.globalAlpha = 1;
+      } else {
+        ctx.setLineDash([0, lw * 2.5]);
+        ctx.lineCap = "round";
+      }
       ctx.strokeStyle = color;
-      ctx.lineWidth = Math.max(1.5, Math.round(w / 300));
+      ctx.lineWidth = lw;
       ctx.lineJoin = "round";
       ctx.stroke();
       ctx.restore();
@@ -922,7 +930,7 @@ export default function Viewer({
       ctx.restore();
     }
   }, [vol, labels, cursor, seg, erasing, outlineTick, planeGeom, sampleAt, cursorInPlane, sliceOf, view, opacity,
-      collabToken, suggestion, caseId]);
+      collabToken, suggestion, caseId, pencilDotted]);
 
   const drawAll = useCallback(() => { PLANES.forEach(draw); }, [draw]);
   useEffect(() => { drawAll(); }, [drawAll]);
@@ -2295,6 +2303,20 @@ export default function Viewer({
                   className="w-20 accent-primary"
                 />
               </div>
+            )}
+            {canAnnotate && tool === "pencil" && (
+              <label
+                className="flex items-center gap-1.5 text-xs text-muted-foreground cursor-pointer select-none"
+                title="While tracing, show only a dotted outline instead of a solid edge over a tinted fill preview"
+              >
+                <input
+                  type="checkbox"
+                  checked={pencilDotted}
+                  onChange={(e) => setPencilDotted(e.target.checked)}
+                  className="rounded border-border accent-primary h-3.5 w-3.5"
+                />
+                <span>Dotted trace</span>
+              </label>
             )}
             {tool === "torch" && (
               <div className="flex items-center gap-1.5 text-xs text-muted-foreground">

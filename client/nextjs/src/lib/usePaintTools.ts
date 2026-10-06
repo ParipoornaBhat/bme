@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 export type PaintTool = "brush" | "pencil" | "pan" | "torch";
 type DrawTool = "brush" | "pencil";
@@ -52,4 +52,26 @@ export function usePaintTools(initial: PaintTool) {
     toggleEraser,
     drawWithLabel,
   };
+}
+
+/**
+ * How the pencil trace looks while it is being drawn: a dotted edge only, or
+ * a solid edge over a tinted preview of the area that will be filled.
+ * Remembered across visits and shared by 2D and 3D.
+ */
+export function usePencilDottedSetting() {
+  const [pencilDotted, setDottedState] = useState(true);
+  useEffect(() => {
+    try {
+      const saved = localStorage.getItem("bme_pencil_dotted");
+      if (saved !== null) setDottedState(saved === "true");
+    } catch { /* ignore */ }
+  }, []);
+  const setPencilDotted = (on: boolean) => {
+    setDottedState(on);
+    try {
+      localStorage.setItem("bme_pencil_dotted", String(on));
+    } catch { /* ignore */ }
+  };
+  return { pencilDotted, setPencilDotted };
 }

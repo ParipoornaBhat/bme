@@ -139,6 +139,7 @@ In order. Each step's output is the next step's input.
    - **Host lobby, rejoin and leave:** Host admission lobby with messages `JOIN_PENDING` / `JOIN_REQUESTS` / `ADMIT` / `DENY` / `LEAVE` / `HOST_BACK`, 20-guest cap, guest rejoin via session `rejoinKey`, and replacement of older duplicate pending sockets.
    - **Views and opacity:** Label views: Both / Red / Green / None (key V), opacity 0–100%, local to each screen, in 2D painter, 3D multi-planar viewer, and 3D surface render.
    - **Protect lesion:** Pure `canPaint` helper prevents the green bone brush (label 1) from overwriting existing red BME lesions (label 2) across both 2D and 3D brush and pencil fill loops, controlled by a "Protect lesion" toggle (default on, persisted as `bme_protect_lesion`).
+   - **Dotted pencil trace (2026-10-06):** "Dotted trace" toggle, shown while the pencil is active in 2D and 3D. On (default), the live trace is a dotted outline with no tinted fill preview; off restores the solid edge over the fill preview. Only changes the preview: release still fills the inside. Persisted as `bme_pencil_dotted`. Typechecked only, not checked in a browser.
    - **3D Torch:** Torch tool (key `7`) and hold-`T` peek in the 3D viewer (`Viewer.tsx`) with a thin dual-tone radius ring, skipping label blending over raw scan pixels without altering the volume label buffer.
 
    **Not verified (plainly needed on real hardware/data):**
