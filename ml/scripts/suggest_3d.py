@@ -115,15 +115,25 @@ def put_plane(out: np.ndarray, ax: dict, s: int, img: np.ndarray) -> None:
     out[tuple(idx)] = sl
 
 
-def to_canvas(gray: np.ndarray, mm_w: float, mm_h: float) -> tuple[Image.Image, tuple]:
-    """Fit the slice into a square model canvas, keeping its physical shape."""
+def gray_volume(vol: np.ndarray) -> np.ndarray:
+    """Window the whole volume to its 1st-99th percentile, as uint8."""
+    lo, hi = (float(v) for v in np.percentile(vol, [1, 99]))
+    if hi <= lo:
+        hi = lo + 1
+    return (np.clip((vol - lo) / (hi - lo), 0, 1) * 255).astype(np.uint8)
+
+
+def to_canvas(gray: np.ndarray, mm_w: float, mm_h: float,
+              resample=Image.BILINEAR) -> tuple[Image.Image, tuple]:
+    """Fit the slice into a square model canvas, keeping its physical shape.
+    Pass Image.NEAREST for a label mask, so no label values are invented."""
     h, w = gray.shape
     m = max(mm_w, mm_h)
     tw = max(1, round(SEG_SIZE * mm_w / m))
     th = max(1, round(SEG_SIZE * mm_h / m))
     x0, y0 = (SEG_SIZE - tw) // 2, (SEG_SIZE - th) // 2
     canvas = Image.new("L", (SEG_SIZE, SEG_SIZE), 0)
-    canvas.paste(Image.fromarray(gray).resize((tw, th), Image.BILINEAR), (x0, y0))
+    canvas.paste(Image.fromarray(gray).resize((tw, th), resample), (x0, y0))
     return canvas, (x0, y0, x0 + tw, y0 + th)
 
 
@@ -169,10 +179,7 @@ def main():
     spacing = [abs(float(z)) or 1.0 for z in img.header.get_zooms()[:3]]
     ax = derive_axes(img.affine)
 
-    lo, hi = (float(v) for v in np.percentile(vol, [1, 99]))
-    if hi <= lo:
-        hi = lo + 1
-    gray_vol = (np.clip((vol - lo) / (hi - lo), 0, 1) * 255).astype(np.uint8)
+    gray_vol = gray_volume(vol)
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
     seg_models = load_seg_models(base, seg_man, device)

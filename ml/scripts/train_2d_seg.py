@@ -215,15 +215,21 @@ def main():
                     help="where to train. 'auto' uses the GPU when one is "
                          "usable and falls back to CPU; 'cuda' fails loudly "
                          "rather than training slowly by accident")
+    ap.add_argument("--data", default="seg2d",
+                    help="dataset folder under data/ (seg2d3d for slices cut from the 3D annotations)")
+    ap.add_argument("--out", default="results2dseg",
+                    help="results folder under data/. Weights go to <out>/checkpoints; "
+                         "results2dseg is the one the app serves")
     args = ap.parse_args()
 
     random.seed(SEED); np.random.seed(SEED); torch.manual_seed(SEED)
 
     base = Path(args.base)
-    root = base / "data" / "seg2d"
+    root = base / "data" / args.data
     idx = root / "index.csv"
     if not idx.exists():
-        sys.exit("no data/seg2d/index.csv — run ml/scripts/make_2d_seg.py first")
+        sys.exit(f"no data/{args.data}/index.csv — build it first "
+                 "(make_2d_seg.py for seg2d3d, make_seg2d_from_masks.py for seg2d)")
 
     rows = list(csv.DictReader(open(idx, encoding="utf-8")))
     by_case, folds = patient_folds(rows, args.folds)
@@ -238,7 +244,8 @@ def main():
 
     # One set of weights per fold; inference averages the probability maps over
     # all of them. Wiped first so a shorter run cannot leave stale folds behind.
-    ckpt_dir = base / "data" / "results2dseg" / "checkpoints"
+    out = base / "data" / args.out
+    ckpt_dir = out / "checkpoints"
     if ckpt_dir.exists():
         shutil.rmtree(ckpt_dir)
     ckpt_dir.mkdir(parents=True, exist_ok=True)
@@ -325,12 +332,12 @@ def main():
         v = [f[key] for f in per_fold if not np.isnan(f[key])]
         return {"mean": float(np.mean(v)), "std": float(np.std(v))} if v else None
 
-    out = base / "data" / "results2dseg"
     out.mkdir(parents=True, exist_ok=True)
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
     metrics = {
         "run_id": f"{stamp}_unet2d", "finished_at": datetime.now().isoformat(timespec="seconds"),
         "model": "2D U-Net, bone + lesion channels", "device": device,
+        "dataset": args.data,
         "folds": args.folds, "epochs": args.epochs, "seed": SEED,
         "n_slices": len(rows), "n_cases": n_cases,
         "per_fold": per_fold,
@@ -339,11 +346,12 @@ def main():
                  "including empty slices would inflate it towards 1. False positives are "
                  "counted on slices with no reference lesion."),
     }
-    metrics["checkpoints"] = {"dir": "data/results2dseg/checkpoints",
+    metrics["checkpoints"] = {"dir": f"data/{args.out}/checkpoints",
                               "n_folds": len(saved_folds), "img_size": IMG_SIZE}
     (ckpt_dir / "manifest.json").write_text(json.dumps({
         "created_at": metrics["finished_at"],
         "model": "unet2d",
+        "dataset": args.data,
         "channels": CHANNELS,
         "lesion_channel": 1,
         "img_size": IMG_SIZE,
