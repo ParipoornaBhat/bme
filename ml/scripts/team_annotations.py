@@ -60,8 +60,8 @@ from seg2nifti import build_labelmap, read_segmentation  # noqa: E402
 # painted them, not to whoever's range they would otherwise fall in.
 TEAM = {
     "aditi": "6-26,46-47",
-    "paripoorna": "1-5,54-59",
-    "reegan": "27-45,60-61",
+    "paripoorna": "1-5,58-59",
+    "reegan": "27-45,60-61,55-57",
     "elvin": "48-53",
 }
 
