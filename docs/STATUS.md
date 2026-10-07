@@ -310,7 +310,7 @@ Carried from [PRD.md](PRD.md) §10, updated with what the data answered.
 | 1 | Which joint? | ✅ **Answered by data — knee.** |
 | 2 | Is T1 available? | ✅ **Answered — only 16%.** Model redesigned around it. |
 | 3 | Can a radiologist review ~20 annotated cases? | ❓ **Open. Ask early** — it decides whether you claim expert-validated ground truth or student-labelled. |
-| 4 | Can this data leave the hospital network? | ❓ **Open.** Decides whether "cloud-enabled" in the synopsis survives or becomes "on-premise". |
+| 4 | Can this data leave the hospital network? | ❓ **Open.** Decides whether "cloud-enabled" in the synopsis survives or becomes "on-premise". Also gates the college H200: its policy says "never store personal data on the server", and `ml/slurm/train_2d_seg.sbatch` assumes `data/seg2d3d` (de-identified patient slices) is copied there. Get the guide's / admin's OK first; delete the data after each job (7-day auto-purge). |
 | 5 | Are the `.docx` files in some archives radiology reports? | ❓ **Open.** If yes they are PHI *and* free weak labels — worth asking for them properly. |
 
 ---

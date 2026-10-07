@@ -3,17 +3,20 @@
 #
 #   sbatch ml/slurm/train_2d_seg.sbatch
 #
-# Expects ~/bme/env (CUDA torch, numpy, pillow), ~/bme/ml/scripts/ and
-# ~/bme/data/seg2d3d/ copied up from the hub laptop. Weights and metrics land in
-# ~/bme/data/results2dseg3d/. Paths use $HOME: Slurm expands %u only in #SBATCH lines.
+# Expects ~/bme/env (CUDA torch from the cu121 wheel, numpy, pillow), ~/bme/ml/scripts/,
+# ~/bme/data/seg2d3d/ copied up from the hub laptop, and ~/bme/logs/ created before
+# submitting (Slurm does not create it). Weights and metrics land in
+# ~/bme/data/results2dseg3d/; metrics.json is written only after the last fold.
+# #SBATCH paths must be absolute or the job exits at once (H200 guide); Slurm expands
+# %u only in #SBATCH lines, so the script body uses $HOME.
 #SBATCH --job-name=bme_unet2d
 #SBATCH --partition=h200
 #SBATCH --gres=gpu:1g.18gb:1
-#SBATCH --cpus-per-task=4
+#SBATCH --cpus-per-task=2
 #SBATCH --mem=16G
-#SBATCH --time=01:00:00
-#SBATCH --output=logs/unet2d_%j.out
-#SBATCH --error=logs/unet2d_%j.err
+#SBATCH --time=04:00:00
+#SBATCH --output=/home/%u/bme/logs/unet2d_%j.out
+#SBATCH --error=/home/%u/bme/logs/unet2d_%j.err
 
 set -euo pipefail
 source "$HOME/bme/env/bin/activate"
