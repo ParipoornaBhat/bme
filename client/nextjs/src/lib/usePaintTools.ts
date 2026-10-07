@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 
-export type PaintTool = "brush" | "pencil" | "pan" | "torch";
+export type PaintTool = "brush" | "pencil" | "pan" | "torch" | "move";
 type DrawTool = "brush" | "pencil";
 
 const draws = (t: PaintTool): t is DrawTool => t === "brush" || t === "pencil";
@@ -11,8 +11,8 @@ const draws = (t: PaintTool): t is DrawTool => t === "brush" || t === "pencil";
  * The active tool and the eraser, shared by the 2D painter and the 3D viewer
  * so both follow the same rules:
  *
- * - The eraser is a mode of the brush or the pencil, never of hand or torch.
- *   Choosing hand or torch turns it off; turning it on from hand or torch
+ * - The eraser is a mode of the brush or the pencil, never of hand, torch or
+ *   move. Choosing one of those turns it off; turning it on from one of them
  *   goes back to the last drawing tool.
  * - Switching between brush and pencil keeps the eraser as it was, so an
  *   outline can be erased with the pencil.

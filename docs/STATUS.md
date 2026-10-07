@@ -4,7 +4,7 @@
 If you are picking this project up cold (new chat, new teammate, new machine), read this
 file first, then [SUMMARY.md](SUMMARY.md) for the full picture, then [PRD.md](PRD.md).
 
-Last updated: **2026-10-07**
+Last updated: **2026-10-08**
 
 ---
 
@@ -46,6 +46,7 @@ Phases are defined in [PRD.md](PRD.md) §8.
 | — | 2D baseline (extract, train, review, Grad-CAM) | ✅ trains, saves checkpoints, predicts on upload |
 | — | 2D inference: upload → YES/NO + Grad-CAM + edema mask | ✅ `infer_2d.py`, `/api/predict`, `/results` |
 | — | Annotation viewer: Four-Up, crosshair sync, pencil fill, 3D surface | ✅ save round-trip verified |
+| — | Move / resize tool (M) in the 3D viewer and the 2D painter: select a painted region, drag or resize it (3D: this slice or all slices) | 🟡 typechecked, not yet tried in the app (hub runs a production build) |
 | — | Web app: annotate / training / results / storage | ✅ built and API-verified |
 | — | Full pseudonymisation of every filename | ✅ 108 archives + 121 images renamed |
 | **1** | **Annotation pipeline** | 🟡 **0 cases done. The critical path.** Tooling ready: 2D/3D annotation + live collaborative review. |

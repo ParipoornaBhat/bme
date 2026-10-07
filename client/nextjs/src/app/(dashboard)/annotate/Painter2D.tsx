@@ -52,8 +52,20 @@ import { MaskSync, type MaskSyncIO } from "~/lib/mask-sync";
 import {
   useOverlayView,
   renderLabels,
+  isLabelVisible,
   OverlayControls,
 } from "~/lib/useOverlayView";
+import {
+  dragBox,
+  handleAt,
+  placeRegion,
+  sameBox,
+  selectRegion,
+  HANDLE_CURSOR,
+  type Box,
+  type Handle,
+  type Region,
+} from "~/lib/region-move";
 import { canPaint } from "~/lib/paint-rules";
 import FlagDialog from "./FlagDialog";
 import { pencilCursor } from "~/lib/cursors";
@@ -460,6 +472,7 @@ export default function Painter2D({
     if (!maskDataRef.current || undoStackRef.current.length === 0) return;
     const prev = undoStackRef.current.pop();
     if (prev) {
+      dropSelection();
       redoStackRef.current.push(new Uint8Array(maskDataRef.current));
       maskDataRef.current.set(prev);
       renderMaskToCanvas();
@@ -472,6 +485,7 @@ export default function Painter2D({
     if (!maskDataRef.current || redoStackRef.current.length === 0) return;
     const next = redoStackRef.current.pop();
     if (next) {
+      dropSelection();
       undoStackRef.current.push(new Uint8Array(maskDataRef.current));
       maskDataRef.current.set(next);
       renderMaskToCanvas();
@@ -482,6 +496,7 @@ export default function Painter2D({
 
   const clearMask = () => {
     if (!maskDataRef.current) return;
+    dropSelection();
     pushUndo();
     maskDataRef.current.fill(0);
     renderMaskToCanvas();
@@ -927,6 +942,163 @@ export default function Painter2D({
     }, 400);
   }, [autoSave]);
 
+  // ── Move / resize ──
+  // Click a painted region to select it, drag inside its box to move it, drag
+  // an edge or corner to resize it; Shift on a corner keeps proportions. Each
+  // drag is one undo step. The shared logic is in src/lib/region-move.ts, which
+  // counts rows upwards, so image rows are flipped on the way in and out.
+  const moveSelRef = useRef<{ region: Region; to: Box; stamped: Int32Array; under: Uint8Array } | null>(null);
+  const moveDragRef = useRef<{ handle: Handle; x: number; y: number; start: Box; pushed: boolean } | null>(null);
+  const [moveDragging, setMoveDragging] = useState(false);
+  const [moveCursor, setMoveCursor] = useState("crosshair");
+
+  /** A screen point in image pixels with rows counted upwards, and 8 px in pixels. */
+  const movePointAt = (clientX: number, clientY: number) => {
+    const canvas = maskCanvasRef.current;
+    const { w, h } = imgDimRef.current;
+    if (!canvas || w === 0 || h === 0) return null;
+    const rect = canvas.getBoundingClientRect();
+    if (rect.width === 0 || rect.height === 0) return null;
+    return {
+      x: ((clientX - rect.left) / rect.width) * w,
+      y: h - ((clientY - rect.top) / rect.height) * h,
+      tol: (8 * w) / rect.width,
+    };
+  };
+
+  const drawMoveBox = useCallback(() => {
+    const canvas = overlayCanvasRef.current;
+    const ctx = canvas?.getContext("2d");
+    if (!canvas || !ctx) return;
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    const sel = moveSelRef.current;
+    if (!sel) return;
+    const { w, h } = imgDimRef.current;
+    const { x0, y0, x1, y1 } = sel.to;
+    const lw = Math.max(1, Math.round(w / 350));
+    const hs = Math.max(4, Math.round(w / 70));
+    ctx.save();
+    ctx.lineWidth = lw;
+    ctx.strokeStyle = "#ffffff";
+    ctx.setLineDash([lw * 4, lw * 3]);
+    ctx.strokeRect(x0, h - y1, x1 - x0, y1 - y0);
+    ctx.setLineDash([]);
+    ctx.fillStyle = "#ffffff";
+    ctx.strokeStyle = "rgba(0, 0, 0, 0.8)";
+    const mx = (x0 + x1) / 2, my = (y0 + y1) / 2;
+    for (const [hx, hy] of [[x0, y0], [mx, y0], [x1, y0], [x0, my], [x1, my], [x0, y1], [mx, y1], [x1, y1]]) {
+      ctx.fillRect(hx - hs / 2, h - hy - hs / 2, hs, hs);
+      ctx.strokeRect(hx - hs / 2, h - hy - hs / 2, hs, hs);
+    }
+    ctx.restore();
+  }, []);
+
+  const dropSelection = useCallback(() => {
+    if (!moveSelRef.current) return;
+    moveSelRef.current = null;
+    moveDragRef.current = null;
+    setMoveDragging(false);
+    clearOverlay();
+  }, [clearOverlay]);
+
+  /** Lift the selection off where it was and stamp it at `to`. */
+  const placeSelection = (to: Box) => {
+    const sel = moveSelRef.current;
+    const mask = maskDataRef.current;
+    const { w, h } = imgDimRef.current;
+    if (!sel || !mask) return;
+    const { under, stamped } = sel;
+    for (let n = 0; n < stamped.length; n++) mask[stamped[n]] = under[stamped[n]];
+    const out: number[] = [];
+    placeRegion(sel.region, to, w, h, (a, b, _s, v) => {
+      const f = (h - 1 - b) * w + a;
+      if (under[f] === 255) under[f] = mask[f];
+      if (!canPaint(under[f], v, { erasing: false, insideBone: false, hasBone: false, protectLesion })) return;
+      mask[f] = v;
+      out.push(f);
+    });
+    sel.stamped = Int32Array.from(out);
+    sel.to = to;
+    renderMaskToCanvas();
+    drawMoveBox();
+  };
+
+  /** Grab the selection's box or handle, or select the region under the pointer. */
+  const startMove = (clientX: number, clientY: number) => {
+    const mask = maskDataRef.current;
+    const { w, h } = imgDimRef.current;
+    const pt = movePointAt(clientX, clientY);
+    if (!mask || !pt) return;
+    let sel = moveSelRef.current;
+    let handle = sel ? handleAt(sel.to, pt.x, pt.y, pt.tol) : null;
+    if (!handle) {
+      const a = Math.floor(pt.x), b = Math.floor(pt.y);
+      const region = a >= 0 && b >= 0 && a < w && b < h
+        ? selectRegion(
+            { a, b, s: 0 },
+            { w, h, depth: 1, labels: mask, flat: (pa, pb) => (h - 1 - pb) * w + pa },
+            false,
+            (v) => isLabelVisible(v, viewRef.current),
+          )
+        : null;
+      if (!region) { dropSelection(); return; }
+      const under = new Uint8Array(mask.length).fill(255);
+      const stamped = new Int32Array(region.size);
+      let n = 0;
+      placeRegion(region, region.from, w, h, (pa, pb) => {
+        const f = (h - 1 - pb) * w + pa;
+        under[f] = 0;
+        stamped[n++] = f;
+      });
+      sel = { region, to: region.from, stamped, under };
+      moveSelRef.current = sel;
+      drawMoveBox();
+      handle = "move";
+    }
+    moveDragRef.current = { handle, x: pt.x, y: pt.y, start: sel!.to, pushed: false };
+    setMoveDragging(true);
+  };
+
+  const moveStep = (clientX: number, clientY: number, keepAspect: boolean) => {
+    const st = moveDragRef.current;
+    const sel = moveSelRef.current;
+    const pt = movePointAt(clientX, clientY);
+    if (!st || !sel || !pt) return;
+    const to = dragBox(st.start, st.handle, Math.round(pt.x - st.x), Math.round(pt.y - st.y), keepAspect);
+    if (sameBox(to, sel.to)) return;
+    if (!st.pushed) { pushUndo(); st.pushed = true; }
+    placeSelection(to);
+  };
+
+  const endMove = () => {
+    const st = moveDragRef.current;
+    if (!st) return;
+    moveDragRef.current = null;
+    setMoveDragging(false);
+    if (st.pushed) triggerAutoSaveIfNeeded();
+  };
+
+  // Followed on the window, so the drag carries on off the image.
+  const moveStepRef = useRef(moveStep);
+  moveStepRef.current = moveStep;
+  const endMoveRef = useRef(endMove);
+  endMoveRef.current = endMove;
+  useEffect(() => {
+    if (!moveDragging) return;
+    const move = (e: MouseEvent) => moveStepRef.current(e.clientX, e.clientY, e.shiftKey);
+    const up = () => endMoveRef.current();
+    window.addEventListener("mousemove", move);
+    window.addEventListener("mouseup", up);
+    return () => {
+      window.removeEventListener("mousemove", move);
+      window.removeEventListener("mouseup", up);
+    };
+  }, [moveDragging]);
+
+  // A selection belongs to the slice and the mask it was taken from.
+  useEffect(() => { if (tool !== "move") dropSelection(); }, [tool, dropSelection]);
+  useEffect(() => { dropSelection(); }, [selectedRelPath, selectedStem, dropSelection]);
+
   const finishLockedDraw = useCallback(() => {
     if (!isLockedDrawRef.current) return;
     isLockedDrawRef.current = false;
@@ -1047,7 +1219,7 @@ export default function Painter2D({
   };
 
   const handleDoubleClick = (e: React.MouseEvent<HTMLCanvasElement>) => {
-    if (e.button !== 0 || tool === "pan" || tool === "torch") return;
+    if (e.button !== 0 || tool === "pan" || tool === "torch" || tool === "move") return;
     if (isCollaborator && !permissions.ANNOTATE) return;
     const pos = getCanvasCoords(e);
     if (isLockedDrawRef.current) {
@@ -1076,6 +1248,11 @@ export default function Painter2D({
     }
 
     if (isCollaborator && !permissions.ANNOTATE) return;
+
+    if (tool === "move") {
+      startMove(e.touches[0].clientX, e.touches[0].clientY);
+      return;
+    }
 
     const pos = getCanvasCoords(e);
 
@@ -1132,6 +1309,11 @@ export default function Painter2D({
 
     if (isCollaborator && !permissions.ANNOTATE) return;
 
+    if (tool === "move") {
+      moveStep(e.touches[0].clientX, e.touches[0].clientY, false);
+      return;
+    }
+
     if (!isDrawingRef.current) return;
     const pos = getCanvasCoords(e);
 
@@ -1167,6 +1349,10 @@ export default function Painter2D({
     if (isPanning) {
       setIsPanning(false);
     }
+    if (tool === "move") {
+      endMove();
+      return;
+    }
     // If locked draw mode is active, lifting finger from touchscreen does not end drawing
     if (isLockedDrawRef.current) {
       return;
@@ -1195,6 +1381,11 @@ export default function Painter2D({
     }
 
     if (isCollaborator && !permissions.ANNOTATE) return;
+
+    if (tool === "move") {
+      startMove(e.clientX, e.clientY);
+      return;
+    }
 
     const pos = getCanvasCoords(e);
 
@@ -1275,6 +1466,18 @@ export default function Painter2D({
     }
 
     if (isCollaborator && !permissions.ANNOTATE) return;
+
+    if (tool === "move") {
+      if (moveDragRef.current) return;
+      const sel = moveSelRef.current;
+      const pt = movePointAt(e.clientX, e.clientY);
+      const over = sel && pt ? handleAt(sel.to, pt.x, pt.y, pt.tol) : null;
+      const pos = getCanvasCoords(e);
+      const next = over ? HANDLE_CURSOR[over]
+        : maskDataRef.current?.[pos.y * imgDimRef.current.w + pos.x] ? "pointer" : "crosshair";
+      if (next !== moveCursor) setMoveCursor(next);
+      return;
+    }
 
     if (!isDrawingRef.current || spaceHeldRef.current) return;
     // The button was released outside the window, where no mouseup reached
@@ -1558,6 +1761,7 @@ export default function Painter2D({
           return;
         }
       }
+      if (e.key === "Escape" && moveSelRef.current && !moveDragRef.current) { dropSelection(); return; }
       if (e.key === "1") { setActiveLabel(1); drawWithLabel(); }
       else if (e.key === "2") { setActiveLabel(2); drawWithLabel(); }
       else if (e.key === "3") { setActiveLabel(3); drawWithLabel(); }
@@ -1565,6 +1769,7 @@ export default function Painter2D({
       else if (e.key === "5" || e.key.toLowerCase() === "p") { pickTool("pencil"); }
       else if (e.key === "6" || e.key.toLowerCase() === "h") { pickTool("pan"); }
       else if (e.key === "7") { pickTool("torch"); }
+      else if (e.key === "8" || (e.key.toLowerCase() === "m" && !e.ctrlKey && !e.metaKey && !e.altKey)) { pickTool("move"); }
       else if (e.key.toLowerCase() === "t" && !e.ctrlKey && !e.metaKey && !e.altKey) { setTorchHeld(true); }
       else if (e.key === "0" || e.key.toLowerCase() === "e") { toggleEraser(); }
       else if (e.key === "z" && (e.ctrlKey || e.metaKey) && !e.shiftKey) { e.preventDefault(); undo(); }
@@ -1870,6 +2075,16 @@ export default function Painter2D({
                     </button>
                     <button
                       type="button"
+                      onClick={() => pickTool("move")}
+                      title="Move / resize: click a painted region to select it, drag to move, drag a handle to resize; Shift keeps proportions, Esc deselects (Key 8 or M)"
+                      className={`p-1.5 rounded transition border cursor-pointer ${
+                        tool === "move" ? "bg-primary text-primary-foreground border-primary font-medium" : "border-border bg-background text-muted-foreground hover:text-foreground"
+                      }`}
+                    >
+                      <Move className="h-3.5 w-3.5" />
+                    </button>
+                    <button
+                      type="button"
                       onClick={() => pickTool("pan")}
                       title="Hand mode (Key 6 or H)"
                       className={`p-1.5 rounded transition border cursor-pointer ${
@@ -2089,6 +2304,16 @@ export default function Painter2D({
                       }`}
                     >
                       <Lasso className="h-3 w-3" /> Pencil <span className="text-[10px] opacity-60">(5)</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => pickTool("move")}
+                      title="Move / resize: click a painted region to select it, drag to move, drag a handle to resize; Shift keeps proportions, Esc deselects (Key 8 or M)"
+                      className={`inline-flex items-center gap-1.5 border-l border-border px-2.5 py-1 text-xs transition cursor-pointer ${
+                        tool === "move" ? "bg-primary text-primary-foreground font-medium" : "bg-background text-muted-foreground hover:text-foreground"
+                      }`}
+                    >
+                      <Move className="h-3 w-3" /> Move <span className="text-[10px] opacity-60">(8)</span>
                     </button>
                     <button
                       type="button"
@@ -2551,6 +2776,7 @@ export default function Painter2D({
                 ...(tool === "pencil" && !spaceHeld
                   ? { cursor: pencilCursor(isErasing ? "#ffffff" : LABELS.find((l) => l.id === activeLabel)?.stroke ?? "#ffffff") }
                   : {}),
+                ...(tool === "move" && !spaceHeld ? { cursor: moveCursor } : {}),
               }}
               onMouseDown={handleMouseDown}
               onMouseMove={handleMouseMove}

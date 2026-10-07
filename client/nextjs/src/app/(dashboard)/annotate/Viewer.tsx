@@ -16,6 +16,7 @@ import {
   Flashlight,
   Hand,
   Lasso,
+  Layers,
   Link2,
   Link2Off,
   Loader2,
@@ -25,6 +26,7 @@ import {
   Minimize,
   Minimize2,
   Minus,
+  Move,
   Paintbrush,
   Plus,
   Redo2,
@@ -69,6 +71,17 @@ import { Pinch } from "~/lib/pinch";
 import { usePaintTools, usePencilDottedSetting } from "~/lib/usePaintTools";
 import { edgePanStep, useAutoPanSetting, useSpaceHeld } from "~/lib/view-pan";
 import { isInTorch, type TorchState } from "~/lib/torch";
+import {
+  dragBox,
+  handleAt,
+  placeRegion,
+  sameBox,
+  selectRegion,
+  HANDLE_CURSOR,
+  type Box,
+  type Handle,
+  type Region,
+} from "~/lib/region-move";
 import type { FlagRecord } from "~/lib/flag-store";
 import FlagDialog from "./FlagDialog";
 import { drawSuggestionEdges, useSuggestions } from "./suggestions";
@@ -389,6 +402,15 @@ export default function Viewer({
 
   const outline = useRef<[number, number][]>([]);
   const [outlineTick, setOutlineTick] = useState(0);
+  // Move tool: the selected region, where it sits now, and what it covered.
+  // `under` holds the label each touched voxel had before the region landed
+  // there (255 = not touched yet), so moving it again puts those back.
+  const moveSel = useRef<{
+    plane: Plane; region: Region; to: Box; stamped: Int32Array; under: Uint8Array;
+  } | null>(null);
+  const [moveTick, setMoveTick] = useState(0);
+  const [moveAllSlices, setMoveAllSlices] = useState(false);
+  const [moveCursorStyle, setMoveCursorStyle] = useState("crosshair");
   // Zoom is per view: you often want a lesion magnified in one plane while
   // keeping the others wide for context.
   const [zoom, setZoom] = useState<Record<Plane, number>>({ axial: 1, coronal: 1, sagittal: 1 });
@@ -929,6 +951,28 @@ export default function Viewer({
       ctx.restore();
     }
 
+    // Move tool: the selected region's box and its resize handles.
+    const sel = moveSel.current;
+    if (sel && sel.plane === p && sel.region.masks.has(s)) {
+      const { x0, y0, x1, y1 } = sel.to;
+      const lw = Math.max(1, Math.round(w / 350));
+      const hs = Math.max(4, Math.round(w / 70));
+      ctx.save();
+      ctx.lineWidth = lw;
+      ctx.strokeStyle = "#ffffff";
+      ctx.setLineDash([lw * 4, lw * 3]);
+      ctx.strokeRect(x0, h - y1, x1 - x0, y1 - y0);
+      ctx.setLineDash([]);
+      ctx.fillStyle = "#ffffff";
+      ctx.strokeStyle = "rgba(0, 0, 0, 0.8)";
+      const mx = (x0 + x1) / 2, my = (y0 + y1) / 2;
+      for (const [hx, hy] of [[x0, y0], [mx, y0], [x1, y0], [x0, my], [x1, my], [x0, y1], [mx, y1], [x1, y1]]) {
+        ctx.fillRect(hx - hs / 2, h - hy - hs / 2, hs, hs);
+        ctx.strokeRect(hx - hs / 2, h - hy - hs / 2, hs, hs);
+      }
+      ctx.restore();
+    }
+
     // Other participants' pointers on this view.
     if (collabToken) {
       for (const pt of participantsRef.current) {
@@ -971,7 +1015,7 @@ export default function Viewer({
       ctx.restore();
     }
   }, [vol, labels, cursor, seg, erasing, outlineTick, planeGeom, sampleAt, cursorInPlane, sliceOf, view, opacity,
-      collabToken, suggestion, caseId, pencilDotted]);
+      collabToken, suggestion, caseId, pencilDotted, moveTick]);
 
   const drawAll = useCallback(() => { PLANES.forEach(draw); }, [draw]);
   useEffect(() => { drawAll(); }, [drawAll]);
@@ -1494,8 +1538,136 @@ export default function Viewer({
     return () => cancelAnimationFrame(raf);
   }, [stroking, autoPan, spaceHeldRef]);
 
+  // ---- move / resize ---------------------------------------------------
+  // Click a painted region to select it, drag inside its box to move it, drag
+  // an edge or corner to resize it. Each drag is one undo step. The label
+  // volume is edited live, so the other views and the 3D render follow.
+  const dropSelection = useCallback(() => {
+    if (!moveSel.current) return;
+    moveSel.current = null;
+    setMoveTick((n) => n + 1);
+  }, []);
+
+  /** A screen point in this plane's voxel units, unclamped, and 8 px in voxels. */
+  const toPlanePoint = useCallback((p: Plane, clientX: number, clientY: number) => {
+    const cv = canvases.current[p];
+    if (!vol || !cv) return null;
+    const rect = cv.getBoundingClientRect();
+    const { w, h } = planeGeom(p, vol);
+    return {
+      x: ((clientX - rect.left) / rect.width) * w,
+      y: h - ((clientY - rect.top) / rect.height) * h,
+      tol: (8 * w) / rect.width,
+    };
+  }, [vol, planeGeom]);
+
+  /** Lift the selection off where it was and stamp it at `to`. */
+  const placeSelection = useCallback((to: Box) => {
+    const sel = moveSel.current;
+    if (!sel || !vol || !labels) return;
+    const { under, stamped } = sel;
+    for (let n = 0; n < stamped.length; n++) labels[stamped[n]] = under[stamped[n]];
+    const { w, h } = planeGeom(sel.plane, vol);
+    const out: number[] = [];
+    placeRegion(sel.region, to, w, h, (a, b, sl, v) => {
+      const f = sampleAt(sel.plane, vol, a, b, sl);
+      if (under[f] === 255) under[f] = labels[f];
+      if (!canPaint(under[f], v, { erasing: false, insideBone: false, hasBone: false, protectLesion })) return;
+      labels[f] = v;
+      out.push(f);
+    });
+    sel.stamped = Int32Array.from(out);
+    sel.to = to;
+    markEdited();
+    drawAll();
+  }, [vol, labels, planeGeom, sampleAt, protectLesion, markEdited, drawAll]);
+
+  const moveDrag = useRef<{
+    id: number; plane: Plane; handle: Handle; x: number; y: number; start: Box; pushed: boolean;
+  } | null>(null);
+  const [moveDragging, setMoveDragging] = useState(false);
+
+  /** Grab the selection's box or handle, or select the region under the pointer. */
+  const startMove = (p: Plane, e: React.PointerEvent) => {
+    if (!vol || !labels) return;
+    const pt = toPlanePoint(p, e.clientX, e.clientY);
+    if (!pt) return;
+    const s = sliceOf(p, vol, cursor);
+    let sel = moveSel.current;
+    let handle = sel && sel.plane === p && sel.region.masks.has(s) ? handleAt(sel.to, pt.x, pt.y, pt.tol) : null;
+    if (!handle) {
+      const hit = toVoxelAt(p, e.clientX, e.clientY);
+      const { w, h, depth } = planeGeom(p, vol);
+      const region = hit && selectRegion(
+        { a: hit.a, b: hit.b, s },
+        { w, h, depth, labels, flat: (a, b, sl) => sampleAt(p, vol, a, b, sl) },
+        moveAllSlices,
+        (v) => isLabelVisible(v, view),
+      );
+      if (!region) { dropSelection(); return; }
+      const under = new Uint8Array(labels.length).fill(255);
+      const stamped = new Int32Array(region.size);
+      let n = 0;
+      placeRegion(region, region.from, w, h, (a, b, sl) => {
+        const f = sampleAt(p, vol, a, b, sl);
+        under[f] = 0;
+        stamped[n++] = f;
+      });
+      sel = { plane: p, region, to: region.from, stamped, under };
+      moveSel.current = sel;
+      setMoveTick((t) => t + 1);
+      handle = "move";
+    }
+    moveDrag.current = { id: e.pointerId, plane: p, handle, x: pt.x, y: pt.y, start: sel!.to, pushed: false };
+    setMoveDragging(true);
+  };
+
+  const moveDragStep = useRef<(e: PointerEvent) => void>(() => {});
+  moveDragStep.current = (e) => {
+    const st = moveDrag.current;
+    const sel = moveSel.current;
+    if (!st || !sel || st.id !== e.pointerId) return;
+    const pt = toPlanePoint(st.plane, e.clientX, e.clientY);
+    if (!pt) return;
+    const to = dragBox(st.start, st.handle, Math.round(pt.x - st.x), Math.round(pt.y - st.y), e.shiftKey);
+    if (sameBox(to, sel.to)) return;
+    if (!st.pushed) { pushUndo(); st.pushed = true; }
+    placeSelection(to);
+  };
+  const endMoveDrag = useRef<(e: PointerEvent) => void>(() => {});
+  endMoveDrag.current = (e) => {
+    const st = moveDrag.current;
+    if (!st || st.id !== e.pointerId) return;
+    moveDrag.current = null;
+    setMoveDragging(false);
+    if (!st.pushed) return;
+    recount();
+    scheduleAutoSaveRef.current();
+  };
+  useEffect(() => {
+    if (!moveDragging) return;
+    const move = (e: PointerEvent) => moveDragStep.current(e);
+    const up = (e: PointerEvent) => endMoveDrag.current(e);
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", up);
+    window.addEventListener("pointercancel", up);
+    return () => {
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", up);
+      window.removeEventListener("pointercancel", up);
+    };
+  }, [moveDragging]);
+
+  // The selection describes the label volume as it was when taken. A new
+  // volume (load, undo, redo, import), another tool, or a change of scope
+  // makes it stale, so it is dropped.
+  useEffect(() => { dropSelection(); }, [labels, dropSelection]);
+  useEffect(() => { if (tool !== "move") dropSelection(); }, [tool, dropSelection]);
+  useEffect(() => { dropSelection(); }, [moveAllSlices, dropSelection]);
+
   const clearMask = useCallback(() => {
     if (!labels) return;
+    dropSelection();
     pushUndo();
     labels.fill(0);
     setCounts([0, 0, 0]);
@@ -1503,7 +1675,7 @@ export default function Viewer({
     markEdited();
     scheduleAutoSaveRef.current();
     toast.info("Cleared 3D canvas mask");
-  }, [labels, pushUndo, drawAll, markEdited]);
+  }, [labels, pushUndo, drawAll, markEdited, dropSelection]);
 
   /**
    * Copy one axial slice of the suggestion into the real mask. Voxels the
@@ -1514,6 +1686,7 @@ export default function Viewer({
     if (!suggestion || !vol || !labels || suggestion.caseId !== caseId) return;
     if (suggestion.decisions[s] !== "pending") return;
     const { w, h } = planeGeom("axial", vol);
+    dropSelection();
     pushUndo();
     for (let b = 0; b < h; b++)
       for (let a = 0; a < w; a++) {
@@ -1528,7 +1701,7 @@ export default function Viewer({
     suggestions.decide(s, "accepted");
     scheduleAutoSaveRef.current();
   }, [suggestion, suggestions.decide, vol, labels, caseId, planeGeom, sampleAt, pushUndo, protectLesion,
-      markEdited, recount]);
+      markEdited, recount, dropSelection]);
 
   /** Move the axial view to the next (or previous) slice still waiting for a decision. */
   const gotoPendingSlice = (dir: 1 | -1) => {
@@ -1799,7 +1972,7 @@ export default function Viewer({
       const mod = e.ctrlKey || e.metaKey;
       const k = e.key.toLowerCase();
       // Keys for tools a guest has not been granted do nothing.
-      const annotateKey = mod ? ["z", "y", "s"].includes(k) : ["1", "2", "3", "4", "5", "0", "b", "p", "e"].includes(k);
+      const annotateKey = mod ? ["z", "y", "s"].includes(k) : ["1", "2", "3", "4", "5", "8", "0", "b", "p", "m", "e"].includes(k);
       if (annotateKey && !permsRef.current.annotate) return;
       if (!mod && (k === "6" || k === "h") && !permsRef.current.zoomPan) return;
       if (!mod && ["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", "PageUp", "PageDown"].includes(e.key)
@@ -1821,6 +1994,7 @@ export default function Viewer({
       else if (e.key === "5" || e.key.toLowerCase() === "p") { pickTool("pencil"); }
       else if (e.key === "6" || e.key.toLowerCase() === "h") { pickTool("pan"); }
       else if (e.key === "7") { pickTool("torch"); }
+      else if (e.key === "8" || e.key.toLowerCase() === "m") { pickTool("move"); }
       else if (e.key.toLowerCase() === "t" && !e.ctrlKey && !e.metaKey && !e.altKey) { setTorchHeld(true); }
       else if (e.key === "0" || e.key.toLowerCase() === "e") toggleEraser();
       else if (e.key.toLowerCase() === "v") cycleViewRef.current();
@@ -1829,6 +2003,7 @@ export default function Viewer({
       else if (e.key === "Escape" && showShortcutsRef.current) {
         setShowShortcuts(false);
       }
+      else if (e.key === "Escape" && moveSel.current && !moveDrag.current) dropSelection();
       // Esc leaves focus mode outright, not one layout at a time: in browser
       // fullscreen the browser takes Esc and leaves anyway.
       else if (e.key === "Escape" && focusOnRef.current && !painting.current) {
@@ -1889,7 +2064,7 @@ export default function Viewer({
       window.removeEventListener("keyup", onKeyUp);
       window.removeEventListener("blur", onBlur);
     };
-  }, [undo, redo, drawAll, vol, activePlane, save]);
+  }, [undo, redo, drawAll, vol, activePlane, save, dropSelection]);
 
   if (isCollaborator) {
     const screen = guestSessionScreen(collab);
@@ -1984,9 +2159,14 @@ export default function Viewer({
     </div>
   );
 
+  const MOVE_TITLE = "Move / resize: click a painted region to select it, drag to move, drag a handle to resize; Shift keeps proportions, Esc deselects (Key 8 or M)";
+  const moveScopeTitle = moveAllSlices
+    ? "Selecting through all slices: click to select on this slice only"
+    : "Selecting on this slice only: click to select through all slices";
   const paintTools = [
     { id: "brush", Icon: Paintbrush, title: "Brush (Key 4 or B)", show: canAnnotate },
     { id: "pencil", Icon: Lasso, title: "Pencil: trace an outline, the inside fills (Key 5 or P)", show: canAnnotate },
+    { id: "move", Icon: Move, title: MOVE_TITLE, show: canAnnotate },
     { id: "pan", Icon: Hand, title: "Hand: drag to move the view (Key 6 or H)", show: canZoomPan },
     { id: "torch", Icon: Flashlight, title: "Torch: see the scan under the labels (Key 7, or hold T)", show: true },
   ] as const;
@@ -2080,7 +2260,12 @@ export default function Viewer({
       )}
       {torchActive
         ? railSize("torch", torchSize, (d) => stepTorch(d * 8))
-        : canAnnotate && tool === "brush" && railSize("brush", brush, (d) => setBrush((b) => Math.min(20, Math.max(1, b + d))))}
+        : canAnnotate && tool === "brush" ? railSize("brush", brush, (d) => setBrush((b) => Math.min(20, Math.max(1, b + d))))
+        : canAnnotate && tool === "move" && (
+          <RailButton active={moveAllSlices} title={moveScopeTitle} onClick={() => setMoveAllSlices((v) => !v)}>
+            <Layers className="h-4 w-4" />
+          </RailButton>
+        )}
       {canAnnotate && (
         <>
           {railDivider}
@@ -2242,6 +2427,28 @@ export default function Viewer({
                 >
                   <Lasso className="h-3.5 w-3.5" />
                 </button>
+                <button
+                  type="button"
+                  onClick={() => { pickTool("move"); }}
+                  title={MOVE_TITLE}
+                  className={`p-1.5 rounded transition border cursor-pointer ${
+                    tool === "move" ? "bg-primary text-primary-foreground border-primary font-medium" : "border-border bg-background text-muted-foreground hover:text-foreground"
+                  }`}
+                >
+                  <Move className="h-3.5 w-3.5" />
+                </button>
+                {tool === "move" && (
+                  <button
+                    type="button"
+                    onClick={() => setMoveAllSlices((v) => !v)}
+                    title={moveScopeTitle}
+                    className={`p-1.5 rounded transition border cursor-pointer ${
+                      moveAllSlices ? "border-primary bg-primary/20 text-primary" : "border-border bg-background text-muted-foreground hover:text-foreground"
+                    }`}
+                  >
+                    <Layers className="h-3.5 w-3.5" />
+                  </button>
+                )}
               </>
             )}
             {canZoomPan && (
@@ -2520,6 +2727,22 @@ export default function Viewer({
                 />
                 <span className="w-9 tabular-nums">{brush}px</span>
               </label>
+            )}
+            {canAnnotate && tool === "move" && (
+              <div className="inline-flex overflow-hidden rounded-md border border-border" title="What a click selects">
+                {([false, true] as const).map((all, i) => (
+                  <button
+                    key={String(all)}
+                    type="button"
+                    onClick={() => setMoveAllSlices(all)}
+                    className={`px-2 py-1 transition cursor-pointer ${i > 0 ? "border-l border-border" : ""} ${
+                      moveAllSlices === all ? "bg-primary text-primary-foreground" : "bg-background text-muted-foreground hover:text-foreground"
+                    }`}
+                  >
+                    {all ? "All slices" : "This slice"}
+                  </button>
+                ))}
+              </div>
             )}
 
             {canAnnotate && (
@@ -2824,6 +3047,7 @@ export default function Viewer({
                   <kbd className="font-mono">Ctrl+S</kbd><span>Save</span>
                   <kbd className="font-mono">1 2 3</kbd><span>Pick label (and draw)</span>
                   <kbd className="font-mono">B P H 7</kbd><span>Brush / pencil / hand / torch</span>
+                  <kbd className="font-mono">M</kbd><span>Move / resize a painted region</span>
                   <kbd className="font-mono">E</kbd><span>Eraser on/off (brush or pencil)</span>
                   <kbd className="font-mono">T (hold)</kbd><span>Peek under the labels</span>
                   <kbd className="font-mono">[ ]</kbd><span>Brush or torch size</span>
@@ -2837,7 +3061,7 @@ export default function Viewer({
                   <kbd className="font-mono">Two fingers</kbd><span>Pinch to zoom, drag to pan (touch)</span>
                   <kbd className="font-mono">One finger</kbd><span>Draws; pans once a stylus has been used</span>
                   <kbd className="font-mono">Double-click</kbd><span>View full size, and back</span>
-                  <kbd className="font-mono">Esc</kbd><span>Discard an outline while tracing</span>
+                  <kbd className="font-mono">Esc</kbd><span>Discard an outline, or deselect</span>
                   <kbd className="font-mono">F</kbd><span>Focus mode: full screen, tools only</span>
                 </div>
               </div>
@@ -2972,6 +3196,7 @@ export default function Viewer({
                   ...(tool === "pencil" && !(spaceHeld && canZoomPan)
                     ? { cursor: pencilCursor(erasing ? "#ffffff" : SEGMENTS.find((x) => x.value === seg)!.color) }
                     : {}),
+                  ...(tool === "move" && !(spaceHeld && canZoomPan) ? { cursor: moveCursorStyle } : {}),
                   touchAction: "none",
                 }}
                 onPointerDown={(e) => {
@@ -2986,6 +3211,10 @@ export default function Viewer({
                   if (spaceHeldRef.current) return; // Space is panning, not drawing
                   if (tool === "pan" || (touch && (penSeen.current || !canAnnotate))) {
                     if (e.button === 0 && canZoomPan) startPan(p, e);
+                    return;
+                  }
+                  if (tool === "move" && !e.shiftKey) {
+                    if (e.button === 0 && canAnnotate) startMove(p, e);
                     return;
                   }
                   const hit = toVoxel(p, e);
@@ -3017,6 +3246,13 @@ export default function Viewer({
                   if (hit && collabToken && collab.connected) {
                     const g = planeGeom(p, vol);
                     collab.updateCursor({ x: hit.a / g.w, y: hit.b / g.h, plane: p });
+                  }
+                  if (tool === "move" && !moveDrag.current) {
+                    const sel = moveSel.current;
+                    const pt = sel && sel.plane === p && sel.region.masks.has(s) ? toPlanePoint(p, e.clientX, e.clientY) : null;
+                    const over = pt && sel ? handleAt(sel.to, pt.x, pt.y, pt.tol) : null;
+                    const next = over ? HANDLE_CURSOR[over] : hit && labels?.[sampleAt(p, vol, hit.a, hit.b, s)] ? "pointer" : "crosshair";
+                    if (next !== moveCursorStyle) setMoveCursorStyle(next);
                   }
                   if (hit) {
                     lastPointerPosRef.current = { plane: p, a: hit.a, b: hit.b };
