@@ -64,17 +64,26 @@ Phases are defined in [PRD.md](PRD.md) §8.
 In order. Each step's output is the next step's input.
 
 0. **Team annotation split and merge (2026-10-07).** Bone painting is split by case:
-   Aditi 1-2, 6-26 · Paripoorna 3-5, 54-59 · Reegan 27-47, 60-61 · Elvin 48-53 (the
+   Aditi 6-26, 46-47 · Paripoorna 1-5, 54-59 · Reegan 27-45, 60-61 · Elvin 48-53 (the
    split lives in `TEAM` in `ml/scripts/team_annotations.py`). Elvin's laptop is the hub.
    Every laptop runs `team_annotations.py assign . --apply` once, to fill `assigned_to` in
    the worklist. A teammate runs `export . --who <name>`, which zips only their cases with bone
-   painted into `data/exports/`. The hub runs `import . <zip>` (dry run, then `--apply`).
+   painted into `data/exports/` (or `pnpm zipbme:<name>`). The hub runs `import . <zip>` (dry run, then `--apply`).
    Import refuses a case painted on a different scan or owned by someone else, keeps the
    local file on a conflict (unless `--prefer-incoming`), and backs up anything it replaces
    to `data/annotations_backup/<stamp>/`. Tested on a scratch copy only; the real worklist
    has not been changed. No overlap set yet, so no inter-rater Dice.
-   As of today, this laptop has bone painted on 11 cases. 469 axial slices carry edema across the 61 cases;
-   66 of them also have bone painted.
+   Aditi's 1-2 and 6-26 are imported (BME-006 taken from her newer copy). Reegan's 27-45
+   imported 2026-10-07 (60-61 were already painted on the hub). Hub now: **52 cases with
+   bone**; `seg2nifti.py --check-only` skips 9: BME-005, 046, 047, 050, 054-058. 46-47 were
+   painted by Aditi but not on the hub yet: she needs the updated `TEAM`, `assign . --apply`,
+   then a fresh export. Slice counts below (254 positive, 564 negative) are from the 33-case
+   build and are stale until `make_2d_seg.py --force` is rerun.
+   **Reminder, quick win: 35 edema slices have no bone painted under them and are dropped
+   from 2D training.** Paint bone on just these axial slices (1-based, in volume index order;
+   check the viewer counts the same way): BME-003 27-31 · BME-004 8-15 · BME-007 9-10 ·
+   BME-012 2-6 · BME-013 21 · BME-048 21, 29-33 · BME-049 11 · BME-051 13-14 ·
+   BME-052 11-14 · BME-053 8.
 
 0. **AI suggestions on the 3D annotate page (2026-10-03).** "AI suggestions" in the 3D
    toolbar runs the shared 2D models on every **axial** slice of the open scan (axial axis

@@ -59,9 +59,9 @@ from seg2nifti import build_labelmap, read_segmentation  # noqa: E402
 # cases each person finished before the split (1-5, 60-61) belong to whoever
 # painted them, not to whoever's range they would otherwise fall in.
 TEAM = {
-    "aditi": "1-2,6-26",
-    "paripoorna": "3-5,54-59",
-    "reegan": "27-47,60-61",
+    "aditi": "6-26,46-47",
+    "paripoorna": "1-5,54-59",
+    "reegan": "27-45,60-61",
     "elvin": "48-53",
 }
 
