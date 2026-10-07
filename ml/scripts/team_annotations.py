@@ -98,7 +98,7 @@ def scan_fingerprint(base: Path, cid: str) -> str | None:
     if not vp.exists():
         return None
     img = nib.load(str(vp))
-    if not isinstance(img, nib.spatialimages.SpatialImage):
+    if not isinstance(img, nib.spatialimages.SpatialImage) or img.affine is None:
         return None
     h = hashlib.sha256()
     h.update(str(img.shape).encode())
