@@ -33,6 +33,22 @@ HOW AN IMPORT DECIDES, per file
     A case is refused outright if the incoming scan fingerprint differs from
     the local scan (the two laptops gave that ID to different scans), or if the
     zip's owner does not own the case (pass --any-owner to allow it).
+
+GIVING A TEAMMATE THE HUB'S WHOLE DATASET
+    # the hub: two zips into data/exports/
+    python ml/scripts/team_annotations.py share .
+    #   -> hub_mri_<stamp>.zip           data/worklist.csv + data/nifti/<CASE>/*
+    #   -> hub_annotations_<stamp>.zip   data/annotations/<CASE>/* for every case
+
+    # the teammate's laptop: both zips in one command (or pnpm data:sync <a> <b>)
+    python ml/scripts/team_annotations.py restore . <mri zip> <annotations zip>            (dry run)
+    python ml/scripts/team_annotations.py restore . <mri zip> <annotations zip> --apply
+
+    Restore makes the laptop match the hub. A scan with the same voxels and
+    affine is left alone; any other file that differs is copied to
+    data/sync_backup/<stamp>/ before it is replaced, so unexported paint on
+    the teammate's laptop is never lost. Local files the hub does not have
+    are not touched.
 """
 
 from __future__ import annotations
@@ -61,7 +77,7 @@ from seg2nifti import build_labelmap, read_segmentation  # noqa: E402
 TEAM = {
     "aditi": "6-26,46-47",
     "paripoorna": "1-5,58-59",
-    "reegan": "27-45,60-61,55-57",
+    "reegan": "27-45,55-57,60-61",
     "elvin": "48-53",
 }
 
@@ -94,7 +110,10 @@ def has_bone(path: Path) -> bool:
 def scan_fingerprint(base: Path, cid: str) -> str | None:
     """Hash of the primary scan's voxels and affine, not its file bytes: gzip
     stamps a time into the file, so two identical conversions differ on disk."""
-    vp = base / "data" / "nifti" / cid / f"{cid}_primary.nii.gz"
+    return volume_fingerprint(base / "data" / "nifti" / cid / f"{cid}_primary.nii.gz")
+
+
+def volume_fingerprint(vp: Path) -> str | None:
     if not vp.exists():
         return None
     img = nib.load(str(vp))
@@ -255,6 +274,133 @@ def cmd_import(base: Path, zips: list[Path], apply: bool, prefer_incoming: bool,
     print("written. Next: python ml/scripts/seg2nifti.py . --check-only")
 
 
+def cmd_share(base: Path):
+    data = base / "data"
+    with open(data / "worklist.csv", newline="", encoding="utf-8") as fh:
+        cases = [r["case_id"] for r in csv.DictReader(fh)]
+    stamp = datetime.now().strftime("%Y%m%d-%H%M")
+    out_dir = data / "exports"
+    mri_zip = out_dir / f"hub_mri_{stamp}.zip"
+    ann_zip = out_dir / f"hub_annotations_{stamp}.zip"
+
+    scans = [p for cid in cases for p in sorted((data / "nifti" / cid).glob("*")) if p.is_file()]
+    anns = [p for cid in cases for p in sorted((data / "annotations" / cid).glob("*")) if p.is_file()]
+    no_scan = [cid for cid in cases if not (data / "nifti" / cid / f"{cid}_primary.nii.gz").exists()]
+    if no_scan:
+        sys.exit(f"worklist cases with no primary scan: {', '.join(no_scan)}")
+    print(f"{len(cases)} case(s) in data/worklist.csv")
+    print(f"  {mri_zip}  worklist.csv + {len(scans)} scan file(s)")
+    print(f"  {ann_zip}  {len(anns)} annotation file(s)")
+
+    out_dir.mkdir(parents=True, exist_ok=True)
+    # scans are already gzip; storing them saves minutes and almost no space
+    for out, kind, files, method in (
+        (mri_zip, "mri", [data / "worklist.csv", *scans], zipfile.ZIP_STORED),
+        (ann_zip, "annotations", anns, zipfile.ZIP_DEFLATED),
+    ):
+        tmp = out.with_suffix(".zip.part")
+        with zipfile.ZipFile(tmp, "w", method) as z:
+            z.writestr("manifest.json", json.dumps({"kind": kind, "created": stamp, "cases": cases}, indent=2))
+            for p in files:
+                z.write(p, p.relative_to(data).as_posix())
+        tmp.replace(out)
+    print("written. On the teammate's laptop:")
+    print(f"  pnpm data:sync {mri_zip.name} {ann_zip.name}")
+
+
+def cmd_restore(base: Path, zips: list[Path], apply: bool):
+    data = base / "data"
+    backup = data / "sync_backup" / datetime.now().strftime("%Y%m%d-%H%M%S")
+    by_kind: dict[str, Path] = {}
+    for zp in zips:
+        with zipfile.ZipFile(zp) as z:
+            kind = json.loads(z.read("manifest.json")).get("kind") if "manifest.json" in z.namelist() else None
+        if kind not in ("mri", "annotations"):
+            sys.exit(f"{zp} is not a hub_mri / hub_annotations zip (made by `share`)")
+        if kind in by_kind:
+            sys.exit(f"two {kind} zips given: {by_kind[kind]} and {zp}")
+        by_kind[kind] = zp
+    if set(by_kind) != {"mri", "annotations"}:
+        sys.exit("give both zips: the hub_mri one and the hub_annotations one")
+
+    new = same = replace = 0
+    for kind in ("mri", "annotations"):
+        zp = by_kind[kind]
+        print(f"\n{zp.name}")
+        with zipfile.ZipFile(zp) as z:
+            for info in z.infolist():
+                rel = info.filename
+                if rel == "manifest.json" or rel.endswith("/"):
+                    continue
+                if rel.startswith("/") or ".." in Path(rel).parts or rel.split("/")[0] not in (
+                    "worklist.csv", "nifti", "annotations",
+                ):
+                    sys.exit(f"unexpected path in {zp.name}: {rel}")
+                dest = data / rel
+                tmp = dest.with_name(f".incoming-{dest.name}")  # keeps .nii.gz for nibabel
+                if apply:
+                    dest.parent.mkdir(parents=True, exist_ok=True)
+                    with z.open(info) as src, open(tmp, "wb") as dst:
+                        shutil.copyfileobj(src, dst)
+                if not dest.exists():
+                    action = "new"
+                elif dest.stat().st_size == info.file_size and _same_bytes(dest, z, info):
+                    action = "same"
+                elif rel.endswith(".nii.gz") and apply and volume_fingerprint(dest) == volume_fingerprint(tmp):
+                    action = "same"
+                elif rel.endswith(".nii.gz") and not apply and _same_volume(dest, z, info):
+                    action = "same"
+                else:
+                    action = "replace"
+
+                if action == "same":
+                    same += 1
+                    if apply:
+                        tmp.unlink()
+                    continue
+                print(f"  {rel}: {action}")
+                if action == "new":
+                    new += 1
+                else:
+                    replace += 1
+                if apply:
+                    if action == "replace":
+                        keep = backup / rel
+                        keep.parent.mkdir(parents=True, exist_ok=True)
+                        shutil.copy2(dest, keep)
+                    tmp.replace(dest)
+
+    print("\n" + "=" * 60)
+    print(f"new      : {new} file(s) into {data}")
+    print(f"replace  : {replace} file(s), local copies backed up to {backup}")
+    print(f"same     : {same} file(s) already match")
+    print("=" * 60)
+    if not apply:
+        print("dry run -- add --apply to write")
+        return
+    print("written. Restart the web app if it is running.")
+
+
+def _same_bytes(path: Path, z: zipfile.ZipFile, info: zipfile.ZipInfo) -> bool:
+    with open(path, "rb") as a, z.open(info) as b:
+        while True:
+            x, y = a.read(1 << 20), b.read(1 << 20)
+            if x != y:
+                return False
+            if not x:
+                return True
+
+
+def _same_volume(path: Path, z: zipfile.ZipFile, info: zipfile.ZipInfo) -> bool:
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as td:
+        tmp = Path(td) / Path(info.filename).name
+        with z.open(info) as src, open(tmp, "wb") as dst:
+            shutil.copyfileobj(src, dst)
+        return volume_fingerprint(path) == volume_fingerprint(tmp)
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -274,12 +420,24 @@ def main():
     i.add_argument("--prefer-incoming", action="store_true")
     i.add_argument("--any-owner", action="store_true")
 
+    sh = sub.add_parser("share")
+    sh.add_argument("base")
+
+    r = sub.add_parser("restore")
+    r.add_argument("base")
+    r.add_argument("zips", nargs=2, type=Path)
+    r.add_argument("--apply", action="store_true")
+
     args = ap.parse_args()
     base = Path(args.base)
     if args.cmd == "assign":
         cmd_assign(base, args.apply)
     elif args.cmd == "export":
         cmd_export(base, args.who)
+    elif args.cmd == "share":
+        cmd_share(base)
+    elif args.cmd == "restore":
+        cmd_restore(base, args.zips, args.apply)
     else:
         cmd_import(base, args.zips, args.apply, args.prefer_incoming, args.any_owner)
 

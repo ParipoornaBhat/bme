@@ -70,21 +70,49 @@ In order. Each step's output is the next step's input.
    Every laptop runs `team_annotations.py assign . --apply` once, to fill `assigned_to` in
    the worklist. A teammate runs `export . --who <name>`, which zips only their cases with bone
    painted into `data/exports/` (or `pnpm zipbme:<name>`). The hub runs `import . <zip>` (dry run, then `--apply`).
+   **Whole-dataset hand-out (2026-10-08):** `pnpm data:share` on the hub writes
+   `data/exports/hub_mri_<stamp>.zip` (worklist + every scan, ~886 MB) and
+   `hub_annotations_<stamp>.zip` (every annotation file, ~4 MB). On a teammate's laptop,
+   `pnpm data:sync <mri zip> <annotations zip>` makes `data/` match the hub (a bare name is
+   also looked up in `data/exports/`). A scan with the same voxels is left alone; anything
+   else it replaces goes to `data/sync_backup/<stamp>/` first; local files the hub lacks
+   stay. Tested on scratch copies (fresh, re-run, diverged); first zips made 10:10.
    Import refuses a case painted on a different scan or owned by someone else, keeps the
    local file on a conflict (unless `--prefer-incoming`), and backs up anything it replaces
    to `data/annotations_backup/<stamp>/`. Tested on a scratch copy only; the real worklist
    has not been changed. No overlap set yet, so no inter-rater Dice.
    Aditi's 1-2 and 6-26 are imported (BME-006 taken from her newer copy). Reegan's 27-45
-   imported 2026-10-07 (60-61 were already painted on the hub). Hub now: **52 cases with
-   bone**; `seg2nifti.py --check-only` skips 9: BME-005, 046, 047, 050, 054-058. 46-47 were
-   painted by Aditi but not on the hub yet: she needs the updated `TEAM`, `assign . --apply`,
-   then a fresh export. Slice counts below (254 positive, 564 negative) are from the 33-case
-   build and are stale until `make_2d_seg.py --force` is rerun.
-   **Reminder, quick win: 35 edema slices have no bone painted under them and are dropped
-   from 2D training.** Paint bone on just these axial slices (1-based, in volume index order;
-   check the viewer counts the same way): BME-003 27-31 · BME-004 8-15 · BME-007 9-10 ·
-   BME-012 2-6 · BME-013 21 · BME-048 21, 29-33 · BME-049 11 · BME-051 13-14 ·
-   BME-052 11-14 · BME-053 8.
+   imported 2026-10-07 (60-61 were already painted on the hub). **2026-10-08:** Aditi's
+   46-47 and Paripoorna's 1-5 imported. Paripoorna's paint is now the primary file for
+   BME-003, 004, 005 (the hub's were incomplete: 003 bone on 25/39 slices, 004 on 1/37, 005
+   none); the hub's old files are in `data/annotations_backup/20261008-020141/`. BME-001/002
+   keep Aditi's paint as primary, with Paripoorna's alongside as `__Paripoorna_B` -- **the
+   first two double-painted cases** (bone Dice 0.92, 0.93). Her BME-005 was refused by the
+   import (her laptop's scan fingerprint differs) and copied by hand: it lands on the hub's
+   grid exactly, edema identical voxel for voxel, and an overlay shows the bone on marrow.
+   **Open:** Paripoorna's BME-002 also marks edema on slices 12-14, the hub's does not --
+   needs a clinical call. Her zip had no 54-59. Reegan's 55-57 imported 2026-10-08 02:28
+   (BME-041 conflict: hub copy kept, it has more bone); BME-058 painted on the hub.
+   Hub now: **61 cases usable**. `data/seg2d3d` rebuilt from them (see 10:25 below for the
+   current numbers): 1510 slices, 508 with edema, 1002 without, 46 edema slices dropped.
+   Only slices with bone painted go into 2D training, so the gaps below cost data, not
+   correctness. **Reminder, quick win:** paint bone on these axial slices (1-based, as the
+   viewer shows them; the viewer does not reverse slice order): BME-007 9-10 ·
+   BME-012 2-6 · BME-013 21. Whole first half of BME-033 (1-15) has no bone, likely the
+   femur never painted.
+   **2026-10-08 10:21:** Reegan's `annotations_reegan_20261008-1007.zip` imported with
+   `--prefer-incoming` for BME-039, 041-045, 055-057 (hub copies in
+   `data/annotations_backup/20261008-102102/`). His bone covers every slice of those 8
+   cases (057 unchanged), so their gaps are closed; the hub's paint was inside his except
+   142 bone voxels in 041. Edema identical except **BME-044: he added ~9,000 edema voxels
+   (6,034 -> 14,989), checked by Elvin in the viewer and correct.** Labels regenerated
+   (`seg2nifti.py --force`) and `data/seg2d3d` rebuilt at 10:25: **1614 slices, 549 with
+   edema, 1065 without, 8 edema slices dropped** (was 1510 / 508 / 46). Fresh hand-out zips:
+   `hub_mri_20261008-1026.zip`, `hub_annotations_20261008-1026.zip` (the 10:10 pair is stale).
+   **`seg2nifti.validate()` cannot detect bme outside bone:** it hole-fills bone|bme,
+   which always contains bme, so that check never fires.
+   The hub laptop's `ml/.venv` now has CUDA torch (`2.14.0+cu130`, RTX 3050 4 GB, verified
+   with a GPU matmul and conv); the 2D U-Net has not been trained on it yet.
 
 0. **AI suggestions on the 3D annotate page (2026-10-03).** "AI suggestions" in the 3D
    toolbar runs the shared 2D models on every **axial** slice of the open scan (axial axis

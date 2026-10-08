@@ -40,6 +40,8 @@
     "zipbme:paripoorna": "node scripts/team-annotations.js paripoorna",
     "zipbme:reegan": "node scripts/team-annotations.js reegan",
     "zipbme:elvin": "node scripts/team-annotations.js elvin",
+    "data:share": "node scripts/team-annotations.js share",
+    "data:sync": "node scripts/team-annotations.js restore",
     "migrate:generate": "pnpm --filter @bme/db db:generate --name",
     "migrate:deploy": "pnpm --filter @bme/db db:migrate",
     "clean": "node scripts/clean.js",
