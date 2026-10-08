@@ -5,7 +5,7 @@ import { fileURLToPath } from "node:url";
 
 // pnpm zipbme:<name>          ->  team_annotations.py export <root> --who <name>
 // pnpm data:share              ->  team_annotations.py share <root>
-// pnpm data:sync <mri> <ann>   ->  team_annotations.py restore <root> <mri> <ann> --apply
+// pnpm data:sync [<mri>] <ann> ->  team_annotations.py restore <root> [<mri>] <ann> --apply
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const python =
   process.platform === "win32"
@@ -32,8 +32,8 @@ if (first === "share") {
   args = [script, "share", root];
 } else if (first === "restore") {
   const zips = extra.filter((arg) => !arg.startsWith("--"));
-  if (zips.length !== 2) {
-    console.error("usage: pnpm data:sync <hub_mri zip> <hub_annotations zip>");
+  if (zips.length < 1 || zips.length > 2) {
+    console.error("usage: pnpm data:sync [<hub_mri zip>] <hub_annotations zip>");
     process.exit(1);
   }
   args = [script, "restore", root, ...zips.map(zipPath), "--apply"];

@@ -77,6 +77,10 @@ In order. Each step's output is the next step's input.
    also looked up in `data/exports/`). A scan with the same voxels is left alone; anything
    else it replaces goes to `data/sync_backup/<stamp>/` first; local files the hub lacks
    stay. Tested on scratch copies (fresh, re-run, diverged); first zips made 10:10.
+   A laptop that already ran `pnpm data:process` takes the annotations alone:
+   `pnpm data:sync <annotations zip>`. The zip carries a fingerprint of each hub scan;
+   a case whose local scan differs or is missing is skipped and listed. Worklist and
+   scans are not touched. Tested on a scratch copy (one altered scan, one missing).
    Import refuses a case painted on a different scan or owned by someone else, keeps the
    local file on a conflict (unless `--prefer-incoming`), and backs up anything it replaces
    to `data/annotations_backup/<stamp>/`. Tested on a scratch copy only; the real worklist
@@ -108,7 +112,8 @@ In order. Each step's output is the next step's input.
    (6,034 -> 14,989), checked by Elvin in the viewer and correct.** Labels regenerated
    (`seg2nifti.py --force`) and `data/seg2d3d` rebuilt at 10:25: **1614 slices, 549 with
    edema, 1065 without, 8 edema slices dropped** (was 1510 / 508 / 46). Fresh hand-out zips:
-   `hub_mri_20261008-1026.zip`, `hub_annotations_20261008-1026.zip` (the 10:10 pair is stale).
+   `hub_mri_20261008-1219.zip`, `hub_annotations_20261008-1219.zip` (same data as the 10:26
+   pair, but only the 12:19 annotations zip works on its own).
    **`seg2nifti.validate()` cannot detect bme outside bone:** it hole-fills bone|bme,
    which always contains bme, so that check never fires.
    The hub laptop's `ml/.venv` now has CUDA torch (`2.14.0+cu130`, RTX 3050 4 GB, verified

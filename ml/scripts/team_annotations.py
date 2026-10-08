@@ -44,11 +44,16 @@ GIVING A TEAMMATE THE HUB'S WHOLE DATASET
     python ml/scripts/team_annotations.py restore . <mri zip> <annotations zip>            (dry run)
     python ml/scripts/team_annotations.py restore . <mri zip> <annotations zip> --apply
 
+    # a laptop that already has the scans (pnpm data:process): annotations only
+    python ml/scripts/team_annotations.py restore . <annotations zip> --apply
+
     Restore makes the laptop match the hub. A scan with the same voxels and
     affine is left alone; any other file that differs is copied to
     data/sync_backup/<stamp>/ before it is replaced, so unexported paint on
     the teammate's laptop is never lost. Local files the hub does not have
-    are not touched.
+    are not touched. Given the annotations zip alone, a case is skipped when
+    the laptop's scan differs from the hub's, because the paint would not sit
+    on it.
 """
 
 from __future__ import annotations
@@ -292,6 +297,9 @@ def cmd_share(base: Path):
     print(f"  {mri_zip}  worklist.csv + {len(scans)} scan file(s)")
     print(f"  {ann_zip}  {len(anns)} annotation file(s)")
 
+    # lets a laptop that converted its own scans take the annotations alone
+    fingerprints = {cid: scan_fingerprint(base, cid) for cid in cases}
+
     out_dir.mkdir(parents=True, exist_ok=True)
     # scans are already gzip; storing them saves minutes and almost no space
     for out, kind, files, method in (
@@ -300,12 +308,17 @@ def cmd_share(base: Path):
     ):
         tmp = out.with_suffix(".zip.part")
         with zipfile.ZipFile(tmp, "w", method) as z:
-            z.writestr("manifest.json", json.dumps({"kind": kind, "created": stamp, "cases": cases}, indent=2))
+            man = {"kind": kind, "created": stamp, "cases": cases}
+            if kind == "annotations":
+                man["scans"] = fingerprints
+            z.writestr("manifest.json", json.dumps(man, indent=2))
             for p in files:
                 z.write(p, p.relative_to(data).as_posix())
         tmp.replace(out)
     print("written. On the teammate's laptop:")
     print(f"  pnpm data:sync {mri_zip.name} {ann_zip.name}")
+    print("  or, if it already has the scans:")
+    print(f"  pnpm data:sync {ann_zip.name}")
 
 
 def cmd_restore(base: Path, zips: list[Path], apply: bool):
@@ -320,11 +333,31 @@ def cmd_restore(base: Path, zips: list[Path], apply: bool):
         if kind in by_kind:
             sys.exit(f"two {kind} zips given: {by_kind[kind]} and {zp}")
         by_kind[kind] = zp
-    if set(by_kind) != {"mri", "annotations"}:
-        sys.exit("give both zips: the hub_mri one and the hub_annotations one")
+    if "annotations" not in by_kind:
+        sys.exit("give the hub_annotations zip, with or without the hub_mri one")
+
+    # without the hub's scans, paint is only safe on a scan identical to the hub's
+    skip: set[str] = set()
+    if "mri" not in by_kind:
+        with zipfile.ZipFile(by_kind["annotations"]) as z:
+            hub_scans = json.loads(z.read("manifest.json")).get("scans")
+        if hub_scans is None:
+            sys.exit("this annotations zip has no scan fingerprints; give the hub_mri zip too, "
+                     "or ask the hub for a fresh `pnpm data:share`")
+        print("checking local scans against the hub's")
+        for cid, fp in hub_scans.items():
+            local = scan_fingerprint(base, cid)
+            if local is None:
+                print(f"  {cid}  !! no local scan; skipped")
+                skip.add(cid)
+            elif local != fp:
+                print(f"  {cid}  !! this laptop's scan differs from the hub's; skipped")
+                skip.add(cid)
 
     new = same = replace = 0
     for kind in ("mri", "annotations"):
+        if kind not in by_kind:
+            continue
         zp = by_kind[kind]
         print(f"\n{zp.name}")
         with zipfile.ZipFile(zp) as z:
@@ -336,6 +369,8 @@ def cmd_restore(base: Path, zips: list[Path], apply: bool):
                     "worklist.csv", "nifti", "annotations",
                 ):
                     sys.exit(f"unexpected path in {zp.name}: {rel}")
+                if rel.startswith("annotations/") and rel.split("/")[1] in skip:
+                    continue
                 dest = data / rel
                 tmp = dest.with_name(f".incoming-{dest.name}")  # keeps .nii.gz for nibabel
                 if apply:
@@ -374,6 +409,8 @@ def cmd_restore(base: Path, zips: list[Path], apply: bool):
     print(f"new      : {new} file(s) into {data}")
     print(f"replace  : {replace} file(s), local copies backed up to {backup}")
     print(f"same     : {same} file(s) already match")
+    if skip:
+        print(f"skipped  : {len(skip)} case(s), scan differs or missing: {', '.join(sorted(skip))}")
     print("=" * 60)
     if not apply:
         print("dry run -- add --apply to write")
@@ -425,7 +462,7 @@ def main():
 
     r = sub.add_parser("restore")
     r.add_argument("base")
-    r.add_argument("zips", nargs=2, type=Path)
+    r.add_argument("zips", nargs="+", type=Path)
     r.add_argument("--apply", action="store_true")
 
     args = ap.parse_args()
