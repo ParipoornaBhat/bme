@@ -68,6 +68,87 @@ violate by accident.
   and disposable.
 - The label mapping is keyed by **segment name**, never segment order:
   `1=bone_marrow`, `2=bme`, `3=uncertain`. Hard-fail on an unknown name rather than guessing.
-- **Patient-level splits only.** Never let slices from one case straddle a fold boundary.
-- The locked test set is evaluated **once**, at the end.
+- Patient-level splits only. Never let slices or multi-scan cases from one patient straddle a fold boundary.
+- The locked test set is evaluated once, at the end.
 - No patient identifiers in code, logs, filenames, or commit messages. Pseudonymous IDs only.
+
+## Cross-Validation Folds & Comparability
+
+### Patient-Grouped Folds (Default)
+By default, `ml/scripts/train_3d.py` assigns cross-validation folds grouped strictly by `patient_id` (read from the de-identified `worklist.csv`):
+1. **Patient Grouping**: All scans of the same patient are grouped together. Paired scans never straddle train and validation splits.
+2. **Deterministic Shuffling**: Sorted unique patient IDs are deterministically shuffled using `SEED=42`. Directory discovery order and case renaming do not alter fold assignment.
+3. **Balanced Allocation**: Patient groups are assigned via greedy bin-packing to the currently smallest fold (ties broken by lowest fold index). Fold sizes remain balanced within ±1 case.
+4. **Fail-Closed Privacy**: If `patient_id` is missing or blank for any case in `worklist.csv`, execution halts with a clear error unless `--allow-case-level-folds` is explicitly specified.
+
+### Reproducing Legacy Runs (`--legacy-case-folds`)
+Earlier versions assigned folds at the case level via round-robin (`groups[i % folds_n].append(case)` on sorted case IDs), which could allow multi-scan patients to straddle fold boundaries.
+To reproduce those historical assignments bit-for-bit:
+```bash
+python ml/scripts/train_3d.py <base> --legacy-case-folds
+```
+
+### Why Old and New Runs Are NOT Comparable
+1. **Holdout Independence**: Legacy runs used scan-level holdouts where paired scans of the same patient could appear in both train and validation sets. Patient-grouped runs enforce strict patient-level holdouts, preventing multi-scan leakage.
+2. **Dataset Fingerprint Isolation**: Checkpoints and metrics embed a SHA-256 dataset fingerprint and `fold_mode` ("patient_grouped" vs "legacy_case_level"). Auto-resume (`--resume`) and completed fold skipping (`--skip-completed`) detect mismatches and refuse to merge or resume across different fold modes.
+3. **Sampling Mix Isolation**: Patch sampling mix (`--sampling-mix lesion=A,bone=B,random=C`) is recorded in `data_config` and the fingerprint. Non-default sampling requires an isolated `--out-dir` outside `data/`.
+
+## Kaggle Cloud GPU Training (3D U-Net)
+
+For fast training on free cloud GPUs (NVIDIA T4, 30 free hours/week) without local hardware bottlenecks.
+
+### Safeguarded CLI Pipeline (`ml/scripts/kaggle_pipeline.py`)
+
+Every step requires explicit subcommands and confirmations. No data is ever transmitted automatically:
+
+1. **Preflight**: Verify de-identification, leak guards, and volume integrity:
+   ```bash
+   python ml/scripts/kaggle_pipeline.py preflight --export-dir ../bme_colab_export --mapping-file ../bme_recovery/export_mapping.json
+   ```
+2. **Upload**: Upload strictly the verified de-identified export to a private Kaggle dataset:
+   ```bash
+   python ml/scripts/kaggle_pipeline.py upload --confirm-upload --export-dir ../bme_colab_export --mapping-file ../bme_recovery/export_mapping.json
+   ```
+3. **Launch**: Push and execute the notebook kernel on Kaggle GPU (`--mode quick` smoke test by default; `--mode bench` for 1 fold x 1 epoch speedup benchmark; `--mode fold0` for fold 0 x 40 epochs; `--mode full` for all 5 folds x 40 epochs, with optional `--folds`):
+   ```bash
+   python ml/scripts/kaggle_pipeline.py launch --confirm-launch [--mode {bench,quick,fold0,full}] [--folds 0 1 ...]
+   ```
+4. **Status**: Monitor cloud execution:
+   ```bash
+   python ml/scripts/kaggle_pipeline.py status
+   ```
+5. **Download**: Download outputs into an isolated staging directory outside the repo:
+   ```bash
+   python ml/scripts/kaggle_pipeline.py download --staging-dir ../bme_kaggle_staging
+   ```
+6. **Import**: Validate weights (weights_only=True, tensor shapes, allowlist) into `data/results3d`:
+   ```bash
+   python ml/scripts/kaggle_pipeline.py import --staging-dir ../bme_kaggle_staging
+   ```
+
+### Manual Fallback (Zero API Dependencies)
+
+If you prefer not to use the Kaggle API or CLI:
+1. **Export & Verify Dataset Locally**:
+   ```bash
+   python ml/scripts/export_for_colab.py --src . --dst ../bme_colab_export --mapping-file ../bme_recovery/export_mapping.json
+   python ml/scripts/export_for_colab.py --verify --src . --dst ../bme_colab_export --mapping-file ../bme_recovery/export_mapping.json
+   ```
+2. **Upload to Kaggle as Private Dataset**:
+   - Go to [kaggle.com/datasets](https://www.kaggle.com/datasets) -> **New Dataset**.
+   - Upload the folder `../bme_colab_export` (upload the folder directly, not a zip, never both).
+   - Title: `BME 3D Dataset` (slug `bme-3d-dataset`).
+   - **Crucial**: Set visibility to **Private Dataset** and click Create.
+3. **Upload & Run Notebook**:
+   - Go to [kaggle.com/code](https://www.kaggle.com/code) -> **New Notebook** -> **File > Upload Notebook**.
+   - Select `ml/notebooks/train_3d_colab.ipynb`.
+   - Under **Input** (right sidebar), click **+ Add Input** and add your private `bme-3d-dataset`.
+   - Under **Settings**, select **Accelerator > GPU T4** and enable **Internet**.
+   - Set `CONFIG_MODE = "quick_test"` (for smoke test), `"bench"` (for speedup benchmark), `"fold0"` (for single fold), or `"full"` (for production) in the config cell.
+   - Click **Save Version > Save & Run All (Commit)**.
+4. **Import Downloaded Weights**:
+   - When training finishes, download `results3d.zip` from the notebook's **Output** tab.
+   - Verify and import locally:
+     ```bash
+     python ml/scripts/verify_and_import_weights.py path/to/results3d.zip data/results3d
+     ```
