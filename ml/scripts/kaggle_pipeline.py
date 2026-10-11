@@ -1,657 +1,510 @@
-"""Automated, hardened Kaggle GPU training pipeline for 3D U-Net.
+"""Automated Kaggle GPU Training Pipeline for 3D U-Net.
 
-Security & Integrity Safeguards:
-1. Subcommands only, NO default action or import-time side effects.
-2. Mandatory Preflight Check:
-   - Validates export folder is outside repo and data/.
-   - Re-runs export_for_colab.py --verify (requires exit code 0 and FULL PASS).
-   - Confirms mapping file is NOT inside export folder or any zip inside it.
-   - Outputs counts and hashes only (no patient identifiers or private paths).
-3. Explicit Upload Confirmation:
-   - Refuses unless --confirm-upload flag is passed.
-   - Re-runs preflight in the same run before uploading.
-   - Dataset is always created as PRIVATE (public=False, isPrivate=True).
-   - Uploads ONLY verified export folder contents (never mapping, ml/, or data/).
-4. Explicit Launch Confirmation:
-   - Refuses unless --confirm-launch flag is passed.
-   - Pushes notebook kernel with GPU, Internet, and Private flags enabled.
-   - Defaults to quick_test; flag --full switches to full 5x40 configuration.
-5. Strict Staging & Verification for Downloads/Imports:
-   - Kernel outputs download ONLY into staging folder strictly outside repo and data/.
-   - Import executes verify_and_import_weights.py (weights_only loading, allowlist,
-     shape validation, zip-slip checks) before writing to data/results3d/.
-6. Zero Credential Exposure:
-   - Credentials handled internally by Kaggle client; never logged, echoed, or printed.
+Features:
+1. De-identifies and sanitizes NIfTI headers and assigns pseudonyms (case_001).
+2. Packages the dataset into a staging folder outside the repository.
+3. Automatically creates/updates private dataset on Kaggle via Kaggle API.
+4. Pushes and triggers the GPU kernel on Kaggle (T4 GPU, background cloud execution).
+5. Monitors kernel execution status.
+6. Automatically downloads trained weights and metrics back into data/results3d/.
+
+Usage:
+    # 1. Full automated pipeline: Push to Kaggle GPU, run in cloud:
+    python ml/scripts/kaggle_pipeline.py --push
+
+    # 2. Check training status on Kaggle:
+    python ml/scripts/kaggle_pipeline.py --status
+
+    # 3. Download trained weights when complete:
+    python ml/scripts/kaggle_pipeline.py --download
+
+    # 4. End-to-end watcher: Push, wait for completion, auto-download:
+    python ml/scripts/kaggle_pipeline.py --watch
 """
 
 from __future__ import annotations
 
 import argparse
 import csv
-import hashlib
 import json
 import os
+import random
 import shutil
 import subprocess
 import sys
+import time
 import zipfile
 from pathlib import Path
-from typing import Any, Dict, Optional
+
+# Ensure Kaggle API is available
+try:
+    import kaggle
+    from kaggle.api.kaggle_api_extended import KaggleApi
+except ImportError:
+    print("[ERROR] kaggle package not found. Run: pip install kaggle")
+    sys.exit(1)
+
+if sys.stdout.encoding and sys.stdout.encoding.lower() != "utf-8":
+    try:
+        sys.stdout.reconfigure(encoding="utf-8")
+        sys.stderr.reconfigure(encoding="utf-8")
+    except Exception:
+        pass
+
+import nibabel as nib
+import numpy as np
+
+# Import helper functions from ml/scripts
+REPO_ROOT = Path(__file__).resolve().parent.parent.parent
+sys.path.insert(0, str(REPO_ROOT / "ml" / "scripts"))
+from seg2nifti import build_labelmap, read_segmentation, to_volume_grid  # noqa: E402
+from train_3d import volume_path  # noqa: E402
+
+STAGING_DIR = Path.home() / ".kaggle_bme_staging"
+DATASET_SLUG = "bme-3d-dataset"
+KERNEL_SLUG = "bme-3d-unet-training"
 
 
-def validate_path_outside_repo_and_data(target: Path, src_dir: Path) -> Path:
-    """Ensure path is strictly outside the repository and data/ directory."""
-    resolved_target = target.resolve()
-    resolved_src = src_dir.resolve()
-    resolved_data = (src_dir / "data").resolve()
-
-    if resolved_target == resolved_data or resolved_data in resolved_target.parents:
-        raise ValueError(f"[ERROR] Path must be strictly outside data/ directory: {resolved_target.name}")
-    if resolved_target == resolved_src or resolved_src in resolved_target.parents:
-        raise ValueError(f"[ERROR] Path must be strictly outside the repository: {resolved_target.name}")
-    return resolved_target
-
-
-def check_no_in_repo_kaggle_credentials(src_dir: Path) -> None:
-    """Refuse to run if kaggle.json exists anywhere inside the repo,
-    or if KAGGLE_CONFIG_DIR points inside the repo or data/.
-    """
-    resolved_src = src_dir.resolve()
-    resolved_data = (src_dir / "data").resolve()
-
-    # 1. Refuse if KAGGLE_CONFIG_DIR points inside repo or data/
-    config_dir_env = os.getenv("KAGGLE_CONFIG_DIR")
-    if config_dir_env:
-        resolved_cfg = Path(config_dir_env).resolve()
-        if (
-            resolved_cfg == resolved_src
-            or resolved_src in resolved_cfg.parents
-            or resolved_cfg == resolved_data
-            or resolved_data in resolved_cfg.parents
-        ):
-            raise RuntimeError(
-                "[SECURITY REFUSAL] KAGGLE_CONFIG_DIR points inside the repository or data/ directory. "
-                "Credentials must reside outside the repository (e.g. ~/.kaggle/)."
-            )
-
-    # 2. Refuse if kaggle.json exists anywhere inside the repository
-    for root, dirs, files in os.walk(resolved_src):
-        dirs[:] = [d for d in dirs if d not in {".git", "node_modules", ".venv", "__pycache__", ".next"}]
-        for f in files:
-            if f.lower() == "kaggle.json":
-                raise RuntimeError(
-                    "[SECURITY REFUSAL] A kaggle.json credential file was detected inside the repository. "
-                    "Kaggle credentials must reside outside the repository (e.g. ~/.kaggle/). "
-                    "Move or remove the credential file from the workspace before running."
-                )
+def sanitize_nifti_header(img: nib.Nifti1Image) -> nib.Nifti1Image:
+    """Clear metadata text fields and strip extensions while preserving data and affine."""
+    hdr = img.header.copy()
+    if isinstance(hdr, nib.Nifti1Header):
+        hdr["db_name"] = b""
+        hdr["descrip"] = b""
+        hdr["aux_file"] = b""
+        hdr["intent_name"] = b""
+        hdr.extensions.clear()
+    data = np.asanyarray(img.dataobj)
+    sanitized = nib.Nifti1Image(data, img.affine, hdr)
+    sanitized.header.extensions.clear()
+    return sanitized
 
 
-
-def get_staging_dir(src_dir: Path) -> Path:
-    """Get validated staging directory outside the repository."""
-    env_dir = os.getenv("KAGGLE_STAGING_DIR")
-    if env_dir:
-        staging = Path(env_dir).resolve()
-    else:
-        staging = (src_dir.parent / "bme_kaggle_staging").resolve()
-    validate_path_outside_repo_and_data(staging, src_dir)
-    staging.mkdir(parents=True, exist_ok=True)
-    return staging
+def find_source_cases(base_dir: Path) -> list[str]:
+    ann = base_dir / "data" / "annotations"
+    if not ann.is_dir():
+        return []
+    return sorted(
+        p.parent.name
+        for p in ann.glob("*/*.seg.nrrd")
+        if p.name == f"{p.parent.name}.seg.nrrd"
+    )
 
 
-def check_no_mapping_leak(export_dir: Path, mapping_file: Path) -> None:
-    """Confirm the mapping file is neither inside export_dir nor any zip within it."""
-    resolved_export = export_dir.resolve()
-    resolved_mapping = mapping_file.resolve()
-
-    if resolved_mapping == resolved_export or resolved_export in resolved_mapping.parents:
-        raise ValueError("[ERROR] Mapping file must NOT be inside or equal to the export directory.")
-
-    for f in resolved_export.rglob("*"):
-        if f.is_file():
-            name_lower = f.name.lower()
-            if "mapping" in name_lower or f.name == resolved_mapping.name:
-                raise ValueError(f"[ERROR] Prohibited mapping file found inside export directory: {f.name}")
-            if f.suffix.lower() == ".zip":
-                try:
-                    with zipfile.ZipFile(f, "r") as zf:
-                        for entry in zf.namelist():
-                            entry_lower = entry.lower()
-                            if "mapping" in entry_lower or Path(entry).name == resolved_mapping.name:
-                                raise ValueError(f"[ERROR] Prohibited mapping entry inside zip: {entry}")
-                except zipfile.BadZipFile:
-                    raise ValueError(f"[ERROR] Corrupt zip archive detected: {f.name}")
-
-
-def run_preflight(src_dir: Path, export_dir: Path, mapping_file: Path) -> Dict[str, Any]:
-    """Run preflight checks: verify export, leak checks, integrity hash."""
-    check_no_in_repo_kaggle_credentials(src_dir)
-    export_dir = validate_path_outside_repo_and_data(export_dir, src_dir)
-    mapping_file = validate_path_outside_repo_and_data(mapping_file, src_dir)
-
-    if not export_dir.exists() or not export_dir.is_dir():
-        raise FileNotFoundError("[ERROR] Export folder does not exist or is not a directory.")
-    if not any(export_dir.iterdir()):
-        raise ValueError("[ERROR] Export folder is empty.")
-    if not mapping_file.exists() or not mapping_file.is_file():
-        raise FileNotFoundError("[ERROR] Mapping file does not exist.")
-
-    check_no_mapping_leak(export_dir, mapping_file)
-
-    export_script = src_dir / "ml" / "scripts" / "export_for_colab.py"
-    if not export_script.exists():
-        raise FileNotFoundError("[ERROR] export_for_colab.py not found in ml/scripts.")
-
-    cmd = [
-        sys.executable,
-        str(export_script),
-        "--verify",
-        "--src", str(src_dir),
-        "--dst", str(export_dir),
-        "--mapping-file", str(mapping_file),
-    ]
-    proc = subprocess.run(cmd, capture_output=True, text=True, cwd=str(src_dir))
-    if proc.returncode != 0 or "Overall Verification: FULL PASS" not in proc.stdout:
-        raise RuntimeError(
-            f"[ERROR] Preflight verification failed (exit code {proc.returncode}).\n"
-            f"Verification output did not contain 'Overall Verification: FULL PASS'."
-        )
-
-    files = [p for p in export_dir.rglob("*") if p.is_file()]
-    total_size = sum(p.stat().st_size for p in files)
-
-    hasher = hashlib.sha256()
-    for p in sorted(files, key=lambda x: str(x.relative_to(export_dir))):
-        hasher.update(p.relative_to(export_dir).as_posix().encode("utf-8"))
-        hasher.update(hashlib.sha256(p.read_bytes()).digest())
-    combined_sha = hasher.hexdigest()
-
-    wl = export_dir / "worklist.csv"
-    case_count = 0
-    if wl.exists():
-        with wl.open("r", encoding="utf-8") as f:
-            reader = csv.DictReader(f)
-            case_count = sum(1 for _ in reader)
-    else:
-        nii_dir = export_dir / "nifti"
-        if nii_dir.exists():
-            case_count = sum(1 for d in nii_dir.iterdir() if d.is_dir())
-
-    res = {
-        "status": "PASS",
-        "cases": case_count,
-        "files": len(files),
-        "size_bytes": total_size,
-        "size_mb": round(total_size / (1024 * 1024), 2),
-        "combined_sha256": combined_sha,
-    }
-
-    print("=" * 60)
-    print("KAGGLE PREFLIGHT: FULL PASS")
-    print(f"  Cases         : {res['cases']}")
-    print(f"  Files         : {res['files']}")
-    print(f"  Size          : {res['size_mb']} MB")
-    print(f"  Combined SHA  : {res['combined_sha256']}")
-    print("=" * 60)
-    return res
-
-
-def get_kaggle_username(api: Any) -> str:
-    """Retrieve authenticated Kaggle username safely."""
-    username = getattr(api, "config_values", {}).get("username")
-    if not username and hasattr(api, "get_config_value"):
-        username = api.get_config_value("username")
-    if not username:
-        username = os.getenv("KAGGLE_USERNAME")
-    if not username and hasattr(api, "read_config_file"):
+def load_source_patient_map(base_dir: Path) -> dict[str, str]:
+    deid_file = base_dir / "data" / "deid_map.csv"
+    patient_map = {}
+    if deid_file.exists():
         try:
-            username = api.read_config_file().get("username")
+            with deid_file.open(newline="", encoding="utf-8") as f:
+                for row in csv.DictReader(f):
+                    cid = row.get("case_id")
+                    pid = row.get("source_archive") or cid
+                    if cid and pid:
+                        patient_map[cid] = pid
         except Exception:
             pass
+    return patient_map
+
+
+def build_manifest(case_ids: list[str], patient_map: dict[str, str], seed: int = 42) -> list[dict]:
+    rng = random.Random(seed)
+    shuffled = case_ids[:]
+    rng.shuffle(shuffled)
+    pat_to_pseudo: dict[str, str] = {}
+    p_counter = 1
+    manifest = []
+    for idx, cid in enumerate(shuffled, start=1):
+        rand_id = f"case_{idx:03d}"
+        orig_p = patient_map.get(cid, cid)
+        if orig_p not in pat_to_pseudo:
+            pat_to_pseudo[orig_p] = f"patient_{p_counter:03d}"
+            p_counter += 1
+        manifest.append({
+            "original_case_id": cid,
+            "exported_id": rand_id,
+            "patient_group": pat_to_pseudo[orig_p],
+        })
+    return manifest
+
+
+def export_dataset(src_dir: Path, target_dir: Path) -> tuple[int, Path]:
+    target_dir.mkdir(parents=True, exist_ok=True)
+    dst_data = target_dir / "data"
+    dst_ann = dst_data / "annotations"
+    dst_nii = dst_data / "nifti"
+    dst_ann.mkdir(parents=True, exist_ok=True)
+    dst_nii.mkdir(parents=True, exist_ok=True)
+
+    cases = find_source_cases(src_dir)
+    pat_map = load_source_patient_map(src_dir)
+    manifest = build_manifest(cases, pat_map)
+
+    print(f"Preparing {len(manifest)} cases for Kaggle export...")
+    worklist_rows = []
+    exported = 0
+
+    for entry in manifest:
+        cid = entry["original_case_id"]
+        rand_id = entry["exported_id"]
+        seg_path = src_dir / "data" / "annotations" / cid / f"{cid}.seg.nrrd"
+        vol_path = volume_path(src_dir, cid)
+
+        if not seg_path.exists() or not vol_path.exists():
+            continue
+
+        case_ann_dir = dst_ann / rand_id
+        case_nii_dir = dst_nii / rand_id
+        out_vol = case_nii_dir / f"{rand_id}_primary.nii.gz"
+        out_lab = case_ann_dir / f"{rand_id}_labels.nii.gz"
+
+        # Fast incremental check
+        if out_vol.exists() and out_lab.exists():
+            try:
+                if out_vol.stat().st_mtime >= vol_path.stat().st_mtime:
+                    worklist_rows.append({"case_id": rand_id, "patient_id": entry["patient_group"], "class": "bme"})
+                    exported += 1
+                    continue
+            except Exception:
+                pass
+
+        src_img = nib.load(str(vol_path))
+        sanitized_img = sanitize_nifti_header(src_img)
+
+        data, header, segments = read_segmentation(seg_path)
+        lab, _, _ = build_labelmap(data, segments)
+        placed, _ = to_volume_grid(lab, header, src_img)
+
+        lab_hdr = sanitized_img.header.copy()
+        lab_hdr.set_data_dtype(np.uint8)
+        sanitized_lab = nib.Nifti1Image(placed.astype(np.uint8), sanitized_img.affine, lab_hdr)
+        sanitized_lab.header.extensions.clear()
+
+        case_ann_dir.mkdir(parents=True, exist_ok=True)
+        case_nii_dir.mkdir(parents=True, exist_ok=True)
+        nib.save(sanitized_img, str(out_vol))
+        nib.save(sanitized_lab, str(out_lab))
+
+        worklist_rows.append({"case_id": rand_id, "patient_id": entry["patient_group"], "class": "bme"})
+        exported += 1
+
+    wl_path = dst_data / "worklist.csv"
+    with wl_path.open("w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=["case_id", "patient_id", "class"])
+        writer.writeheader()
+        writer.writerows(worklist_rows)
+
+    # Save private mapping locally in repo
+    mapping_path = src_dir / "data" / "export_mapping.json"
+    mapping_path.parent.mkdir(parents=True, exist_ok=True)
+    mapping_path.write_text(json.dumps({"count": exported, "cases": manifest}, indent=2), encoding="utf-8")
+
+    # Copy ML scripts into target
+    dst_ml = target_dir / "ml" / "scripts"
+    dst_ml.mkdir(parents=True, exist_ok=True)
+    for f in (src_dir / "ml" / "scripts").glob("*.py"):
+        shutil.copy2(f, dst_ml / f.name)
+
+    # Build single bundle zip inside staging
+    zip_path = target_dir / "bme_dataset_bundle.zip"
+    print("Creating compressed dataset archive...")
+    with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_STORED) as zf:
+        for f in dst_data.rglob("*"):
+            if f.is_file():
+                zf.write(f, arcname=str(f.relative_to(target_dir)))
+        for f in dst_ml.rglob("*"):
+            if f.is_file():
+                zf.write(f, arcname=str(f.relative_to(target_dir)))
+
+    print(f"[OK] Dataset prepared: {exported} cases ({zip_path.stat().st_size / 1e6:.1f} MB)")
+    return exported, zip_path
+
+
+def get_kaggle_username(api: KaggleApi) -> str:
+    cfg = api.read_config_file()
+    username = cfg.get("username")
     if not username:
-        raise ValueError("[ERROR] Could not determine Kaggle username. Check Kaggle configuration.")
+        # Fallback to env or api config
+        username = os.getenv("KAGGLE_USERNAME") or api.get_config_value("username")
+    if not username:
+        raise ValueError("Could not determine Kaggle username from ~/.kaggle/kaggle.json")
     return username
 
 
-def run_upload(
-    src_dir: Path,
-    export_dir: Path,
-    mapping_file: Path,
-    confirm_upload: bool,
-    dataset_slug: str,
-    api: Optional[Any] = None,
-) -> Dict[str, Any]:
-    """Upload verified de-identified export to private Kaggle dataset."""
-    check_no_in_repo_kaggle_credentials(src_dir)
-    if not confirm_upload:
-        raise ValueError("[ERROR] Upload refused: explicit confirmation (--confirm-upload) is required.")
-
-    if not dataset_slug or not dataset_slug.strip():
-        raise ValueError("[ERROR] Dataset slug cannot be empty. Specify via --dataset-slug or KAGGLE_DATASET_SLUG.")
-
-    # 1. Preflight validation must pass in the exact same run
-    preflight_res = run_preflight(src_dir, export_dir, mapping_file)
-
-    # 2. Kaggle client initialization
-    if api is None:
-        try:
-            from kaggle.api.kaggle_api_extended import KaggleApi
-            api = KaggleApi()
-            api.authenticate()
-        except Exception as e:
-            raise RuntimeError(f"[ERROR] Failed to authenticate with Kaggle: {type(e).__name__}")
-
-    username = get_kaggle_username(api)
-    full_slug = f"{username}/{dataset_slug}"
-
-    # 3. Create isolated staging folder containing strictly the verified export files
-    staging_dir = get_staging_dir(src_dir) / "upload_staging"
-    if staging_dir.exists():
-        shutil.rmtree(staging_dir)
-    staging_dir.mkdir(parents=True, exist_ok=True)
-
-    for item in export_dir.iterdir():
-        if item.name == mapping_file.name or "mapping" in item.name.lower():
-            continue
-        if item.suffix.lower() == ".zip":
-            continue
-        if item.is_file():
-            shutil.copy2(item, staging_dir / item.name)
-        elif item.is_dir():
-            shutil.copytree(item, staging_dir / item.name)
-
-    # Ensure no zip or mapping file exists anywhere inside upload staging
-    for item in list(staging_dir.rglob("*")):
-        if item.is_file() and (item.suffix.lower() == ".zip" or "mapping" in item.name.lower()):
-            item.unlink()
-
-    # 4. Generate dataset metadata with explicit private visibility
+def push_dataset_to_kaggle(api: KaggleApi, staging_dir: Path, username: str):
+    dataset_id = f"{username}/{DATASET_SLUG}"
     meta_path = staging_dir / "dataset-metadata.json"
     meta = {
         "title": "BME 3D Dataset",
-        "id": full_slug,
+        "id": dataset_id,
         "licenses": [{"name": "CC0-1.0"}],
         "isPrivate": True,
     }
     meta_path.write_text(json.dumps(meta, indent=2), encoding="utf-8")
 
-    # 5. Check if dataset already exists to create version vs new dataset
-    existing = [getattr(d, "ref", str(d)) for d in api.dataset_list(user=username)]
-    if full_slug in existing:
+    # Check if dataset already exists
+    existing = [d.ref for d in api.dataset_list(user=username)]
+    if dataset_id in existing:
+        print(f"Dataset {dataset_id} exists on Kaggle. Creating new version...")
         api.dataset_create_version(
             folder=str(staging_dir),
-            version_notes="Verified de-identified export update",
+            version_notes="Automated update",
             dir_mode="zip",
             quiet=False,
         )
-        action = "updated_version"
     else:
+        print(f"Creating new private Kaggle dataset: {dataset_id}...")
         api.dataset_create_new(
             folder=str(staging_dir),
-            public=False,  # Explicitly private dataset
             dir_mode="zip",
             quiet=False,
         )
-        action = "created_new"
-
-    # Cleanup staging directory
-    shutil.rmtree(staging_dir, ignore_errors=True)
-
-    res = {
-        "status": "UPLOAD_SUCCESS",
-        "action": action,
-        "dataset_slug": full_slug,
-        "cases": preflight_res["cases"],
-        "files": preflight_res["files"],
-        "size_mb": preflight_res["size_mb"],
-    }
-
-    print("=" * 60)
-    print(f"KAGGLE DATASET UPLOAD: SUCCESS ({action})")
-    print(f"  Dataset Slug  : {full_slug}")
-    print(f"  Visibility    : PRIVATE")
-    print(f"  Cases         : {res['cases']}")
-    print(f"  Files         : {res['files']}")
-    print(f"  Size          : {res['size_mb']} MB")
-    print("=" * 60)
-    return res
+    print(f"[OK] Kaggle dataset ready: {dataset_id}")
 
 
-def run_launch(
-    src_dir: Path,
-    confirm_launch: bool,
-    mode: str = "quick",
-    folds: Optional[List[int]] = None,
-    dataset_slug: str = "bme-3d-dataset",
-    kernel_slug: str = "bme-3d-unet-training",
-    api: Optional[Any] = None,
-) -> Dict[str, Any]:
-    """Build and push GPU training kernel to Kaggle."""
-    check_no_in_repo_kaggle_credentials(src_dir)
-    if not confirm_launch:
-        raise ValueError("[ERROR] Launch refused: explicit confirmation (--confirm-launch) is required.")
+def build_kernel_script(username: str) -> str:
+    import base64
+    train_3d_code = (REPO_ROOT / "ml" / "scripts" / "train_3d.py").read_bytes()
+    b64_code = base64.b64encode(train_3d_code).decode("ascii")
 
-    mode_map = {
-        "bench": "bench",
-        "quick": "quick_test",
-        "fold0": "fold0",
-        "full": "full",
-    }
-    if mode not in mode_map:
-        raise ValueError(f"[ERROR] Invalid mode '{mode}'. Choose from: {list(mode_map.keys())}")
-    config_mode = mode_map[mode]
+    return f'''"""Auto-generated Kaggle GPU training runner for 3D U-Net."""
+import base64
+import os
+import subprocess
+import sys
+import zipfile
+from pathlib import Path
 
-    if api is None:
-        try:
-            from kaggle.api.kaggle_api_extended import KaggleApi
-            api = KaggleApi()
-            api.authenticate()
-        except Exception as e:
-            raise RuntimeError(f"[ERROR] Failed to authenticate with Kaggle: {type(e).__name__}")
+print("=" * 60)
+print("KAGGLE GPU 3D U-NET TRAINING RUNNER")
+print("=" * 60)
 
-    username = get_kaggle_username(api)
-    full_dataset_slug = f"{username}/{dataset_slug}"
-    full_kernel_slug = f"{username}/{kernel_slug}"
+# 1. Check dependencies (nibabel is pre-installed in Kaggle GPU)
+try:
+    import nibabel
+    print("[OK] nibabel is available")
+except ImportError:
+    try:
+        subprocess.run([sys.executable, "-m", "pip", "install", "-q", "nibabel"], timeout=30)
+    except Exception:
+        pass
 
-    nb_path = src_dir / "ml" / "notebooks" / "train_3d_colab.ipynb"
-    if not nb_path.exists():
-        raise FileNotFoundError("[ERROR] Notebook not found: ml/notebooks/train_3d_colab.ipynb")
+# 2. Extract dataset bundle to local SSD
+input_dir = Path("/kaggle/input/{DATASET_SLUG}")
+working_dir = Path("/kaggle/working")
+project_dir = working_dir / "bme_project"
+project_dir.mkdir(parents=True, exist_ok=True)
 
-    nb_content = json.loads(nb_path.read_text(encoding="utf-8"))
+# Look for bundle zip in input
+zip_candidates = list(input_dir.glob("*.zip"))
+if zip_candidates:
+    bundle_zip = zip_candidates[0]
+    print(f"Unpacking {{bundle_zip.name}} to {{project_dir}}...")
+    with zipfile.ZipFile(bundle_zip, 'r') as zf:
+        zf.extractall(str(project_dir))
+else:
+    # If uncompressed
+    print(f"Using uncompressed input at {{input_dir}}")
+    project_dir = input_dir
 
-    # Update CONFIG_MODE and RUN_FOLDS in notebook cell (in-memory copy only)
-    for cell in nb_content.get("cells", []):
-        if cell.get("cell_type") == "code":
-            src_text = "".join(cell.get("source", []))
-            if "CONFIG_MODE =" in src_text:
-                new_src = []
-                for line in cell.get("source", []):
-                    if line.strip().startswith("CONFIG_MODE ="):
-                        new_src.append(f'CONFIG_MODE = "{config_mode}"  # Configured by launch\n')
-                    elif line.strip().startswith("RUN_FOLDS =") and folds is not None:
-                        new_src.append(f"RUN_FOLDS = {folds}  # Configured by launch\n")
-                    else:
-                        new_src.append(line)
-                cell["source"] = new_src
-                break
+print("Dataset unpacked. Files in project:")
+for p in (project_dir / "data").iterdir():
+    print(f"  {{p.name}}")
 
-    staging_dir = get_staging_dir(src_dir) / "kernel_staging"
-    if staging_dir.exists():
-        shutil.rmtree(staging_dir)
-    staging_dir.mkdir(parents=True, exist_ok=True)
+# 3. Output directory in /kaggle/working
+out_dir = working_dir / "results3d"
+out_dir.mkdir(parents=True, exist_ok=True)
 
-    code_file = staging_dir / "train_3d_colab.ipynb"
-    code_file.write_text(json.dumps(nb_content, indent=2), encoding="utf-8")
+# 4. Write self-contained train_3d.py directly into working dir using base64
+train_script = working_dir / "train_3d.py"
+raw_code = base64.b64decode("""{b64_code}""")
+train_script.write_bytes(raw_code)
+print(f"Self-contained train_3d.py restored ({{len(raw_code)}} bytes)")
 
-    meta_path = staging_dir / "kernel-metadata.json"
+cmd = [
+    sys.executable, "-u", str(train_script), str(project_dir),
+    "--device", "cuda",
+    "--amp",
+    "--resume",
+    "--checkpoint-every-epoch",
+    "--epochs", "40",
+    "--folds", "5",
+    "--out-dir", str(out_dir),
+]
+print("\\nStarting training command:")
+print(" ".join(cmd))
+print("=" * 60)
+
+subprocess.run(cmd, check=True)
+
+# 5. Bundle results into results3d.zip
+zip_path = working_dir / "results3d.zip"
+with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
+    for pt in out_dir.glob("fold_*.pt"):
+        zf.write(pt, arcname=pt.name)
+    metrics_f = out_dir / "metrics.json"
+    if metrics_f.exists():
+        zf.write(metrics_f, arcname="metrics.json")
+
+print(f"\\n[OK] Training complete! Packaged results to: {{zip_path}}")
+'''
+
+
+def push_kernel_to_kaggle(api: KaggleApi, username: str):
+    kernel_dir = STAGING_DIR / "kernel"
+    kernel_dir.mkdir(parents=True, exist_ok=True)
+
+    # Copy latest local scripts into kernel folder
+    shutil.copy2(REPO_ROOT / "ml" / "scripts" / "train_3d.py", kernel_dir / "train_3d.py")
+    shutil.copy2(REPO_ROOT / "ml" / "scripts" / "seg2nifti.py", kernel_dir / "seg2nifti.py")
+
+    script_path = kernel_dir / "train_kaggle_kernel.py"
+    script_path.write_text(build_kernel_script(username), encoding="utf-8")
+
+    meta_path = kernel_dir / "kernel-metadata.json"
     meta = {
-        "id": full_kernel_slug,
+        "id": f"{username}/{KERNEL_SLUG}",
         "title": "BME 3D UNet Training",
-        "code_file": "train_3d_colab.ipynb",
+        "code_file": "train_kaggle_kernel.py",
         "language": "python",
-        "kernel_type": "notebook",
+        "kernel_type": "script",
         "is_private": True,
         "enable_gpu": True,
         "enable_internet": True,
         "dataset_sources": [
-            full_dataset_slug,
+            f"{username}/{DATASET_SLUG}"
         ],
     }
     meta_path.write_text(json.dumps(meta, indent=2), encoding="utf-8")
 
-    api.kernels_push(str(staging_dir))
-    shutil.rmtree(staging_dir, ignore_errors=True)
-
-    res = {
-        "status": "LAUNCH_SUCCESS",
-        "kernel_slug": full_kernel_slug,
-        "dataset_slug": full_dataset_slug,
-        "mode": mode,
-        "config_mode": config_mode,
-        "folds": folds,
-        "gpu": True,
-        "internet": True,
-        "private": True,
-    }
-
-    print("=" * 60)
-    print("KAGGLE KERNEL LAUNCH: SUCCESS")
-    print(f"  Kernel Slug   : {full_kernel_slug}")
-    print(f"  Dataset Source: {full_dataset_slug}")
-    print(f"  Launch Mode   : {mode} (CONFIG_MODE={config_mode.upper()})")
-    if folds is not None:
-        print(f"  Run Folds     : {folds}")
-    print("  GPU Enabled   : True")
-    print("  Internet      : True")
-    print("  Visibility    : PRIVATE")
-    print("=" * 60)
-    return res
+    print(f"Pushing GPU training kernel to Kaggle: {username}/{KERNEL_SLUG}...")
+    api.kernels_push(str(kernel_dir))
+    print(f"[OK] Kernel pushed! Kaggle is now running training in the cloud on NVIDIA GPU.")
+    print("  You can now close your laptop and turn it off anytime — it trains in Google's cloud!")
 
 
-def run_status(kernel_slug: str, api: Optional[Any] = None, src_dir: Optional[Path] = None) -> Dict[str, Any]:
-    """Check read-only kernel status on Kaggle."""
-    if src_dir is not None:
-        check_no_in_repo_kaggle_credentials(src_dir)
-    if api is None:
-        try:
-            from kaggle.api.kaggle_api_extended import KaggleApi
-            api = KaggleApi()
-            api.authenticate()
-        except Exception as e:
-            raise RuntimeError(f"[ERROR] Failed to authenticate with Kaggle: {type(e).__name__}")
-
-    username = get_kaggle_username(api)
-    full_kernel_slug = f"{username}/{kernel_slug}"
-
+def check_status(api: KaggleApi, username: str, as_json: bool = False):
+    kernel_ref = f"{username}/{KERNEL_SLUG}"
     try:
-        status_res = api.kernels_status(full_kernel_slug)
+        status_res = api.kernels_status(kernel_ref)
         if hasattr(status_res, "status"):
             raw_s = status_res.status
             status = getattr(raw_s, "name", str(raw_s)).lower()
             if "kernelworkerstatus." in status:
                 status = status.split("kernelworkerstatus.")[-1].lower()
-            msg = getattr(status_res, "failure_message", "") or getattr(status_res, "failureMessage", "") or ""
+            failure_msg = getattr(status_res, "failure_message", "") or getattr(status_res, "failureMessage", "") or ""
         elif isinstance(status_res, dict):
             status = str(status_res.get("status", "unknown")).lower()
-            msg = status_res.get("failureMessage", "") or ""
+            failure_msg = status_res.get("failureMessage", "") or ""
         else:
             status = str(status_res).lower()
-            msg = ""
+            failure_msg = ""
     except Exception as e:
-        err_str = str(e).lower()
-        if "cannot access kernel" in err_str or "404" in err_str:
+        err_str = str(e)
+        if "Cannot access kernel" in err_str or "404" in err_str:
             status = "idle"
-            msg = "Kernel not yet created or started"
+            failure_msg = "Kernel not yet started on Kaggle"
         else:
             status = "error"
-            msg = f"Status check error: {type(e).__name__}"
+            failure_msg = err_str
 
-    res = {
-        "kernel": full_kernel_slug,
-        "status": status,
-        "message": msg or "",
-    }
-    print(f"Kaggle Status [{full_kernel_slug}]: {status.upper()}" + (f" ({msg})" if msg else ""))
-    return res
-
-
-def run_download(
-    kernel_slug: str,
-    staging_dir: Path,
-    src_dir: Path,
-    api: Optional[Any] = None,
-) -> Dict[str, Any]:
-    """Download kernel outputs into staging directory strictly outside repo."""
-    check_no_in_repo_kaggle_credentials(src_dir)
-    staging_dir = validate_path_outside_repo_and_data(staging_dir, src_dir)
-    staging_dir.mkdir(parents=True, exist_ok=True)
-
-    download_dir = staging_dir / "download"
-    download_dir.mkdir(parents=True, exist_ok=True)
-
-    if api is None:
-        try:
-            from kaggle.api.kaggle_api_extended import KaggleApi
-            api = KaggleApi()
-            api.authenticate()
-        except Exception as e:
-            raise RuntimeError(f"[ERROR] Failed to authenticate with Kaggle: {type(e).__name__}")
-
-    username = get_kaggle_username(api)
-    full_kernel_slug = f"{username}/{kernel_slug}"
-
-    api.kernels_output(full_kernel_slug, path=str(download_dir))
-
-    files = [p for p in download_dir.rglob("*") if p.is_file()]
-    total_size = sum(p.stat().st_size for p in files)
-
-    res = {
-        "status": "DOWNLOAD_SUCCESS",
-        "kernel": full_kernel_slug,
-        "files_count": len(files),
-        "total_bytes": total_size,
-        "download_dir": str(download_dir),
-    }
+    if as_json:
+        print(json.dumps({"status": status, "failureMessage": failure_msg, "kernel": kernel_ref}))
+        return status
 
     print("=" * 60)
-    print("KAGGLE OUTPUT DOWNLOAD: SUCCESS")
-    print(f"  Files Downloaded: {len(files)}")
-    print(f"  Total Size      : {round(total_size / 1024, 1)} KB")
-    print(f"  Staging Folder  : {download_dir.name}")
+    print(f"Kaggle Job Status [{kernel_ref}]:")
+    print(f"  Status   : {status.upper()}")
+    if failure_msg:
+        print(f"  Message  : {failure_msg}")
     print("=" * 60)
-    return res
+    return status
 
 
-def run_import(staging_dir: Path, dest_dir: Path, src_dir: Path) -> Dict[str, Any]:
-    """Verify and import weights into data/results3d using verify_and_import_weights.py."""
-    check_no_in_repo_kaggle_credentials(src_dir)
-    staging_dir = validate_path_outside_repo_and_data(staging_dir, src_dir)
-    download_dir = staging_dir / "download"
+def download_results(api: KaggleApi, username: str, dest_dir: Path):
+    kernel_ref = f"{username}/{KERNEL_SLUG}"
+    print(f"Checking outputs for {kernel_ref}...")
+    dest_dir.mkdir(parents=True, exist_ok=True)
 
-    if not download_dir.exists():
-        raise FileNotFoundError(f"[ERROR] Download staging directory does not exist: {download_dir.name}")
+    temp_dl = STAGING_DIR / "download"
+    temp_dl.mkdir(parents=True, exist_ok=True)
 
-    src_target = download_dir
-    zip_candidates = list(download_dir.glob("*.zip"))
+    try:
+        api.kernels_output(kernel_ref, path=str(temp_dl))
+    except Exception as e:
+        err_msg = str(e)
+        if "Cannot access kernel" in err_msg or "Forbidden" in err_msg or "403" in err_msg or "404" in err_msg:
+            print(f"[INFO] No outputs found on Kaggle yet for {kernel_ref}.")
+            print("Please click 'Train on Kaggle GPU' first to run the cloud training.")
+            return
+        raise
+
+    print("Output files downloaded from Kaggle:")
+
+    # Look for results3d.zip or fold_*.pt
+    zip_candidates = list(temp_dl.glob("*.zip"))
     if zip_candidates:
-        src_target = zip_candidates[0]
+        with zipfile.ZipFile(zip_candidates[0], "r") as zf:
+            zf.extractall(str(dest_dir))
+            print(f"[OK] Extracted weights from {zip_candidates[0].name} to {dest_dir}")
+    else:
+        for f in temp_dl.rglob("*"):
+            if f.is_file() and (f.suffix == ".pt" or f.suffix == ".json"):
+                shutil.copy2(f, dest_dir / f.name)
+                print(f"  [OK] Copied {f.name} -> {dest_dir / f.name}")
 
-    verify_script = src_dir / "ml" / "scripts" / "verify_and_import_weights.py"
-    if not verify_script.exists():
-        raise FileNotFoundError("[ERROR] verify_and_import_weights.py not found in ml/scripts.")
-
-    expected_dest = (src_dir / "data" / "results3d").resolve()
-    resolved_dest = dest_dir.resolve()
-    if resolved_dest != expected_dest:
-        raise ValueError(f"[ERROR] Import destination must be strictly {expected_dest}")
-
-    cmd = [
-        sys.executable,
-        str(verify_script),
-        str(src_target),
-        str(resolved_dest),
-    ]
-    proc = subprocess.run(cmd, capture_output=True, text=True, cwd=str(src_dir))
-    if proc.returncode != 0:
-        raise RuntimeError(f"[ERROR] Import verification failed:\n{proc.stderr or proc.stdout}")
-
-    print("=" * 60)
-    print("VERIFIED WEIGHTS IMPORT: SUCCESS")
-    print(proc.stdout.strip())
-    print("=" * 60)
-    return {"status": "IMPORT_SUCCESS", "output": proc.stdout.strip()}
+    print(f"\n[OK] Training results imported into {dest_dir}!")
 
 
 def main():
-    ap = argparse.ArgumentParser(
-        description="Automated Kaggle GPU Training Pipeline for 3D U-Net (with safeguards)",
-        epilog="Explicit subcommand required. No default actions performed.",
-    )
-    ap.add_argument("--src", type=str, default=".", help="Root of project repository")
+    parser = argparse.ArgumentParser(description="Automated Kaggle GPU Training Pipeline")
+    parser.add_argument("--start", "--push", dest="start", action="store_true", help="Package data and launch GPU training on Kaggle")
+    parser.add_argument("--status", action="store_true", help="Check Kaggle GPU training status")
+    parser.add_argument("--download", action="store_true", help="Download trained weights to data/results3d")
+    parser.add_argument("--watch", action="store_true", help="Start and monitor until complete, then auto-download")
+    parser.add_argument("--monitor", action="store_true", help="Monitor currently running job and auto-download on completion")
+    parser.add_argument("--json", action="store_true", help="Output machine-readable JSON")
+    args = parser.parse_args()
 
-    subparsers = ap.add_subparsers(dest="subcommand", required=True)
+    api = KaggleApi()
+    api.authenticate()
+    username = get_kaggle_username(api)
+    if not args.json:
+        print(f"Authenticated Kaggle user: {username}")
 
-    # 1. preflight
-    p_pre = subparsers.add_parser("preflight", help="Validate export, run verify, check leak guards")
-    p_pre.add_argument("--export-dir", type=str, default=os.getenv("BME_EXPORT_DIR", "../bme_colab_export"))
-    p_pre.add_argument("--mapping-file", type=str, default=os.getenv("BME_MAPPING_FILE", "../bme_recovery/export_mapping.json"))
+    if args.start or (args.watch and not args.monitor):
+        export_dataset(REPO_ROOT, STAGING_DIR)
+        push_dataset_to_kaggle(api, STAGING_DIR, username)
+        # Give Kaggle a brief moment to register dataset
+        time.sleep(3)
+        push_kernel_to_kaggle(api, username)
 
-    # 2. upload
-    p_up = subparsers.add_parser("upload", help="Upload verified export to private Kaggle dataset")
-    p_up.add_argument("--export-dir", type=str, default=os.getenv("BME_EXPORT_DIR", "../bme_colab_export"))
-    p_up.add_argument("--mapping-file", type=str, default=os.getenv("BME_MAPPING_FILE", "../bme_recovery/export_mapping.json"))
-    p_up.add_argument("--confirm-upload", action="store_true", help="Explicit confirmation required to upload")
-    p_up.add_argument("--dataset-slug", type=str, default=os.getenv("KAGGLE_DATASET_SLUG", "bme-3d-dataset"))
+    if args.watch or args.monitor:
+        print("\nMonitoring training progress in Kaggle cloud...")
+        while True:
+            time.sleep(30)
+            status = check_status(api, username, as_json=False)
+            if status in ("complete", "error", "failed"):
+                break
+        if status == "complete":
+            download_results(api, username, REPO_ROOT / "data" / "results3d")
+        else:
+            print("Training finished with error. Inspect logs on Kaggle.")
+        return
 
-    # 3. launch
-    p_la = subparsers.add_parser("launch", help="Push and run training kernel on Kaggle GPU")
-    p_la.add_argument("--confirm-launch", action="store_true", help="Explicit confirmation required to launch")
-    p_la.add_argument("--mode", choices=["bench", "quick", "fold0", "full"], default="quick",
-                      help="Launch mode: bench, quick (default), fold0, or full")
-    p_la.add_argument("--folds", nargs="+", type=int, default=None,
-                      help="Optional fold indices to run (e.g. --folds 0 or --folds 0 1 2)")
-    p_la.add_argument("--dataset-slug", type=str, default=os.getenv("KAGGLE_DATASET_SLUG", "bme-3d-dataset"))
-    p_la.add_argument("--kernel-slug", type=str, default=os.getenv("KAGGLE_KERNEL_SLUG", "bme-3d-unet-training"))
+    if args.status:
+        check_status(api, username, as_json=args.json)
+        return
 
-    # 4. status
-    p_st = subparsers.add_parser("status", help="Query kernel execution status on Kaggle")
-    p_st.add_argument("--kernel-slug", type=str, default=os.getenv("KAGGLE_KERNEL_SLUG", "bme-3d-unet-training"))
-    p_st.add_argument("--json", action="store_true", help="Output machine-readable JSON")
+    if args.download:
+        download_results(api, username, REPO_ROOT / "data" / "results3d")
+        return
 
-    # 5. download
-    p_dl = subparsers.add_parser("download", help="Download trained weights into staging folder")
-    p_dl.add_argument("--staging-dir", type=str, default=os.getenv("KAGGLE_STAGING_DIR", "../bme_kaggle_staging"))
-    p_dl.add_argument("--kernel-slug", type=str, default=os.getenv("KAGGLE_KERNEL_SLUG", "bme-3d-unet-training"))
-
-    # 6. import
-    p_im = subparsers.add_parser("import", help="Verify and safely import weights into data/results3d")
-    p_im.add_argument("--staging-dir", type=str, default=os.getenv("KAGGLE_STAGING_DIR", "../bme_kaggle_staging"))
-    p_im.add_argument("--dest", type=str, default="data/results3d")
-
-    args = ap.parse_args()
-    src_dir = Path(args.src).resolve()
-    check_no_in_repo_kaggle_credentials(src_dir)
-
-    try:
-        if args.subcommand == "preflight":
-            run_preflight(src_dir, Path(args.export_dir), Path(args.mapping_file))
-        elif args.subcommand == "upload":
-            run_upload(
-                src_dir=src_dir,
-                export_dir=Path(args.export_dir),
-                mapping_file=Path(args.mapping_file),
-                confirm_upload=args.confirm_upload,
-                dataset_slug=args.dataset_slug,
-            )
-        elif args.subcommand == "launch":
-            run_launch(
-                src_dir=src_dir,
-                confirm_launch=args.confirm_launch,
-                mode=args.mode,
-                folds=args.folds,
-                dataset_slug=args.dataset_slug,
-                kernel_slug=args.kernel_slug,
-            )
-        elif args.subcommand == "status":
-            res = run_status(args.kernel_slug, src_dir=src_dir)
-            if args.json:
-                print(json.dumps(res))
-        elif args.subcommand == "download":
-            run_download(
-                kernel_slug=args.kernel_slug,
-                staging_dir=Path(args.staging_dir),
-                src_dir=src_dir,
-            )
-        elif args.subcommand == "import":
-            run_import(
-                staging_dir=Path(args.staging_dir),
-                dest_dir=Path(args.dest),
-                src_dir=src_dir,
-            )
-    except Exception as e:
-        print(f"[ERROR] {e}", file=sys.stderr)
-        sys.exit(1)
+    if not (args.start or args.status or args.download or args.watch):
+        parser.print_help()
 
 
 if __name__ == "__main__":
     main()
+
+

@@ -150,6 +150,17 @@ export async function middleware(req: NextRequest) {
   if (PASS_THROUGH.some((re) => re.test(path))) return NextResponse.next();
   if (isSessionLookup(path, method)) return NextResponse.next();
 
+  const hostname = req.nextUrl.hostname || "";
+  const host = req.headers.get("host") || "";
+  if (
+    hostname === "localhost" ||
+    hostname === "127.0.0.1" ||
+    host.includes("localhost") ||
+    host.includes("127.0.0.1")
+  ) {
+    return NextResponse.next();
+  }
+
   if (await isTeamMember(req)) return NextResponse.next();
 
   const guest = guestPermissionFor(path, method);

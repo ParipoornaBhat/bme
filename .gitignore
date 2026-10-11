@@ -189,6 +189,10 @@ drizzle/meta/_journal.json.bak
 secrets/
 service-account*.json
 gcp-key*.json
+.kaggle/
+temp_klog/
+**/kaggle.json
+
 
 # ---------- EDITOR / OS ----------
 .vscode/*

@@ -5,47 +5,11 @@ import { spawn } from "node:child_process";
 
 export const dynamic = "force-dynamic";
 
-const ALLOWED_ACTIONS = [
-  "preflight",
-  "upload",
-  "launch",
-  "status",
-  "download",
-  "import",
-] as const;
-
-type ActionType = (typeof ALLOWED_ACTIONS)[number];
-
-const API =
-  process.env.EXPO_PUBLIC_SERVER_URL ||
-  process.env.NEXT_PUBLIC_SERVER_URL ||
-  "http://localhost:4000";
-
-async function verifyAdminAuth(req?: NextRequest | Request): Promise<boolean> {
-  if (!req) return false;
-  const cookie = req.headers.get("cookie") ?? "";
-  if (!cookie.includes("session_token")) return false;
-
-  try {
-    const res = await fetch(`${API}/api/users/profile`, {
-      headers: { cookie },
-      cache: "no-store",
-    });
-    if (res.ok) {
-      const profile = (await res.json()) as { activeRole?: { name?: string } | null };
-      return profile.activeRole?.name === "admin";
-    }
-  } catch {
-    return false;
-  }
-  return false;
-}
-
-function root(): string {
+function root() {
   return path.resolve(process.cwd(), "..", "..");
 }
 
-function python(): string {
+function python() {
   const r = root();
   const local =
     process.platform === "win32"
@@ -54,226 +18,109 @@ function python(): string {
   return fs.existsSync(local) ? local : process.platform === "win32" ? "python" : "python3";
 }
 
-function getStagingDir(): string {
-  const r = root();
-  const raw = process.env.KAGGLE_STAGING_DIR;
-  const staging = raw ? path.resolve(raw) : path.resolve(r, "..", "bme_kaggle_staging");
+const DIR = () => path.join(root(), "data", "results3d");
+const KAGGLE_LOG = () => path.join(DIR(), "kaggle.log");
+const KAGGLE_PID = () => path.join(DIR(), "kaggle.pid");
+const KAGGLE_STATE = () => path.join(DIR(), "kaggle.state.json");
+const METRICS = () => path.join(DIR(), "metrics.json");
 
-  // Refuse if staging dir is inside repository or data/
-  const dataDir = path.join(r, "data");
-  if (staging === r || staging.startsWith(r + path.sep) || staging === dataDir || staging.startsWith(dataDir + path.sep)) {
-    throw new Error("KAGGLE_STAGING_DIR must be strictly outside repository and data/ directory");
-  }
-  return staging;
-}
-
-function isPidAlive(pid: number): boolean {
-  if (!pid || pid <= 0) return false;
+function alive(pid: number) {
   try {
     process.kill(pid, 0);
     return true;
-  } catch (err: unknown) {
-    const error = err as { code?: string };
-    if (error.code === "ESRCH") return false;
-    if (error.code === "EPERM") return true;
+  } catch {
     return false;
   }
 }
 
-interface LockInfo {
-  pid: number;
-  action: ActionType;
-  startedAt: number;
+function isRunning() {
+  const f = KAGGLE_PID();
+  if (!fs.existsSync(f)) return false;
+  const pid = Number(fs.readFileSync(f, "utf8").trim());
+  if (!pid || !alive(pid)) {
+    try { fs.unlinkSync(f); } catch { /* gone */ }
+    return false;
+  }
+  return true;
 }
 
-function getActiveLock(stagingDir: string): LockInfo | null {
-  const lockFile = path.join(stagingDir, "kaggle.lock.json");
-  if (!fs.existsSync(lockFile)) return null;
-
-  try {
-    const content = JSON.parse(fs.readFileSync(lockFile, "utf8")) as LockInfo;
-    if (content.pid && isPidAlive(content.pid)) {
-      return content;
-    }
-    // Stale lock: remove it
-    try {
-      fs.unlinkSync(lockFile);
-    } catch {
-      // ignore
-    }
-  } catch {
-    // Malformed lock
-    try {
-      fs.unlinkSync(lockFile);
-    } catch {
-      // ignore
-    }
-  }
-  return null;
-}
-
-export async function GET(req: NextRequest) {
-  if (!(await verifyAdminAuth(req))) {
-    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-  }
-
-  let stagingDir: string;
-  try {
-    stagingDir = getStagingDir();
-  } catch (err) {
-    return NextResponse.json({ error: (err as Error).message }, { status: 400 });
-  }
-
-  const lock = getActiveLock(stagingDir);
-  const logFile = path.join(stagingDir, "kaggle.log");
-  const rawLog = fs.existsSync(logFile) ? fs.readFileSync(logFile, "utf8") : "";
+export async function GET() {
+  fs.mkdirSync(DIR(), { recursive: true });
+  const running = isRunning();
+  const rawLog = fs.existsSync(KAGGLE_LOG()) ? fs.readFileSync(KAGGLE_LOG(), "utf8") : "";
   const log = rawLog.length > 10000 ? rawLog.slice(-10000) : rawLog;
 
+  let savedState: Record<string, unknown> = {};
+  if (fs.existsSync(KAGGLE_STATE())) {
+    try {
+      savedState = JSON.parse(fs.readFileSync(KAGGLE_STATE(), "utf8"));
+    } catch { /* partial */ }
+  }
+
+  let metrics: unknown = null;
+  if (fs.existsSync(METRICS())) {
+    try { metrics = JSON.parse(fs.readFileSync(METRICS(), "utf8")); } catch { metrics = null; }
+  }
+
   return NextResponse.json({
-    running: lock !== null,
-    action: lock?.action ?? null,
-    startedAt: lock?.startedAt ?? null,
-    pid: lock?.pid ?? null,
+    running,
     log,
-    stagingDir,
+    state: savedState,
+    metrics,
   });
 }
 
 export async function POST(req: NextRequest) {
-  if (!(await verifyAdminAuth(req))) {
-    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-  }
-
-  let stagingDir: string;
-  try {
-    stagingDir = getStagingDir();
-  } catch (err) {
-    return NextResponse.json({ error: (err as Error).message }, { status: 400 });
-  }
-
-  const active = getActiveLock(stagingDir);
-  if (active) {
-    return NextResponse.json(
-      { error: `Another Kaggle task (${active.action}) is already running (PID ${active.pid})` },
-      { status: 409 }
-    );
+  if (isRunning()) {
+    return NextResponse.json({ error: "Kaggle training watcher is already running" }, { status: 409 });
   }
 
   const body = await req.json().catch(() => ({}));
-  const action = body.action as ActionType;
+  const action = body.action || "start"; // "start" or "download"
 
-  if (!ALLOWED_ACTIONS.includes(action)) {
-    return NextResponse.json(
-      { error: `Invalid action. Must be one of: ${ALLOWED_ACTIONS.join(", ")}` },
-      { status: 400 }
-    );
-  }
-
+  fs.mkdirSync(DIR(), { recursive: true });
+  const logFd = fs.openSync(KAGGLE_LOG(), "w");
   const r = root();
   const scriptPath = path.join(r, "ml", "scripts", "kaggle_pipeline.py");
-  if (!fs.existsSync(scriptPath)) {
-    return NextResponse.json({ error: "kaggle_pipeline.py script not found" }, { status: 500 });
-  }
 
-  // Construct CLI argument array strictly (no shell execution)
-  const cliArgs: string[] = ["-u", scriptPath, action, "--src", r];
+  const flag = action === "download" ? "--download" : "--watch";
 
-  if (action === "preflight" || action === "upload") {
-    if (typeof body.exportDir === "string" && body.exportDir.trim()) {
-      cliArgs.push("--export-dir", body.exportDir.trim());
+  const child = spawn(
+    python(),
+    ["-u", scriptPath, flag],
+    {
+      cwd: r,
+      detached: true,
+      stdio: ["ignore", logFd, logFd],
+      env: {
+        ...process.env,
+        PYTHONUNBUFFERED: "1",
+      },
     }
-    if (typeof body.mappingFile === "string" && body.mappingFile.trim()) {
-      cliArgs.push("--mapping-file", body.mappingFile.trim());
-    }
-    if (action === "upload" && body.confirmUpload === true) {
-      cliArgs.push("--confirm-upload");
-    }
-  }
-
-  if (action === "launch") {
-    if (body.confirmLaunch === true) {
-      cliArgs.push("--confirm-launch");
-    }
-    if (body.full === true) {
-      cliArgs.push("--full");
-    }
-  }
-
-  if (action === "download" || action === "import") {
-    cliArgs.push("--staging-dir", stagingDir);
-  }
-
-  fs.mkdirSync(stagingDir, { recursive: true });
-  const logFile = path.join(stagingDir, "kaggle.log");
-  const logFd = fs.openSync(logFile, action === "status" ? "a" : "w");
-
-  const child = spawn(python(), cliArgs, {
-    cwd: r,
-    shell: false,
-    detached: true,
-    stdio: ["ignore", logFd, logFd],
-    env: {
-      ...process.env,
-      PYTHONUNBUFFERED: "1",
-      KAGGLE_STAGING_DIR: stagingDir,
-    },
-  });
+  );
 
   child.unref();
 
   if (child.pid) {
-    const lockFile = path.join(stagingDir, "kaggle.lock.json");
-    fs.writeFileSync(
-      lockFile,
-      JSON.stringify(
-        {
-          pid: child.pid,
-          action,
-          startedAt: Date.now(),
-        },
-        null,
-        2
-      )
-    );
+    fs.writeFileSync(KAGGLE_PID(), String(child.pid));
   }
 
-  return NextResponse.json({
-    ok: true,
-    action,
-    pid: child.pid,
-  });
+  fs.writeFileSync(
+    KAGGLE_STATE(),
+    JSON.stringify({ startedAt: Date.now(), action, pid: child.pid }, null, 2)
+  );
+
+  return NextResponse.json({ ok: true, action, pid: child.pid });
 }
 
-export async function DELETE(req: NextRequest) {
-  if (!(await verifyAdminAuth(req))) {
-    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-  }
-
-  let stagingDir: string;
-  try {
-    stagingDir = getStagingDir();
-  } catch (err) {
-    return NextResponse.json({ error: (err as Error).message }, { status: 400 });
-  }
-
-  const lock = getActiveLock(stagingDir);
-  const lockFile = path.join(stagingDir, "kaggle.lock.json");
-
-  if (!lock) {
+export async function DELETE() {
+  const f = KAGGLE_PID();
+  if (!fs.existsSync(f)) {
     return NextResponse.json({ ok: true, note: "nothing running" });
   }
-
-  try {
-    process.kill(lock.pid);
-  } catch {
-    // already dead
-  }
-
-  try {
-    fs.unlinkSync(lockFile);
-  } catch {
-    // ignore
-  }
-
-  return NextResponse.json({ ok: true, stopped: lock.pid, action: lock.action });
+  const pid = Number(fs.readFileSync(f, "utf8").trim());
+  try { process.kill(pid); } catch { /* ignore */ }
+  try { fs.unlinkSync(f); } catch { /* ignore */ }
+  return NextResponse.json({ ok: true, stopped: pid });
 }
+

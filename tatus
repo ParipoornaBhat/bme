@@ -1,0 +1,2362 @@
+[1mdiff --git a/.env.example b/.env.example[m
+[1mindex e650fd8..8d1fd22 100644[m
+[1m--- a/.env.example[m
+[1m+++ b/.env.example[m
+[36m@@ -28,3 +28,7 @@[m [mSMTP_NAME="THUNDER Stack"[m
+ [m
+ # Cloudflare Tunnel Configuration (Optional: persistent named tunnel token or auto trycloudflare)[m
+ # CLOUDFLARE_TUNNEL_TOKEN="your-cloudflare-tunnel-token"[m
+[32m+[m
+[32m+[m[32m# Kaggle Cloud Training Configuration (Optional)[m
+[32m+[m[32mKAGGLE_DATASET_SLUG="bme-3d-dataset"[m
+[32m+[m[32mKAGGLE_STAGING_DIR="../bme_kaggle_staging"[m
+[1mdiff --git a/.gitignore b/.gitignore[m
+[1mindex 44d236a..ccd48c5 100644[m
+[1m--- a/.gitignore[m
+[1m+++ b/.gitignore[m
+[36m@@ -189,6 +189,10 @@[m [mdrizzle/meta/_journal.json.bak[m
+ secrets/[m
+ service-account*.json[m
+ gcp-key*.json[m
+[32m+[m[32m.kaggle/[m
+[32m+[m[32mtemp_klog/[m
+[32m+[m[32m**/kaggle.json[m
+[32m+[m
+ [m
+ # ---------- EDITOR / OS ----------[m
+ .vscode/*[m
+[1mdiff --git a/client/nextjs/src/app/(dashboard)/training/Train3D.tsx b/client/nextjs/src/app/(dashboard)/training/Train3D.tsx[m
+[1mindex 9a89b98..5d3dbb3 100644[m
+[1m--- a/client/nextjs/src/app/(dashboard)/training/Train3D.tsx[m
+[1m+++ b/client/nextjs/src/app/(dashboard)/training/Train3D.tsx[m
+[36m@@ -1,36 +1,91 @@[m
+ "use client";[m
+ [m
+ import { useCallback, useEffect, useRef, useState } from "react";[m
+[31m-import { Loader2, Play, Square } from "lucide-react";[m
+[32m+[m[32mimport {[m
+[32m+[m[32m  AlertTriangle,[m
+[32m+[m[32m  CheckCircle2,[m
+[32m+[m[32m  ChevronRight,[m
+[32m+[m[32m  Cloud,[m
+[32m+[m[32m  Cpu,[m
+[32m+[m[32m  Download,[m
+[32m+[m[32m  Info,[m
+[32m+[m[32m  Layers,[m
+[32m+[m[32m  Loader2,[m
+[32m+[m[32m  Play,[m
+[32m+[m[32m  RefreshCw,[m
+[32m+[m[32m  ShieldCheck,[m
+[32m+[m[32m  Square,[m
+[32m+[m[32m  UploadCloud,[m
+[32m+[m[32m  X,[m
+[32m+[m[32m} from "lucide-react";[m
+ [m
+ type Torch = {[m
+[31m-  cudaAvailable: boolean; deviceName: string | null; vramGB: number | null; reason: string | null;[m
+[32m+[m[32m  cudaAvailable: boolean;[m
+[32m+[m[32m  deviceName: string | null;[m
+[32m+[m[32m  vramGB: number | null;[m
+[32m+[m[32m  reason: string | null;[m
+ };[m
+[32m+[m
+ type Summary = { mean: number; std: number } | null;[m
+[32m+[m
+ type Metrics = {[m
+[31m-  n_cases: number; n_bme: number; n_negative: number; folds: number; epochs: number;[m
+[31m-  presence_correct: number; presence_n: number; note: string;[m
+[32m+[m[32m  n_cases: number;[m
+[32m+[m[32m  n_bme: number;[m
+[32m+[m[32m  n_negative: number;[m
+[32m+[m[32m  folds: number;[m
+[32m+[m[32m  epochs: number;[m
+[32m+[m[32m  presence_correct: number;[m
+[32m+[m[32m  presence_n: number;[m
+[32m+[m[32m  note: string;[m
+   summary: Record<string, Summary>;[m
+ };[m
+[32m+[m
+ type Prog = {[m
+[31m-  fraction: number; phase: string; currentFold: number; folds: number;[m
+[31m-  currentEpoch: number; epochs: number; doneEpochs: number;[m
+[31m-  etaSeconds: number | null; elapsedSeconds: number | null;[m
+[32m+[m[32m  fraction: number;[m
+[32m+[m[32m  phase: string;[m
+[32m+[m[32m  currentFold: number;[m
+[32m+[m[32m  folds: number;[m
+[32m+[m[32m  currentEpoch: number;[m
+[32m+[m[32m  epochs: number;[m
+[32m+[m[32m  doneEpochs: number;[m
+[32m+[m[32m  etaSeconds: number | null;[m
+[32m+[m[32m  elapsedSeconds: number | null;[m
+ };[m
+[32m+[m
+ type State = {[m
+[31m-  annotated: number; bme: number; nonBme: number; running: boolean;[m
+[31m-  metrics: Metrics | null; log: string; progress: Prog | null;[m
+[32m+[m[32m  annotated: number;[m
+[32m+[m[32m  bme: number;[m
+[32m+[m[32m  nonBme: number;[m
+[32m+[m[32m  running: boolean;[m
+[32m+[m[32m  metrics: Metrics | null;[m
+[32m+[m[32m  log: string;[m
+[32m+[m[32m  progress: Prog | null;[m
+ };[m
+ [m
+[31m-const fmt = (s: number | null) => {[m
+[31m-  if (s == null) return "—";[m
+[31m-  if (s < 60) return `${s}s`;[m
+[31m-  const m = Math.floor(s / 60);[m
+[31m-  return m < 60 ? `${m}m ${s % 60}s` : `${Math.floor(m / 60)}h ${m % 60}m`;[m
+[32m+[m[32mtype KaggleRouteState = {[m
+[32m+[m[32m  running: boolean;[m
+[32m+[m[32m  action: string | null;[m
+[32m+[m[32m  startedAt: number | null;[m
+[32m+[m[32m  pid: number | null;[m
+[32m+[m[32m  log: string;[m
+[32m+[m[32m  stagingDir?: string;[m
+[32m+[m[32m  error?: string;[m
+ };[m
+ [m
+[32m+[m[32mtype PreflightCounts = {[m
+[32m+[m[32m  cases?: number;[m
+[32m+[m[32m  files?: number;[m
+[32m+[m[32m  size_mb?: number;[m
+[32m+[m[32m  combined_sha256?: string;[m
+[32m+[m[32m};[m
+[32m+[m
+[32m+[m[32mtype StepId = "preflight" | "upload" | "launch" | "status" | "download" | "import";[m
+[32m+[m
+ export default function Train3D({[m
+[31m-  torch, device, onDevice, onRunning,[m
+[32m+[m[32m  torch,[m
+[32m+[m[32m  device,[m
+[32m+[m[32m  onDevice,[m
+[32m+[m[32m  onRunning,[m
+ }: {[m
+   torch: Torch | null;[m
+   device: "auto" | "cuda" | "cpu";[m
+[36m@@ -41,25 +96,84 @@[m [mexport default function Train3D({[m
+   const [epochs, setEpochs] = useState(40);[m
+   const [folds, setFolds] = useState(5);[m
+   const [busy, setBusy] = useState(false);[m
+[32m+[m
+[32m+[m[32m  // Kaggle Step Modal State[m
+[32m+[m[32m  const [showKaggleModal, setShowKaggleModal] = useState(false);[m
+[32m+[m[32m  const [currentStep, setCurrentStep] = useState<StepId>("preflight");[m
+[32m+[m[32m  const [kaggleState, setKaggleState] = useState<KaggleRouteState | null>(null);[m
+[32m+[m[32m  const [kaggleBusy, setKaggleBusy] = useState(false);[m
+[32m+[m[32m  const [exportDir, setExportDir] = useState("../bme_colab_export");[m
+[32m+[m[32m  const [mappingFile, setMappingFile] = useState("../bme_recovery/export_mapping.json");[m
+[32m+[m[32m  const [preflightCounts, setPreflightCounts] = useState<PreflightCounts | null>(null);[m
+[32m+[m[32m  const [preflightPassed, setPreflightPassed] = useState(false);[m
+[32m+[m[32m  const [uploadConfirmed, setUploadConfirmed] = useState(false);[m
+[32m+[m[32m  const [launchConfirmed, setLaunchConfirmed] = useState(false);[m
+[32m+[m[32m  const [fullTraining, setFullTraining] = useState(false);[m
+[32m+[m[32m  const [stepError, setStepError] = useState<string | null>(null);[m
+[32m+[m
+   const onRunningRef = useRef(onRunning);[m
+   onRunningRef.current = onRunning;[m
+ [m
+[31m-  const load = useCallback(async () => {[m
+[31m-    const r = await fetch("/api/training-3d", { cache: "no-store" });[m
+[31m-    if (!r.ok) return;[m
+[31m-    const j = await r.json() as State;[m
+[31m-    setState(j);[m
+[31m-    onRunningRef.current(j.running);[m
+[32m+[m[32m  // Local state polling[m
+[32m+[m[32m  const loadLocal = useCallback(async () => {[m
+[32m+[m[32m    try {[m
+[32m+[m[32m      const r = await fetch("/api/training-3d", { cache: "no-store" });[m
+[32m+[m[32m      if (!r.ok) return;[m
+[32m+[m[32m      const j = (await r.json()) as State;[m
+[32m+[m[32m      setState(j);[m
+[32m+[m[32m      onRunningRef.current(j.running);[m
+[32m+[m[32m    } catch {[m
+[32m+[m[32m      // ignore[m
+[32m+[m[32m    }[m
+[32m+[m[32m  }, []);[m
+[32m+[m
+[32m+[m[32m  // Kaggle state polling[m
+[32m+[m[32m  const loadKaggle = useCallback(async () => {[m
+[32m+[m[32m    try {[m
+[32m+[m[32m      const r = await fetch("/api/training-3d/kaggle", { cache: "no-store" });[m
+[32m+[m[32m      if (!r.ok) return;[m
+[32m+[m[32m      const j = (await r.json()) as KaggleRouteState;[m
+[32m+[m[32m      setKaggleState(j);[m
+[32m+[m
+[32m+[m[32m      // Parse counts from log if preflight ran[m
+[32m+[m[32m      if (j.log.includes("KAGGLE PREFLIGHT: FULL PASS")) {[m
+[32m+[m[32m        setPreflightPassed(true);[m
+[32m+[m[32m        const casesMatch = /Cases\s*:\s*(\d+)/.exec(j.log);[m
+[32m+[m[32m        const filesMatch = /Files\s*:\s*(\d+)/.exec(j.log);[m
+[32m+[m[32m        const sizeMatch = /Size\s*:\s*([\d.]+)\s*MB/.exec(j.log);[m
+[32m+[m[32m        const shaMatch = /Combined SHA\s*:\s*([a-f0-9]+)/.exec(j.log);[m
+[32m+[m[32m        if (casesMatch || filesMatch) {[m
+[32m+[m[32m          setPreflightCounts({[m
+[32m+[m[32m            cases: casesMatch ? Number(casesMatch[1]) : undefined,[m
+[32m+[m[32m            files: filesMatch ? Number(filesMatch[1]) : undefined,[m
+[32m+[m[32m            size_mb: sizeMatch ? Number(sizeMatch[1]) : undefined,[m
+[32m+[m[32m            combined_sha256: shaMatch ? shaMatch[1] : undefined,[m
+[32m+[m[32m          });[m
+[32m+[m[32m        }[m
+[32m+[m[32m      }[m
+[32m+[m[32m    } catch {[m
+[32m+[m[32m      // ignore[m
+[32m+[m[32m    }[m
+   }, []);[m
+ [m
+[31m-  useEffect(() => { load(); }, [load]);[m
+[32m+[m[32m  useEffect(() => {[m
+[32m+[m[32m    loadLocal();[m
+[32m+[m[32m    loadKaggle();[m
+[32m+[m[32m  }, [loadLocal, loadKaggle]);[m
+[32m+[m
+   useEffect(() => {[m
+     if (!state?.running) return;[m
+[31m-    const id = setInterval(load, 3000);[m
+[32m+[m[32m    const id = setInterval(loadLocal, 3000);[m
+[32m+[m[32m    return () => clearInterval(id);[m
+[32m+[m[32m  }, [state?.running, loadLocal]);[m
+[32m+[m
+[32m+[m[32m  useEffect(() => {[m
+[32m+[m[32m    if (!kaggleState?.running && !showKaggleModal) return;[m
+[32m+[m[32m    const id = setInterval(loadKaggle, 3000);[m
+     return () => clearInterval(id);[m
+[31m-  }, [state?.running, load]);[m
+[32m+[m[32m  }, [kaggleState?.running, showKaggleModal, loadKaggle]);[m
+ [m
+[31m-  const start = async () => {[m
+[32m+[m[32m  const startLocal = async () => {[m
+     setBusy(true);[m
+     try {[m
+       const r = await fetch("/api/training-3d", {[m
+[36m@@ -68,37 +182,88 @@[m [mexport default function Train3D({[m
+         body: JSON.stringify({ epochs, folds, device }),[m
+       });[m
+       const j = await r.json();[m
+[31m-      if (!r.ok) alert(j.error ?? "could not start");[m
+[32m+[m[32m      if (!r.ok) alert(j.error ?? "Could not start local training");[m
+     } finally {[m
+       setBusy(false);[m
+[31m-      setTimeout(load, 800);[m
+[32m+[m[32m      setTimeout(loadLocal, 800);[m
+     }[m
+   };[m
+ [m
+[31m-  const stop = async () => {[m
+[32m+[m[32m  const stopLocal = async () => {[m
+     await fetch("/api/training-3d", { method: "DELETE" });[m
+[31m-    load();[m
+[32m+[m[32m    loadLocal();[m
+[32m+[m[32m  };[m
+[32m+[m
+[32m+[m[32m  const executeKaggleAction = async ([m
+[32m+[m[32m    action: StepId,[m
+[32m+[m[32m    extraBody: Record<string, unknown> = {}[m
+[32m+[m[32m  ) => {[m
+[32m+[m[32m    setKaggleBusy(true);[m
+[32m+[m[32m    setStepError(null);[m
+[32m+[m[32m    try {[m
+[32m+[m[32m      const r = await fetch("/api/training-3d/kaggle", {[m
+[32m+[m[32m        method: "POST",[m
+[32m+[m[32m        headers: { "Content-Type": "application/json" },[m
+[32m+[m[32m        body: JSON.stringify({[m
+[32m+[m[32m          action,[m
+[32m+[m[32m          exportDir,[m
+[32m+[m[32m          mappingFile,[m
+[32m+[m[32m          ...extraBody,[m
+[32m+[m[32m        }),[m
+[32m+[m[32m      });[m
+[32m+[m[32m      const j = await r.json();[m
+[32m+[m[32m      if (!r.ok) {[m
+[32m+[m[32m        setStepError(j.error ?? `Failed to run ${action}`);[m
+[32m+[m[32m      } else {[m
+[32m+[m[32m        setTimeout(loadKaggle, 500);[m
+[32m+[m[32m      }[m
+[32m+[m[32m    } catch (e: unknown) {[m
+[32m+[m[32m      setStepError((e as Error).message || "Network request failed");[m
+[32m+[m[32m    } finally {[m
+[32m+[m[32m      setKaggleBusy(false);[m
+[32m+[m[32m    }[m
+[32m+[m[32m  };[m
+[32m+[m
+[32m+[m[32m  const stopKaggleProcess = async () => {[m
+[32m+[m[32m    setKaggleBusy(true);[m
+[32m+[m[32m    try {[m
+[32m+[m[32m      await fetch("/api/training-3d/kaggle", { method: "DELETE" });[m
+[32m+[m[32m      setTimeout(loadKaggle, 500);[m
+[32m+[m[32m    } finally {[m
+[32m+[m[32m      setKaggleBusy(false);[m
+[32m+[m[32m    }[m
+   };[m
+ [m
+   const n = state?.annotated ?? 0;[m
+[32m+[m[32m  const activeMetrics = state?.metrics;[m
+[32m+[m
+[32m+[m[32m  const stepsList: { id: StepId; label: string; desc: string }[] = [[m
+[32m+[m[32m    { id: "preflight", label: "1. Preflight", desc: "Verify de-identification and zero leaks" },[m
+[32m+[m[32m    { id: "upload", label: "2. Confirm Upload", desc: "Upload verified data to private dataset" },[m
+[32m+[m[32m    { id: "launch", label: "3. Launch Kernel", desc: "Start background GPU training on Kaggle" },[m
+[32m+[m[32m    { id: "status", label: "4. Cloud Status", desc: "Poll cloud status and inspect live logs" },[m
+[32m+[m[32m    { id: "download", label: "5. Download", desc: "Download outputs to isolated staging folder" },[m
+[32m+[m[32m    { id: "import", label: "6. Import", desc: "Verify weights (weights_only) into results" },[m
+[32m+[m[32m  ];[m
+ [m
+   return ([m
+     <div className="space-y-4">[m
+[32m+[m[32m      {/* 3D Model Info Card */}[m
+       <div className="rounded-lg border border-border border-l-4 border-l-primary bg-card p-4 text-sm text-muted-foreground">[m
+         <div className="mb-2 flex flex-wrap items-center gap-2">[m
+           <span className="text-base font-semibold text-foreground">3D U-Net</span>[m
+           <span className="rounded bg-primary/10 px-2 py-0.5 text-xs font-medium text-primary">Patch 96×96×12</span>[m
+           <span className="rounded bg-muted px-2 py-0.5 text-xs font-medium">Loss: Dice + focal</span>[m
+[31m-          <span className="rounded bg-muted px-2 py-0.5 text-xs font-medium">Bone + edema, edema kept inside bone</span>[m
+[32m+[m[32m          <span className="rounded bg-muted px-2 py-0.5 text-xs font-medium">Bone + edema joint segmentation</span>[m
+         </div>[m
+         <p>[m
+[31m-          Trains on patches of each saved volume at its own spacing. Bone and edema are learned[m
+[31m-          together, patients stay on one side of each fold, and a new scan is predicted with a[m
+[31m-          sliding window. Edema outside the predicted bone is removed. Volume on the results page[m
+[31m-          is the predicted edema in mm³.[m
+[32m+[m[32m          Trains on volumetric patches at natural spacing. Bone and edema are learned together, and edema[m
+[32m+[m[32m          outside predicted bone is clipped at inference. Select local execution or open the safeguarded[m
+[32m+[m[32m          Kaggle Cloud GPU workflow.[m
+         </p>[m
+       </div>[m
+ [m
+[32m+[m[32m      {/* Main Training Controls */}[m
+       <div className="rounded-lg border border-border bg-card p-4">[m
+         <div className="flex flex-wrap items-end gap-4">[m
+           <div>[m
+[36m@@ -110,45 +275,91 @@[m [mexport default function Train3D({[m
+               </span>[m
+             </div>[m
+           </div>[m
+[32m+[m
+           <label className="text-sm">[m
+             <span className="mb-1 block text-xs font-semibold uppercase tracking-wider text-muted-foreground">Epochs</span>[m
+[31m-            <input type="number" min={1} max={200} value={epochs} disabled={state?.running}[m
+[32m+[m[32m            <input[m
+[32m+[m[32m              type="number"[m
+[32m+[m[32m              min={1}[m
+[32m+[m[32m              max={200}[m
+[32m+[m[32m              value={epochs}[m
+[32m+[m[32m              disabled={state?.running}[m
+               onChange={(e) => setEpochs(Number(e.target.value))}[m
+[31m-              className="w-20 rounded-md border border-border bg-background px-3 py-2 text-sm" />[m
+[32m+[m[32m              className="w-20 rounded-md border border-border bg-background px-3 py-2 text-sm"[m
+[32m+[m[32m            />[m
+           </label>[m
+[32m+[m
+           <label className="text-sm">[m
+             <span className="mb-1 block text-xs font-semibold uppercase tracking-wider text-muted-foreground">Folds</span>[m
+[31m-            <input type="number" min={2} max={Math.max(2, n)} value={folds} disabled={state?.running}[m
+[32m+[m[32m            <input[m
+[32m+[m[32m              type="number"[m
+[32m+[m[32m              min={2}[m
+[32m+[m[32m              max={Math.max(2, n)}[m
+[32m+[m[32m              value={folds}[m
+[32m+[m[32m              disabled={state?.running}[m
+               onChange={(e) => setFolds(Number(e.target.value))}[m
+[31m-              className="w-20 rounded-md border border-border bg-background px-3 py-2 text-sm" />[m
+[32m+[m[32m              className="w-20 rounded-md border border-border bg-background px-3 py-2 text-sm"[m
+[32m+[m[32m            />[m
+           </label>[m
+[31m-          <div className="ml-auto">[m
+[32m+[m
+[32m+[m[32m          {/* Action Buttons */}[m
+[32m+[m[32m          <div className="ml-auto flex flex-wrap items-center gap-2">[m
+             {state?.running ? ([m
+[31m-              <button onClick={stop}[m
+[31m-                className="inline-flex items-center gap-2 rounded-md border border-destructive px-4 py-2 text-sm font-medium text-destructive">[m
+[31m-                <Square className="h-4 w-4" /> Stop[m
+[32m+[m[32m              <button[m
+[32m+[m[32m                onClick={stopLocal}[m
+[32m+[m[32m                className="inline-flex items-center gap-2 rounded-md border border-destructive px-4 py-2 text-sm font-medium text-destructive"[m
+[32m+[m[32m              >[m
+[32m+[m[32m                <Square className="h-4 w-4" /> Stop Local[m
+               </button>[m
+             ) : ([m
+[31m-              <button onClick={start} disabled={busy || n < 2}[m
+[31m-                className="inline-flex items-center gap-2 rounded-md bg-primary px-4 py-2 text-sm font-medium text-primary-foreground disabled:opacity-40">[m
+[32m+[m[32m              <button[m
+[32m+[m[32m                onClick={startLocal}[m
+[32m+[m[32m                disabled={busy || n < 2}[m
+[32m+[m[32m                className="inline-flex items-center gap-2 rounded-md bg-primary px-4 py-2 text-sm font-medium text-primary-foreground disabled:opacity-40"[m
+[32m+[m[32m              >[m
+                 {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : <Play className="h-4 w-4" />}[m
+[31m-                Train 3D U-Net[m
+[32m+[m[32m                Train 3D U-Net (Local)[m
+               </button>[m
+             )}[m
+           </div>[m
+[31m-          <div className="flex items-center gap-2 text-sm">[m
+[32m+[m
+[32m+[m[32m          {/* Device & Kaggle Switcher */}[m
+[32m+[m[32m          <div className="flex flex-wrap items-center gap-2 text-sm">[m
+             {(["auto", "cuda", "cpu"] as const).map((v) => ([m
+[31m-              <button key={v} disabled={Boolean(state?.running || (v === "cuda" && torch && !torch.cudaAvailable))}[m
+[32m+[m[32m              <button[m
+[32m+[m[32m                key={v}[m
+[32m+[m[32m                disabled={Boolean(state?.running || (v === "cuda" && torch && !torch.cudaAvailable))}[m
+                 onClick={() => onDevice(v)}[m
+[31m-                className={`rounded-md border px-3 py-2 ${device === v ? "border-primary text-foreground" : "border-border text-muted-foreground"} disabled:opacity-40`}>[m
+[32m+[m[32m                className={`rounded-md border px-3 py-2 ${[m
+[32m+[m[32m                  device === v ? "border-primary text-foreground font-semibold" : "border-border text-muted-foreground"[m
+[32m+[m[32m                } disabled:opacity-40`}[m
+[32m+[m[32m              >[m
+                 {v === "auto" ? "Auto" : v === "cuda" ? "GPU" : "CPU"}[m
+               </button>[m
+             ))}[m
+[32m+[m
+[32m+[m[32m            {/* Optional Kaggle Cloud GPU Option next to Auto | GPU | CPU */}[m
+[32m+[m[32m            <button[m
+[32m+[m[32m              onClick={() => {[m
+[32m+[m[32m                setShowKaggleModal(true);[m
+[32m+[m[32m                loadKaggle();[m
+[32m+[m[32m              }}[m
+[32m+[m[32m              className="inline-flex items-center gap-1.5 rounded-md border border-primary/50 bg-primary/10 px-3 py-2 text-sm font-medium text-primary hover:bg-primary/20 transition shadow-sm"[m
+[32m+[m[32m            >[m
+[32m+[m[32m              <Cloud className="h-4 w-4" />[m
+[32m+[m[32m              Kaggle Cloud GPU[m
+[32m+[m[32m              {kaggleState?.running && <span className="h-2 w-2 rounded-full bg-emerald-500 animate-pulse ml-0.5" />}[m
+[32m+[m[32m            </button>[m
+[32m+[m
+             {torch?.deviceName && ([m
+[31m-              <span className="text-xs text-muted-foreground">{torch.deviceName}{torch.vramGB ? ` · ${torch.vramGB} GB` : ""}</span>[m
+[32m+[m[32m              <span className="text-xs text-muted-foreground ml-1">[m
+[32m+[m[32m                {torch.deviceName}[m
+[32m+[m[32m                {torch.vramGB ? ` · ${torch.vramGB} GB` : ""}[m
+[32m+[m[32m              </span>[m
+             )}[m
+           </div>[m
+         </div>[m
+[32m+[m
+         {n < 2 && ([m
+           <p className="mt-3 text-xs text-muted-foreground">[m
+             Save at least two 3D annotations first. The 2D training tabs are unchanged.[m
+[36m@@ -156,48 +367,28 @@[m [mexport default function Train3D({[m
+         )}[m
+       </div>[m
+ [m
+[32m+[m[32m      {/* Local Run Log Box */}[m
+       {(state?.running || state?.log) && ([m
+         <div className="rounded-lg border border-border bg-card p-4">[m
+           <div className="mb-2 inline-flex items-center gap-2 text-xs font-semibold uppercase tracking-wider text-muted-foreground">[m
+             {state?.running && <Loader2 className="h-3.5 w-3.5 animate-spin" />}[m
+[31m-            {state?.running ? "Training 3D U-Net" : "Last run"}[m
+[32m+[m[32m            {state?.running ? "Running Local 3D Training" : "Last Local Run Log"}[m
+           </div>[m
+[31m-          {state?.running && state.progress && ([m
+[31m-            <div className="mb-3">[m
+[31m-              <div className="mb-1.5 flex flex-wrap justify-between gap-2 text-sm">[m
+[31m-                <span className="font-medium tabular-nums">[m
+[31m-                  {(state.progress.fraction * 100).toFixed(0)}%[m
+[31m-                  <span className="ml-2 font-normal text-muted-foreground">[m
+[31m-                    {state.progress.phase}[m
+[31m-                    {state.progress.doneEpochs > 0 && ([m
+[31m-                      <> · fold {state.progress.currentFold + 1} of {state.progress.folds} · epoch {state.progress.currentEpoch} of {state.progress.epochs}</>[m
+[31m-                    )}[m
+[31m-                  </span>[m
+[31m-                </span>[m
+[31m-                <span className="text-muted-foreground tabular-nums">[m
+[31m-                  {fmt(state.progress.elapsedSeconds)} elapsed[m
+[31m-                  {state.progress.etaSeconds != null && <> · ~{fmt(state.progress.etaSeconds)} left</>}[m
+[31m-                </span>[m
+[31m-              </div>[m
+[31m-              <div className="h-2 overflow-hidden rounded-full bg-muted">[m
+[31m-                <div className="h-full rounded-full bg-primary transition-all" style={{ width: `${state.progress.fraction * 100}%` }} />[m
+[31m-              </div>[m
+[31m-            </div>[m
+[31m-          )}[m
+[31m-          <pre className="max-h-64 overflow-auto rounded bg-muted p-3 font-mono text-[11px] leading-relaxed">[m
+[31m-            {state?.log || "waiting for output…"}[m
+[32m+[m[32m          <pre className="max-h-64 overflow-auto rounded bg-muted p-3 font-mono text-[11px] leading-relaxed whitespace-pre-wrap">[m
+[32m+[m[32m            {state?.log || "Waiting for output…"}[m
+           </pre>[m
+         </div>[m
+       )}[m
+ [m
+[31m-      {state?.metrics && ([m
+[32m+[m[32m      {/* Metrics Result Display */}[m
+[32m+[m[32m      {activeMetrics && ([m
+         <div className="rounded-lg border border-border bg-card p-4">[m
+           <div className="mb-3 text-xs font-semibold uppercase tracking-wider text-muted-foreground">[m
+[31m-            3D result — {state.metrics.n_cases} volumes, {state.metrics.n_bme} with edema, {state.metrics.n_negative} without[m
+[32m+[m[32m            3D result — {activeMetrics.n_cases} volumes, {activeMetrics.n_bme} with edema, {activeMetrics.n_negative} without[m
+           </div>[m
+           <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">[m
+             {(["bone_dice", "bme_dice", "lesion_sensitivity", "fp_per_case"] as const).map((k) => {[m
+[31m-              const s = state.metrics!.summary[k];[m
+[32m+[m[32m              const s = activeMetrics.summary[k];[m
+               return ([m
+                 <div key={k} className="rounded-lg border border-border p-3">[m
+                   <div className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">{k.replace(/_/g, " ")}</div>[m
+[36m@@ -209,9 +400,352 @@[m [mexport default function Train3D({[m
+             })}[m
+           </div>[m
+           <p className="mt-3 text-sm">[m
+[31m-            Edema present/absent matched on {state.metrics.presence_correct} of {state.metrics.presence_n} held-out volumes.[m
+[32m+[m[32m            Edema present/absent matched on {activeMetrics.presence_correct} of {activeMetrics.presence_n} held-out volumes.[m
+           </p>[m
+[31m-          <p className="mt-1 text-xs text-muted-foreground">{state.metrics.note}</p>[m
+[32m+[m[32m          <p className="mt-1 text-xs text-muted-foreground">{activeMetrics.note}</p>[m
+[32m+[m[32m        </div>[m
+[32m+[m[32m      )}[m
+[32m+[m
+[32m+[m[32m      {/* KAGGLE STEP MODAL (SAFEGUARDED WORKFLOW) */}[m
+[32m+[m[32m      {showKaggleModal && ([m
+[32m+[m[32m        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-4 overflow-y-auto">[m
+[32m+[m[32m          <div className="relative w-full max-w-4xl rounded-xl border border-border bg-card shadow-2xl p-6 text-foreground space-y-6 max-h-[92vh] overflow-y-auto">[m
+[32m+[m[32m            {/* Modal Header */}[m
+[32m+[m[32m            <div className="flex items-start justify-between border-b border-border pb-4">[m
+[32m+[m[32m              <div>[m
+[32m+[m[32m                <div className="flex items-center gap-2">[m
+[32m+[m[32m                  <Cloud className="h-5 w-5 text-primary" />[m
+[32m+[m[32m                  <h2 className="text-lg font-semibold tracking-tight">Kaggle Cloud GPU Training (Safe Pipeline)</h2>[m
+[32m+[m[32m                </div>[m
+[32m+[m[32m                <p className="mt-1 text-xs text-muted-foreground">[m
+[32m+[m[32m                  Zero automatic uploads. Requires explicit confirmation clicks. Transmits only verified de-identified data.[m
+[32m+[m[32m                </p>[m
+[32m+[m[32m              </div>[m
+[32m+[m[32m              <button[m
+[32m+[m[32m                onClick={() => setShowKaggleModal(false)}[m
+[32m+[m[32m                className="rounded-md p-1.5 text-muted-foreground hover:text-foreground hover:bg-muted"[m
+[32m+[m[32m                title="Close"[m
+[32m+[m[32m              >[m
+[32m+[m[32m                <X className="h-5 w-5" />[m
+[32m+[m[32m              </button>[m
+[32m+[m[32m            </div>[m
+[32m+[m
+[32m+[m[32m            {/* Step Wizard Navigation */}[m
+[32m+[m[32m            <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-6 gap-2">[m
+[32m+[m[32m              {stepsList.map((s) => ([m
+[32m+[m[32m                <button[m
+[32m+[m[32m                  key={s.id}[m
+[32m+[m[32m                  onClick={() => setCurrentStep(s.id)}[m
+[32m+[m[32m                  className={`text-left p-2.5 rounded-lg border text-xs transition ${[m
+[32m+[m[32m                    currentStep === s.id[m
+[32m+[m[32m                      ? "border-primary bg-primary/10 text-primary font-medium shadow-sm"[m
+[32m+[m[32m                      : "border-border bg-muted/30 text-muted-foreground hover:text-foreground"[m
+[32m+[m[32m                  }`}[m
+[32m+[m[32m                >[m
+[32m+[m[32m                  <div className="font-semibold truncate">{s.label}</div>[m
+[32m+[m[32m                  <div className="text-[10px] opacity-75 truncate">{s.desc}</div>[m
+[32m+[m[32m                </button>[m
+[32m+[m[32m              ))}[m
+[32m+[m[32m            </div>[m
+[32m+[m
+[32m+[m[32m            {/* Error Banner */}[m
+[32m+[m[32m            {stepError && ([m
+[32m+[m[32m              <div className="rounded-lg border border-destructive/40 bg-destructive/10 p-3 text-xs text-destructive flex items-center gap-2">[m
+[32m+[m[32m                <AlertTriangle className="h-4 w-4 shrink-0" />[m
+[32m+[m[32m                <span>{stepError}</span>[m
+[32m+[m[32m              </div>[m
+[32m+[m[32m            )}[m
+[32m+[m
+[32m+[m[32m            {/* Current Step Content */}[m
+[32m+[m[32m            <div className="rounded-lg border border-border bg-muted/20 p-5 space-y-4">[m
+[32m+[m[32m              {/* STEP 1: PREFLIGHT */}[m
+[32m+[m[32m              {currentStep === "preflight" && ([m
+[32m+[m[32m                <div className="space-y-4">[m
+[32m+[m[32m                  <div className="flex items-center gap-2 text-sm font-semibold text-foreground">[m
+[32m+[m[32m                    <ShieldCheck className="h-4 w-4 text-primary" />[m
+[32m+[m[32m                    Step 1: Preflight Verification & Leak Check[m
+[32m+[m[32m                  </div>[m
+[32m+[m[32m                  <p className="text-xs text-muted-foreground leading-relaxed">[m
+[32m+[m[32m                    Preflight validates that the export folder exists outside the repository, re-runs{" "}[m
+[32m+[m[32m                    <code>export_for_colab.py --verify</code> (requiring exit code 0 and FULL PASS), and[m
+[32m+[m[32m                    confirms the private mapping file is not inside the export folder or any zip. No data is sent to Kaggle.[m
+[32m+[m[32m                  </p>[m
+[32m+[m
+[32m+[m[32m                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">[m
+[32m+[m[32m                    <label>[m
+[32m+[m[32m                      <span className="block font-medium text-muted-foreground mb-1">Export Directory (outside repo)</span>[m
+[32m+[m[32m                      <input[m
+[32m+[m[32m                        type="text"[m
+[32m+[m[32m                        value={exportDir}[m
+[32m+[m[32m                        onChange={(e) => setExportDir(e.target.value)}[m
+[32m+[m[32m                        className="w-full rounded-md border border-border bg-background px-3 py-2 font-mono text-xs"[m
+[32m+[m[32m                      />[m
+[32m+[m[32m                    </label>[m
+[32m+[m[32m                    <label>[m
+[32m+[m[32m                      <span className="block font-medium text-muted-foreground mb-1">Mapping File (outside repo)</span>[m
+[32m+[m[32m                      <input[m
+[32m+[m[32m                        type="text"[m
+[32m+[m[32m                        value={mappingFile}[m
+[32m+[m[32m                        onChange={(e) => setMappingFile(e.target.value)}[m
+[32m+[m[32m                        className="w-full rounded-md border border-border bg-background px-3 py-2 font-mono text-xs"[m
+[32m+[m[32m                      />[m
+[32m+[m[32m                    </label>[m
+[32m+[m[32m                  </div>[m
+[32m+[m
+[32m+[m[32m                  <div className="flex items-center gap-3 pt-2">[m
+[32m+[m[32m                    <button[m
+[32m+[m[32m                      onClick={() => executeKaggleAction("preflight")}[m
+[32m+[m[32m                      disabled={kaggleBusy || Boolean(kaggleState?.running)}[m
+[32m+[m[32m                      className="inline-flex items-center gap-2 rounded-md bg-primary px-4 py-2 text-xs font-semibold text-primary-foreground disabled:opacity-40"[m
+[32m+[m[32m                    >[m
+[32m+[m[32m                      {kaggleBusy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Play className="h-3.5 w-3.5" />}[m
+[32m+[m[32m                      Run Preflight Check[m
+[32m+[m[32m                    </button>[m
+[32m+[m[32m                    {preflightPassed && ([m
+[32m+[m[32m                      <span className="inline-flex items-center gap-1.5 text-xs text-emerald-500 font-medium">[m
+[32m+[m[32m                        <CheckCircle2 className="h-4 w-4" /> Preflight PASSED[m
+[32m+[m[32m                      </span>[m
+[32m+[m[32m                    )}[m
+[32m+[m[32m                  </div>[m
+[32m+[m
+[32m+[m[32m                  {preflightCounts && ([m
+[32m+[m[32m                    <div className="rounded-md border border-border bg-background p-3 text-xs space-y-1 font-mono">[m
+[32m+[m[32m                      <div className="font-semibold text-foreground mb-1">Preflight Verified Counts:</div>[m
+[32m+[m[32m                      <div>• Cases: {preflightCounts.cases ?? "—"}</div>[m
+[32m+[m[32m                      <div>• Files: {preflightCounts.files ?? "—"}</div>[m
+[32m+[m[32m                      <div>• Size: {preflightCounts.size_mb ? `${preflightCounts.size_mb} MB` : "—"}</div>[m
+[32m+[m[32m                      <div>• Combined SHA-256: {preflightCounts.combined_sha256 ? `${preflightCounts.combined_sha256.slice(0, 16)}…` : "—"}</div>[m
+[32m+[m[32m                    </div>[m
+[32m+[m[32m                  )}[m
+[32m+[m[32m                </div>[m
+[32m+[m[32m              )}[m
+[32m+[m
+[32m+[m[32m              {/* STEP 2: CONFIRM UPLOAD */}[m
+[32m+[m[32m              {currentStep === "upload" && ([m
+[32m+[m[32m                <div className="space-y-4">[m
+[32m+[m[32m                  <div className="flex items-center gap-2 text-sm font-semibold text-foreground">[m
+[32m+[m[32m                    <UploadCloud className="h-4 w-4 text-primary" />[m
+[32m+[m[32m                    Step 2: Confirm & Upload to Private Dataset[m
+[32m+[m[32m                  </div>[m
+[32m+[m
+[32m+[m[32m                  {/* Explicit Mandatory Confirmation Dialog */}[m
+[32m+[m[32m                  <div className="rounded-lg border border-amber-500/40 bg-amber-500/10 p-4 text-xs space-y-2">[m
+[32m+[m[32m                    <div className="font-semibold text-amber-500 flex items-center gap-1.5">[m
+[32m+[m[32m                      <AlertTriangle className="h-4 w-4 shrink-0" />[m
+[32m+[m[32m                      MANDATORY PRIVACY & DATA CONFIRMATION[m
+[32m+[m[32m                    </div>[m
+[32m+[m[32m                    <ul className="list-disc list-inside space-y-1 text-muted-foreground">[m
+[32m+[m[32m                      <li>Only fully de-identified, ethics-approved data may ever be transmitted.</li>[m
+[32m+[m[32m                      <li>The target dataset will be created/versioned strictly as <strong>PRIVATE</strong> on Kaggle.</li>[m
+[32m+[m[32m                      <li>The private mapping file, internal ML scripts, and raw data are strictly excluded.</li>[m
+[32m+[m[32m                      <li>[m
+[32m+[m[32m                        Verified preflight counts: <strong>{preflightCounts?.cases ?? "—"} cases</strong>,{" "}[m
+[32m+[m[32m                        <strong>{preflightCounts?.files ?? "—"} files</strong> ({preflightCounts?.size_mb ?? "—"} MB).[m
+[32m+[m[32m                      </li>[m
+[32m+[m[32m                    </ul>[m
+[32m+[m
+[32m+[m[32m                    <label className="flex items-start gap-2 pt-2 text-foreground font-medium cursor-pointer">[m
+[32m+[m[32m                      <input[m
+[32m+[m[32m                        type="checkbox"[m
+[32m+[m[32m                        checked={uploadConfirmed}[m
+[32m+[m[32m                        onChange={(e) => setUploadConfirmed(e.target.checked)}[m
+[32m+[m[32m                        className="mt-0.5 rounded border-border"[m
+[32m+[m[32m                      />[m
+[32m+[m[32m                      <span>[m
+[32m+[m[32m                        I explicitly confirm that only approved, de-identified research data is selected and it will be stored as a private dataset.[m
+[32m+[m[32m                      </span>[m
+[32m+[m[32m                    </label>[m
+[32m+[m[32m                  </div>[m
+[32m+[m
+[32m+[m[32m                  <div className="flex items-center gap-3 pt-1">[m
+[32m+[m[32m                    <button[m
+[32m+[m[32m                      onClick={() => executeKaggleAction("upload", { confirmUpload: true })}[m
+[32m+[m[32m                      disabled={!uploadConfirmed || !preflightPassed || kaggleBusy || Boolean(kaggleState?.running)}[m
+[32m+[m[32m                      className="inline-flex items-center gap-2 rounded-md bg-primary px-4 py-2 text-xs font-semibold text-primary-foreground disabled:opacity-40"[m
+[32m+[m[32m                    >[m
+[32m+[m[32m                      {kaggleBusy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <UploadCloud className="h-3.5 w-3.5" />}[m
+[32m+[m[32m                      Upload to Private Kaggle Dataset[m
+[32m+[m[32m                    </button>[m
+[32m+[m[32m                    {!preflightPassed && ([m
+[32m+[m[32m                      <span className="text-xs text-muted-foreground">[m
+[32m+[m[32m                        (Preflight verification must pass first in Step 1)[m
+[32m+[m[32m                      </span>[m
+[32m+[m[32m                    )}[m
+[32m+[m[32m                  </div>[m
+[32m+[m[32m                </div>[m
+[32m+[m[32m              )}[m
+[32m+[m
+[32m+[m[32m              {/* STEP 3: LAUNCH KERNEL */}[m
+[32m+[m[32m              {currentStep === "launch" && ([m
+[32m+[m[32m                <div className="space-y-4">[m
+[32m+[m[32m                  <div className="flex items-center gap-2 text-sm font-semibold text-foreground">[m
+[32m+[m[32m                    <Play className="h-4 w-4 text-primary" />[m
+[32m+[m[32m                    Step 3: Launch Training Kernel on Kaggle GPU[m
+[32m+[m[32m                  </div>[m
+[32m+[m
+[32m+[m[32m                  {/* Explicit Mandatory Launch Dialog */}[m
+[32m+[m[32m                  <div className="rounded-lg border border-primary/30 bg-primary/5 p-4 text-xs space-y-3">[m
+[32m+[m[32m                    <div className="font-semibold text-foreground flex items-center gap-1.5">[m
+[32m+[m[32m                      <Info className="h-4 w-4 text-primary shrink-0" />[m
+[32m+[m[32m                      KERNEL EXECUTION SPECIFICATION[m
+[32m+[m[32m                    </div>[m
+[32m+[m[32m                    <p className="text-muted-foreground">[m
+[32m+[m[32m                      Pushes the notebook kernel to Kaggle with GPU enabled (NVIDIA T4), Internet enabled,[m
+[32m+[m[32m                      and private visibility. The only attached dataset source is your private dataset.[m
+[32m+[m[32m                    </p>[m
+[32m+[m
+[32m+[m[32m                    <div className="flex items-center gap-4 pt-1">[m
+[32m+[m[32m                      <label className="flex items-center gap-2 cursor-pointer">[m
+[32m+[m[32m                        <input[m
+[32m+[m[32m                          type="radio"[m
+[32m+[m[32m                          name="config_mode"[m
+[32m+[m[32m                          checked={!fullTraining}[m
+[32m+[m[32m                          onChange={() => setFullTraining(false)}[m
+[32m+[m[32m                        />[m
+[32m+[m[32m                        <span>Smoke Test (<code>quick_test</code>: 2 epochs, 2 folds)</span>[m
+[32m+[m[32m                      </label>[m
+[32m+[m[32m                      <label className="flex items-center gap-2 cursor-pointer">[m
+[32m+[m[32m                        <input[m
+[32m+[m[32m                          type="radio"[m
+[32m+[m[32m                          name="config_mode"[m
+[32m+[m[32m                          checked={fullTraining}[m
+[32m+[m[32m                          onChange={() => setFullTraining(true)}[m
+[32m+[m[32m                        />[m
+[32m+[m[32m                        <span>Full Training (<code>full</code>: 40 epochs, 5 folds)</span>[m
+[32m+[m[32m                      </label>[m
+[32m+[m[32m                    </div>[m
+[32m+[m
+[32m+[m[32m                    <label className="flex items-start gap-2 pt-2 text-foreground font-medium cursor-pointer">[m
+[32m+[m[32m                      <input[m
+[32m+[m[32m                        type="checkbox"[m
+[32m+[m[32m                        checked={launchConfirmed}[m
+[32m+[m[32m                        onChange={(e) => setLaunchConfirmed(e.target.checked)}[m
+[32m+[m[32m                        className="mt-0.5 rounded border-border"[m
+[32m+[m[32m                      />[m
+[32m+[m[32m                      <span>I confirm launching the background Kaggle GPU training job.</span>[m
+[32m+[m[32m                    </label>[m
+[32m+[m[32m                  </div>[m
+[32m+[m
+[32m+[m[32m                  <div className="flex items-center gap-3 pt-1">[m
+[32m+[m[32m                    <button[m
+[32m+[m[32m                      onClick={() => executeKaggleAction("launch", { confirmLaunch: true, full: fullTraining })}[m
+[32m+[m[32m                      disabled={!launchConfirmed || kaggleBusy || Boolean(kaggleState?.running)}[m
+[32m+[m[32m                      className="inline-flex items-center gap-2 rounded-md bg-primary px-4 py-2 text-xs font-semibold text-primary-foreground disabled:opacity-40"[m
+[32m+[m[32m                    >[m
+[32m+[m[32m                      {kaggleBusy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Play className="h-3.5 w-3.5" />}[m
+[32m+[m[32m                      Launch GPU Training Kernel[m
+[32m+[m[32m                    </button>[m
+[32m+[m[32m                  </div>[m
+[32m+[m[32m                </div>[m
+[32m+[m[32m              )}[m
+[32m+[m
+[32m+[m[32m              {/* STEP 4: STATUS */}[m
+[32m+[m[32m              {currentStep === "status" && ([m
+[32m+[m[32m                <div className="space-y-4">[m
+[32m+[m[32m                  <div className="flex items-center justify-between">[m
+[32m+[m[32m                    <div className="flex items-center gap-2 text-sm font-semibold text-foreground">[m
+[32m+[m[32m                      <Layers className="h-4 w-4 text-primary" />[m
+[32m+[m[32m                      Step 4: Kaggle Cloud Execution Status[m
+[32m+[m[32m                    </div>[m
+[32m+[m[32m                    <div className="flex items-center gap-2">[m
+[32m+[m[32m                      <button[m
+[32m+[m[32m                        onClick={() => executeKaggleAction("status")}[m
+[32m+[m[32m                        disabled={kaggleBusy}[m
+[32m+[m[32m                        className="inline-flex items-center gap-1.5 rounded-md border border-border bg-background px-3 py-1.5 text-xs text-muted-foreground hover:text-foreground"[m
+[32m+[m[32m                      >[m
+[32m+[m[32m                        <RefreshCw className="h-3.5 w-3.5" /> Refresh Status[m
+[32m+[m[32m                      </button>[m
+[32m+[m[32m                      {kaggleState?.running && ([m
+[32m+[m[32m                        <button[m
+[32m+[m[32m                          onClick={stopKaggleProcess}[m
+[32m+[m[32m                          className="inline-flex items-center gap-1.5 rounded-md border border-destructive px-3 py-1.5 text-xs text-destructive hover:bg-destructive/10"[m
+[32m+[m[32m                        >[m
+[32m+[m[32m                          <Square className="h-3.5 w-3.5" /> Stop Process[m
+[32m+[m[32m                        </button>[m
+[32m+[m[32m                      )}[m
+[32m+[m[32m                    </div>[m
+[32m+[m[32m                  </div>[m
+[32m+[m
+[32m+[m[32m                  <p className="text-xs text-muted-foreground">[m
+[32m+[m[32m                    Polls read-only kernel status on Kaggle. You can safely close your browser or turn off your computer;[m
+[32m+[m[32m                    Kaggle continues running in the cloud.[m
+[32m+[m[32m                  </p>[m
+[32m+[m[32m                </div>[m
+[32m+[m[32m              )}[m
+[32m+[m
+[32m+[m[32m              {/* STEP 5: DOWNLOAD */}[m
+[32m+[m[32m              {currentStep === "download" && ([m
+[32m+[m[32m                <div className="space-y-4">[m
+[32m+[m[32m                  <div className="flex items-center gap-2 text-sm font-semibold text-foreground">[m
+[32m+[m[32m                    <Download className="h-4 w-4 text-primary" />[m
+[32m+[m[32m                    Step 5: Download Kernel Outputs to Staging[m
+[32m+[m[32m                  </div>[m
+[32m+[m[32m                  <p className="text-xs text-muted-foreground">[m
+[32m+[m[32m                    Downloads outputs from Kaggle into an isolated staging folder outside the repository.[m
+[32m+[m[32m                    Nothing is written directly into <code>data/results3d</code> yet until verified in Step 6.[m
+[32m+[m[32m                  </p>[m
+[32m+[m
+[32m+[m[32m                  <div className="flex items-center gap-3 pt-1">[m
+[32m+[m[32m                    <button[m
+[32m+[m[32m                      onClick={() => executeKaggleAction("download")}[m
+[32m+[m[32m                      disabled={kaggleBusy || Boolean(kaggleState?.running)}[m
+[32m+[m[32m                      className="inline-flex items-center gap-2 rounded-md bg-primary px-4 py-2 text-xs font-semibold text-primary-foreground disabled:opacity-40"[m
+[32m+[m[32m                    >[m
+[32m+[m[32m                      {kaggleBusy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Download className="h-3.5 w-3.5" />}[m
+[32m+[m[32m                      Download to Staging Folder[m
+[32m+[m[32m                    </button>[m
+[32m+[m[32m                  </div>[m
+[32m+[m[32m                </div>[m
+[32m+[m[32m              )}[m
+[32m+[m
+[32m+[m[32m              {/* STEP 6: IMPORT */}[m
+[32m+[m[32m              {currentStep === "import" && ([m
+[32m+[m[32m                <div className="space-y-4">[m
+[32m+[m[32m                  <div className="flex items-center gap-2 text-sm font-semibold text-foreground">[m
+[32m+[m[32m                    <CheckCircle2 className="h-4 w-4 text-primary" />[m
+[32m+[m[32m                    Step 6: Verified Weights Import[m
+[32m+[m[32m                  </div>[m
+[32m+[m[32m                  <p className="text-xs text-muted-foreground">[m
+[32m+[m[32m                    Runs <code>verify_and_import_weights.py</code> to validate checkpoints using{" "}[m
+[32m+[m[32m                    <code>weights_only=True</code>, verify exact tensor shapes against UNet3D, back up existing[m
+[32m+[m[32m                    results, and import only verified weights and metrics into <code>data/results3d</code>.[m
+[32m+[m[32m                  </p>[m
+[32m+[m
+[32m+[m[32m                  <div className="flex items-center gap-3 pt-1">[m
+[32m+[m[32m                    <button[m
+[32m+[m[32m                      onClick={() => {[m
+[32m+[m[32m                        executeKaggleAction("import");[m
+[32m+[m[32m                        setTimeout(loadLocal, 1500);[m
+[32m+[m[32m                      }}[m
+[32m+[m[32m                      disabled={kaggleBusy || Boolean(kaggleState?.running)}[m
+[32m+[m[32m                      className="inline-flex items-center gap-2 rounded-md bg-primary px-4 py-2 text-xs font-semibold text-primary-foreground disabled:opacity-40"[m
+[32m+[m[32m                    >[m
+[32m+[m[32m                      {kaggleBusy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <CheckCircle2 className="h-3.5 w-3.5" />}[m
+[32m+[m[32m                      Verify & Import to Results[m
+[32m+[m[32m                    </button>[m
+[32m+[m[32m                  </div>[m
+[32m+[m[32m                </div>[m
+[32m+[m[32m              )}[m
+[32m+[m[32m            </div>[m
+[32m+[m
+[32m+[m[32m            {/* Live Tail Log Box */}[m
+[32m+[m[32m            <div className="rounded-lg border border-border bg-card p-4 space-y-2">[m
+[32m+[m[32m              <div className="flex items-center justify-between text-xs font-semibold uppercase tracking-wider text-muted-foreground">[m
+[32m+[m[32m                <span className="flex items-center gap-2">[m
+[32m+[m[32m                  {kaggleState?.running && <Loader2 className="h-3.5 w-3.5 animate-spin text-primary" />}[m
+[32m+[m[32m                  {kaggleState?.running ? `Task Active: ${kaggleState.action ?? "Running"}` : "Kaggle Task Log"}[m
+[32m+[m[32m                </span>[m
+[32m+[m[32m                {kaggleState?.stagingDir && ([m
+[32m+[m[32m                  <span className="text-[10px] font-mono lowercase opacity-70">[m
+[32m+[m[32m                    staging: {kaggleState.stagingDir.split(/[/\\]/).slice(-1)[0]}[m
+[32m+[m[32m                  </span>[m
+[32m+[m[32m                )}[m
+[32m+[m[32m              </div>[m
+[32m+[m[32m              <pre className="max-h-56 overflow-auto rounded bg-muted p-3 font-mono text-[11px] leading-relaxed whitespace-pre-wrap">[m
+[32m+[m[32m                {kaggleState?.log || "No log output yet."}[m
+[32m+[m[32m              </pre>[m
+[32m+[m[32m            </div>[m
+[32m+[m[32m          </div>[m
+         </div>[m
+       )}[m
+     </div>[m
+[1mdiff --git a/ml/README.md b/ml/README.md[m
+[1mindex 64a7d68..1d23e4b 100644[m
+[1m--- a/ml/README.md[m
+[1m+++ b/ml/README.md[m
+[36m@@ -68,6 +68,87 @@[m [mviolate by accident.[m
+   and disposable.[m
+ - The label mapping is keyed by **segment name**, never segment order:[m
+   `1=bone_marrow`, `2=bme`, `3=uncertain`. Hard-fail on an unknown name rather than guessing.[m
+[31m-- **Patient-level splits only.** Never let slices from one case straddle a fold boundary.[m
+[31m-- The locked test set is evaluated **once**, at the end.[m
+[32m+[m[32m- Patient-level splits only. Never let slices or multi-scan cases from one patient straddle a fold boundary.[m
+[32m+[m[32m- The locked test set is evaluated once, at the end.[m
+ - No patient identifiers in code, logs, filenames, or commit messages. Pseudonymous IDs only.[m
+[32m+[m
+[32m+[m[32m## Cross-Validation Folds & Comparability[m
+[32m+[m
+[32m+[m[32m### Patient-Grouped Folds (Default)[m
+[32m+[m[32mBy default, `ml/scripts/train_3d.py` assigns cross-validation folds grouped strictly by `patient_id` (read from the de-identified `worklist.csv`):[m
+[32m+[m[32m1. **Patient Grouping**: All scans of the same patient are grouped together. Paired scans never straddle train and validation splits.[m
+[32m+[m[32m2. **Deterministic Shuffling**: Sorted unique patient IDs are deterministically shuffled using `SEED=42`. Directory discovery order and case renaming do not alter fold assignment.[m
+[32m+[m[32m3. **Balanced Allocation**: Patient groups are assigned via greedy bin-packing to the currently smallest fold (ties broken by lowest fold index). Fold sizes remain balanced within ±1 case.[m
+[32m+[m[32m4. **Fail-Closed Privacy**: If `patient_id` is missing or blank for any case in `worklist.csv`, execution halts with a clear error unless `--allow-case-level-folds` is explicitly specified.[m
+[32m+[m
+[32m+[m[32m### Reproducing Legacy Runs (`--legacy-case-folds`)[m
+[32m+[m[32mEarlier versions assigned folds at the case level via round-robin (`groups[i % folds_n].append(case)` on sorted case IDs), which could allow multi-scan patients to straddle fold boundaries.[m
+[32m+[m[32mTo reproduce those historical assignments bit-for-bit:[m
+[32m+[m[32m```bash[m
+[32m+[m[32mpython ml/scripts/train_3d.py <base> --legacy-case-folds[m
+[32m+[m[32m```[m
+[32m+[m
+[32m+[m[32m### Why Old and New Runs Are NOT Comparable[m
+[32m+[m[32m1. **Holdout Independence**: Legacy runs used scan-level holdouts where paired scans of the same patient could appear in both train and validation sets. Patient-grouped runs enforce strict patient-level holdouts, preventing multi-scan leakage.[m
+[32m+[m[32m2. **Dataset Fingerprint Isolation**: Checkpoints and metrics embed a SHA-256 dataset fingerprint and `fold_mode` ("patient_grouped" vs "legacy_case_level"). Auto-resume (`--resume`) and completed fold skipping (`--skip-completed`) detect mismatches and refuse to merge or resume across different fold modes.[m
+[32m+[m[32m3. **Sampling Mix Isolation**: Patch sampling mix (`--sampling-mix lesion=A,bone=B,random=C`) is recorded in `data_config` and the fingerprint. Non-default sampling requires an isolated `--out-dir` outside `data/`.[m
+[32m+[m
+[32m+[m[32m## Kaggle Cloud GPU Training (3D U-Net)[m
+[32m+[m
+[32m+[m[32mFor fast training on free cloud GPUs (NVIDIA T4, 30 free hours/week) without local hardware bottlenecks.[m
+[32m+[m
+[32m+[m[32m### Safeguarded CLI Pipeline (`ml/scripts/kaggle_pipeline.py`)[m
+[32m+[m
+[32m+[m[32mEvery step requires explicit subcommands and confirmations. No data is ever transmitted automatically:[m
+[32m+[m
+[32m+[m[32m1. **Preflight**: Verify de-identification, leak guards, and volume integrity:[m
+[32m+[m[32m   ```bash[m
+[32m+[m[32m   python ml/scripts/kaggle_pipeline.py preflight --export-dir ../bme_colab_export --mapping-file ../bme_recovery/export_mapping.json[m
+[32m+[m[32m   ```[m
+[32m+[m[32m2. **Upload**: Upload strictly the verified de-identified export to a private Kaggle dataset:[m
+[32m+[m[32m   ```bash[m
+[32m+[m[32m   python ml/scripts/kaggle_pipeline.py upload --confirm-upload --export-dir ../bme_colab_export --mapping-file ../bme_recovery/export_mapping.json[m
+[32m+[m[32m   ```[m
+[32m+[m[32m3. **Launch**: Push and execute the notebook kernel on Kaggle GPU (`--mode quick` smoke test by default; `--mode bench` for 1 fold x 1 epoch speedup benchmark; `--mode fold0` for fold 0 x 40 epochs; `--mode full` for all 5 folds x 40 epochs, with optional `--folds`):[m
+[32m+[m[32m   ```bash[m
+[32m+[m[32m   python ml/scripts/kaggle_pipeline.py launch --confirm-launch [--mode {bench,quick,fold0,full}] [--folds 0 1 ...][m
+[32m+[m[32m   ```[m
+[32m+[m[32m4. **Status**: Monitor cloud execution:[m
+[32m+[m[32m   ```bash[m
+[32m+[m[32m   python ml/scripts/kaggle_pipeline.py status[m
+[32m+[m[32m   ```[m
+[32m+[m[32m5. **Download**: Download outputs into an isolated staging directory outside the repo:[m
+[32m+[m[32m   ```bash[m
+[32m+[m[32m   python ml/scripts/kaggle_pipeline.py download --staging-dir ../bme_kaggle_staging[m
+[32m+[m[32m   ```[m
+[32m+[m[32m6. **Import**: Validate weights (weights_only=True, tensor shapes, allowlist) into `data/results3d`:[m
+[32m+[m[32m   ```bash[m
+[32m+[m[32m   python ml/scripts/kaggle_pipeline.py import --staging-dir ../bme_kaggle_staging[m
+[32m+[m[32m   ```[m
+[32m+[m
+[32m+[m[32m### Manual Fallback (Zero API Dependencies)[m
+[32m+[m
+[32m+[m[32mIf you prefer not to use the Kaggle API or CLI:[m
+[32m+[m[32m1. **Export & Verify Dataset Locally**:[m
+[32m+[m[32m   ```bash[m
+[32m+[m[32m   python ml/scripts/export_for_colab.py --src . --dst ../bme_colab_export --mapping-file ../bme_recovery/export_mapping.json[m
+[32m+[m[32m   python ml/scripts/export_for_colab.py --verify --src . --dst ../bme_colab_export --mapping-file ../bme_recovery/export_mapping.json[m
+[32m+[m[32m   ```[m
+[32m+[m[32m2. **Upload to Kaggle as Private Dataset**:[m
+[32m+[m[32m   - Go to [kaggle.com/datasets](https://www.kaggle.com/datasets) -> **New Dataset**.[m
+[32m+[m[32m   - Upload the folder `../bme_colab_export` (upload the folder directly, not a zip, never both).[m
+[32m+[m[32m   - Title: `BME 3D Dataset` (slug `bme-3d-dataset`).[m
+[32m+[m[32m   - **Crucial**: Set visibility to **Private Dataset** and click Create.[m
+[32m+[m[32m3. **Upload & Run Notebook**:[m
+[32m+[m[32m   - Go to [kaggle.com/code](https://www.kaggle.com/code) -> **New Notebook** -> **File > Upload Notebook**.[m
+[32m+[m[32m   - Select `ml/notebooks/train_3d_colab.ipynb`.[m
+[32m+[m[32m   - Under **Input** (right sidebar), click **+ Add Input** and add your private `bme-3d-dataset`.[m
+[32m+[m[32m   - Under **Settings**, select **Accelerator > GPU T4** and enable **Internet**.[m
+[32m+[m[32m   - Set `CONFIG_MODE = "quick_test"` (for smoke test), `"bench"` (for speedup benchmark), `"fold0"` (for single fold), or `"full"` (for production) in the config cell.[m
+[32m+[m[32m   - Click **Save Version > Save & Run All (Commit)**.[m
+[32m+[m[32m4. **Import Downloaded Weights**:[m
+[32m+[m[32m   - When training finishes, download `results3d.zip` from the notebook's **Output** tab.[m
+[32m+[m[32m   - Verify and import locally:[m
+[32m+[m[32m     ```bash[m
+[32m+[m[32m     python ml/scripts/verify_and_import_weights.py path/to/results3d.zip data/results3d[m
+[32m+[m[32m     ```[m
+[1mdiff --git a/ml/scripts/seg2nifti.py b/ml/scripts/seg2nifti.py[m
+[1mindex d002cfc..6a92c1e 100644[m
+[1m--- a/ml/scripts/seg2nifti.py[m
+[1m+++ b/ml/scripts/seg2nifti.py[m
+[36m@@ -33,7 +33,7 @@[m [mfrom pathlib import Path[m
+ try:[m
+     import nrrd[m
+ except ImportError:[m
+[31m-    sys.exit("pynrrd missing.  pip install pynrrd")[m
+[32m+[m[32m    nrrd = None[m
+ [m
+ try:[m
+     import numpy as np[m
+[36m@@ -75,6 +75,8 @@[m [mdef read_segmentation(path: Path):[m
+     A .seg.nrrd is either a 3D labelmap with per-segment metadata, or 4D when[m
+     segments overlap (one binary layer each).[m
+     """[m
+[32m+[m[32m    if nrrd is None:[m
+[32m+[m[32m        raise ImportError("pynrrd is required to read .seg.nrrd files. Install with: pip install pynrrd")[m
+     data, header = nrrd.read(str(path))[m
+     segments = {}[m
+     for key, value in header.items():[m
+[1mdiff --git a/ml/scripts/train_3d.py b/ml/scripts/train_3d.py[m
+[1mindex 1495de7..e966e27 100644[m
+[1m--- a/ml/scripts/train_3d.py[m
+[1m+++ b/ml/scripts/train_3d.py[m
+[36m@@ -16,12 +16,21 @@[m [mfrom __future__ import annotations[m
+ import argparse[m
+ import csv[m
+ import gc[m
+[32m+[m[32mimport hashlib[m
+ import json[m
+ import random[m
+ import sys[m
+[32m+[m[32mimport time[m
+ from datetime import datetime, timezone[m
+ from pathlib import Path[m
+ [m
+[32m+[m[32mif sys.stdout.encoding and sys.stdout.encoding.lower() != "utf-8":[m
+[32m+[m[32m    try:[m
+[32m+[m[32m        sys.stdout.reconfigure(encoding="utf-8")[m
+[32m+[m[32m        sys.stderr.reconfigure(encoding="utf-8")[m
+[32m+[m[32m    except Exception:[m
+[32m+[m[32m        pass[m
+[32m+[m
+ import nibabel as nib[m
+ import numpy as np[m
+ import torch[m
+[36m@@ -29,7 +38,10 @@[m [mimport torch.nn as nn[m
+ from scipy.ndimage import label as cc_label[m
+ [m
+ sys.path.insert(0, str(Path(__file__).resolve().parent))[m
+[31m-from seg2nifti import build_labelmap, read_segmentation, to_volume_grid  # noqa: E402[m
+[32m+[m[32mtry:[m
+[32m+[m[32m    from seg2nifti import build_labelmap, read_segmentation, to_volume_grid  # noqa: E402[m
+[32m+[m[32mexcept Exception:[m
+[32m+[m[32m    build_labelmap = read_segmentation = to_volume_grid = None[m
+ [m
+ SEED = 1337[m
+ PATCH = (96, 96, 12)  # x, y, z. Sized so a 6 GB laptop GPU keeps the desktop alive.[m
+[36m@@ -88,46 +100,237 @@[m [mdef crop(vol: np.ndarray, origin: tuple[int, int, int]) -> np.ndarray:[m
+     return vol[sl][m
+ [m
+ [m
+[31m-def sample_origin(shape: tuple[int, int, int], labels: np.ndarray, rng: np.random.Generator):[m
+[31m-    if (labels == 2).any() and rng.random() < 0.7:[m
+[32m+[m[32mdef parse_sampling_mix(arg_val: str) -> dict[str, float]:[m
+[32m+[m[32m    parts = [p.strip() for p in arg_val.split(",") if p.strip()][m
+[32m+[m[32m    mix = {}[m
+[32m+[m[32m    for part in parts:[m
+[32m+[m[32m        if "=" not in part:[m
+[32m+[m[32m            raise ValueError(f"Invalid item '{part}' in --sampling-mix '{arg_val}', expected key=value.")[m
+[32m+[m[32m        k, v = part.split("=", 1)[m
+[32m+[m[32m        k = k.strip().lower()[m
+[32m+[m[32m        try:[m
+[32m+[m[32m            mix[k] = float(v.strip())[m
+[32m+[m[32m        except ValueError:[m
+[32m+[m[32m            raise ValueError(f"Invalid float value '{v}' for key '{k}' in --sampling-mix '{arg_val}'.")[m
+[32m+[m[32m    for req in ["lesion", "bone", "random"]:[m
+[32m+[m[32m        if req not in mix:[m
+[32m+[m[32m            raise ValueError(f"Missing required key '{req}' in --sampling-mix '{arg_val}'.")[m
+[32m+[m[32m    total = sum(mix.values())[m
+[32m+[m[32m    if not (0.999 <= total <= 1.001):[m
+[32m+[m[32m        raise ValueError(f"--sampling-mix fractions must sum to 1.0 (got {total:.4f} from '{arg_val}').")[m
+[32m+[m[32m    return mix[m
+[32m+[m
+[32m+[m
+[32m+[m[32mdef sample_origin([m
+[32m+[m[32m    shape: tuple[int, int, int],[m
+[32m+[m[32m    labels: np.ndarray,[m
+[32m+[m[32m    rng: np.random.Generator,[m
+[32m+[m[32m    sampling_mix: dict[str, float] | None = None,[m
+[32m+[m[32m) -> tuple[int, int, int]:[m
+[32m+[m[32m    if sampling_mix is None:[m
+[32m+[m[32m        sampling_mix = {"lesion": 0.7, "bone": 0.0, "random": 0.3}[m
+[32m+[m
+[32m+[m[32m    p_lesion = sampling_mix.get("lesion", 0.7)[m
+[32m+[m[32m    p_bone = sampling_mix.get("bone", 0.0)[m
+[32m+[m
+[32m+[m[32m    # Fast path for standard default: guaranteed bit-identical to legacy behavior[m
+[32m+[m[32m    if p_bone == 0.0:[m
+[32m+[m[32m        if (labels == 2).any() and rng.random() < p_lesion:[m
+[32m+[m[32m            pts = np.argwhere(labels == 2)[m
+[32m+[m[32m            point = pts[int(rng.integers(len(pts)))][m
+[32m+[m[32m            return tuple([m
+[32m+[m[32m                int(np.clip(point[ax] - PATCH[ax] // 2, 0, max(0, shape[ax] - PATCH[ax])))[m
+[32m+[m[32m                for ax in range(3)[m
+[32m+[m[32m            )[m
+[32m+[m[32m        return tuple([m
+[32m+[m[32m            0 if shape[ax] <= PATCH[ax] else int(rng.integers(0, shape[ax] - PATCH[ax] + 1))[m
+[32m+[m[32m            for ax in range(3)[m
+[32m+[m[32m        )[m
+[32m+[m
+[32m+[m[32m    # General path when bone sampling is active (p_bone > 0.0)[m
+[32m+[m[32m    u = rng.random()[m
+[32m+[m[32m    has_lesion = (labels == 2).any()[m
+[32m+[m[32m    has_bone = ((labels == 1) | (labels == 2)).any()[m
+[32m+[m
+[32m+[m[32m    if u < p_lesion and has_lesion:[m
+         pts = np.argwhere(labels == 2)[m
+         point = pts[int(rng.integers(len(pts)))][m
+         return tuple([m
+             int(np.clip(point[ax] - PATCH[ax] // 2, 0, max(0, shape[ax] - PATCH[ax])))[m
+             for ax in range(3)[m
+         )[m
+[31m-    return tuple([m
+[31m-        0 if shape[ax] <= PATCH[ax] else int(rng.integers(0, shape[ax] - PATCH[ax] + 1))[m
+[31m-        for ax in range(3)[m
+[31m-    )[m
+[32m+[m[32m    elif u < (p_lesion + p_bone) and has_bone:[m
+[32m+[m[32m        pts = np.argwhere((labels == 1) | (labels == 2))[m
+[32m+[m[32m        point = pts[int(rng.integers(len(pts)))][m
+[32m+[m[32m        return tuple([m
+[32m+[m[32m            int(np.clip(point[ax] - PATCH[ax] // 2, 0, max(0, shape[ax] - PATCH[ax])))[m
+[32m+[m[32m            for ax in range(3)[m
+[32m+[m[32m        )[m
+[32m+[m[32m    else:[m
+[32m+[m[32m        return tuple([m
+[32m+[m[32m            0 if shape[ax] <= PATCH[ax] else int(rng.integers(0, shape[ax] - PATCH[ax] + 1))[m
+[32m+[m[32m            for ax in range(3)[m
+[32m+[m[32m        )[m
+[32m+[m
+[32m+[m
+[32m+[m[32mdef apply_augmentation([m
+[32m+[m[32m    img_patch: np.ndarray,[m
+[32m+[m[32m    lbl_patch: np.ndarray,[m
+[32m+[m[32m    rng: np.random.Generator,[m
+[32m+[m[32m    do_flip: bool = True,[m
+[32m+[m[32m    do_intensity: bool = True,[m
+[32m+[m[32m    do_noise: bool = True,[m
+[32m+[m[32m) -> tuple[np.ndarray, np.ndarray]:[m
+[32m+[m[32m    """[m
+[32m+[m[32m    Apply 3D medical image augmentations in memory.[m
+[32m+[m[32m    Preserves spatial alignment between img_patch and lbl_patch.[m
+[32m+[m[32m    Constraints:[m
+[32m+[m[32m      - Flip: left-right horizontal flip along axis 1 (width) with p=0.5. No z-flips.[m
+[32m+[m[32m      - Intensity: scale in [0.9, 1.1] and shift in [-0.05, 0.05], clipped to [0, 1].[m
+[32m+[m[32m      - Noise: additive Gaussian with sigma=0.01, clipped to [0, 1].[m
+[32m+[m[32m      - Labels: NEVER modified by intensity scaling or noise.[m
+[32m+[m[32m    """[m
+[32m+[m[32m    img = img_patch.copy()[m
+[32m+[m[32m    lbl = lbl_patch.copy()[m
+[32m+[m
+[32m+[m[32m    # 1. Left-right horizontal flip (axis 1)[m
+[32m+[m[32m    if do_flip and rng.random() < 0.5:[m
+[32m+[m[32m        img = np.ascontiguousarray(np.flip(img, axis=1))[m
+[32m+[m[32m        lbl = np.ascontiguousarray(np.flip(lbl, axis=1))[m
+[32m+[m
+[32m+[m[32m    # 2. Intensity scale and shift (image only)[m
+[32m+[m[32m    if do_intensity:[m
+[32m+[m[32m        scale = float(rng.uniform(0.9, 1.1))[m
+[32m+[m[32m        shift = float(rng.uniform(-0.05, 0.05))[m
+[32m+[m[32m        img = np.clip(img * scale + shift, 0.0, 1.0)[m
+[32m+[m
+[32m+[m[32m    # 3. Additive Gaussian noise (image only)[m
+[32m+[m[32m    if do_noise:[m
+[32m+[m[32m        noise = rng.normal(0.0, 0.01, size=img.shape).astype(np.float32)[m
+[32m+[m[32m        img = np.clip(img + noise, 0.0, 1.0)[m
+[32m+[m
+[32m+[m[32m    return img, lbl[m
+ [m
+ [m
+ def volume_path(base: Path, case_id: str) -> Path:[m
+[31m-    folder = base / "data" / "nifti" / case_id[m
+[31m-    meta = folder / "series.json"[m
+[31m-    if meta.exists():[m
+[31m-        try:[m
+[31m-            annotated = json.loads(meta.read_text(encoding="utf-8")).get("annotated") or ""[m
+[31m-        except json.JSONDecodeError:[m
+[31m-            annotated = ""[m
+[31m-        if annotated and annotated != "primary":[m
+[31m-            named = folder / f"{case_id}_{annotated}.nii.gz"[m
+[31m-            if named.exists():[m
+[31m-                return named[m
+[32m+[m[32m    nii_dir = None[m
+[32m+[m[32m    for candidate in [[m
+[32m+[m[32m        base / "data" / "nifti",[m
+[32m+[m[32m        base / "nifti",[m
+[32m+[m[32m        base / "bme_dataset_bundle" / "data" / "nifti",[m
+[32m+[m[32m        base / "bme_dataset_bundle" / "nifti",[m
+[32m+[m[32m    ]:[m
+[32m+[m[32m        if candidate.is_dir():[m
+[32m+[m[32m            nii_dir = candidate[m
+[32m+[m[32m            break[m
+[32m+[m[32m    if nii_dir is None:[m
+[32m+[m[32m        cands = [p for p in base.rglob("nifti") if p.is_dir()][m
+[32m+[m[32m        nii_dir = cands[0] if cands else base[m
+[32m+[m[32m    folder = nii_dir / case_id[m
+[32m+[m[32m    if folder.is_dir():[m
+[32m+[m[32m        meta = folder / "series.json"[m
+[32m+[m[32m        if meta.exists():[m
+[32m+[m[32m            try:[m
+[32m+[m[32m                annotated = json.loads(meta.read_text(encoding="utf-8")).get("annotated") or ""[m
+[32m+[m[32m            except json.JSONDecodeError:[m
+[32m+[m[32m                annotated = ""[m
+[32m+[m[32m            if annotated and annotated != "primary":[m
+[32m+[m[32m                for f in folder.glob(f"{case_id}_{annotated}.nii*"):[m
+[32m+[m[32m                    return f[m
+[32m+[m[32m        for f in folder.glob(f"{case_id}*.nii*"):[m
+[32m+[m[32m            if "labels" not in f.name:[m
+[32m+[m[32m                return f[m
+[32m+[m[32m        all_nii = [f for f in folder.glob("*.nii*") if "labels" not in f.name and not f.name.endswith(".txt")][m
+[32m+[m[32m        if all_nii:[m
+[32m+[m[32m            return all_nii[0][m
+[32m+[m
+[32m+[m[32m    # Robust fallback: search base for scan volume of this case[m
+[32m+[m[32m    candidates = [[m
+[32m+[m[32m        f for f in base.rglob(f"{case_id}*.nii*")[m
+[32m+[m[32m        if "labels" not in f.name and not f.name.endswith(".txt") and f.is_file()[m
+[32m+[m[32m    ][m
+[32m+[m[32m    if candidates:[m
+[32m+[m[32m        for c in candidates:[m
+[32m+[m[32m            if "primary" in c.name:[m
+[32m+[m[32m                return c[m
+[32m+[m[32m        return candidates[0][m
+[32m+[m
+     return folder / f"{case_id}_primary.nii.gz"[m
+ [m
+ [m
+[31m-def worklist_class(base: Path) -> dict[str, str]:[m
+[31m-    path = base / "data" / "worklist.csv"[m
+[31m-    if not path.exists():[m
+[31m-        return {}[m
+[32m+[m[32mdef load_worklist_metadata(base: Path) -> tuple[dict[str, str], dict[str, str]]:[m
+[32m+[m[32m    """[m
+[32m+[m[32m    Returns (case_to_class, case_to_patient) from worklist.csv.[m
+[32m+[m[32m    """[m
+[32m+[m[32m    path = None[m
+[32m+[m[32m    for candidate in [[m
+[32m+[m[32m        base / "data" / "worklist.csv",[m
+[32m+[m[32m        base / "worklist.csv",[m
+[32m+[m[32m        base / "bme_dataset_bundle" / "data" / "worklist.csv",[m
+[32m+[m[32m        base / "bme_dataset_bundle" / "worklist.csv",[m
+[32m+[m[32m    ]:[m
+[32m+[m[32m        if candidate.is_file():[m
+[32m+[m[32m            path = candidate[m
+[32m+[m[32m            break[m
+[32m+[m[32m    if path is None:[m
+[32m+[m[32m        cands = [p for p in base.rglob("worklist.csv") if p.is_file()][m
+[32m+[m[32m        if cands:[m
+[32m+[m[32m            path = cands[0][m
+[32m+[m[32m        else:[m
+[32m+[m[32m            return {}, {}[m
+[32m+[m[32m    c_to_cls = {}[m
+[32m+[m[32m    c_to_pid = {}[m
+     with path.open(newline="", encoding="utf-8") as f:[m
+[31m-        return {row["case_id"]: row.get("class") or "" for row in csv.DictReader(f)}[m
+[32m+[m[32m        reader = csv.DictReader(f)[m
+[32m+[m[32m        for row in reader:[m
+[32m+[m[32m            cid = row.get("case_id") or ""[m
+[32m+[m[32m            if cid:[m
+[32m+[m[32m                c_to_cls[cid] = row.get("class") or ""[m
+[32m+[m[32m                c_to_pid[cid] = (row.get("patient_id") or "").strip()[m
+[32m+[m[32m    return c_to_cls, c_to_pid[m
+[32m+[m
+[32m+[m
+[32m+[m[32mdef worklist_class(base: Path) -> dict[str, str]:[m
+[32m+[m[32m    c_cls, _ = load_worklist_metadata(base)[m
+[32m+[m[32m    return c_cls[m
+ [m
+ [m
+ def load_case(base: Path, case_id: str) -> dict | None:[m
+[31m-    seg = base / "data" / "annotations" / case_id / f"{case_id}.seg.nrrd"[m
+     vol = volume_path(base, case_id)[m
+[32m+[m[32m    ann_dir = None[m
+[32m+[m[32m    for candidate in [[m
+[32m+[m[32m        base / "data" / "annotations",[m
+[32m+[m[32m        base / "annotations",[m
+[32m+[m[32m        base / "bme_dataset_bundle" / "data" / "annotations",[m
+[32m+[m[32m        base / "bme_dataset_bundle" / "annotations",[m
+[32m+[m[32m    ]:[m
+[32m+[m[32m        if candidate.is_dir():[m
+[32m+[m[32m            ann_dir = candidate[m
+[32m+[m[32m            break[m
+[32m+[m[32m    if ann_dir is None:[m
+[32m+[m[32m        cands = [p for p in base.rglob("annotations") if p.is_dir()][m
+[32m+[m[32m        ann_dir = cands[0] if cands else base[m
+[32m+[m
+[32m+[m[32m    case_ann = ann_dir / case_id[m
+[32m+[m[32m    labs = [f for f in case_ann.glob("*_labels.nii*") if f.is_file()] if case_ann.is_dir() else [][m
+[32m+[m[32m    if not labs:[m
+[32m+[m[32m        labs = [p for p in base.rglob(f"{case_id}*_labels.nii*") if p.is_file()][m
+[32m+[m
+[32m+[m[32m    if labs and vol.exists():[m
+[32m+[m[32m        img = nib.load(str(vol))[m
+[32m+[m[32m        lab_img = nib.load(str(labs[0]))[m
+[32m+[m[32m        placed = np.asanyarray(lab_img.dataobj).astype(np.uint8)[m
+[32m+[m[32m        norm = normalize(np.asanyarray(img.dataobj))[m
+[32m+[m[32m        spacing = tuple(float(abs(z)) or 1.0 for z in img.header.get_zooms()[:3])[m
+[32m+[m[32m        return {[m
+[32m+[m[32m            "id": case_id,[m
+[32m+[m[32m            "image": norm.astype(np.float32),[m
+[32m+[m[32m            "labels": placed,[m
+[32m+[m[32m            "bme_voxels": int((placed == 2).sum()),[m
+[32m+[m[32m            "spacing": spacing,[m
+[32m+[m[32m        }[m
+[32m+[m
+[32m+[m[32m    seg = case_ann / f"{case_id}.seg.nrrd"[m
+     if not seg.exists() or not vol.exists():[m
+         print(f"  {case_id}  skipped (missing scan or annotation)", flush=True)[m
+         return None[m
+[36m@@ -249,7 +452,7 @@[m [mdef dice(gt: np.ndarray, pred: np.ndarray, value: int) -> float:[m
+     return float((2 * inter) / denom)[m
+ [m
+ [m
+[31m-def guard_device(device: str):[m
+[32m+[m[32mdef guard_device(device: str, cudnn_benchmark: bool = False):[m
+     """Leave VRAM for the Windows desktop. A full GPU allocation can freeze the screen."""[m
+     torch.set_num_threads(1)[m
+     if device != "cuda":[m
+[36m@@ -258,7 +461,7 @@[m [mdef guard_device(device: str):[m
+         torch.cuda.set_per_process_memory_fraction(0.65)[m
+     except RuntimeError:[m
+         pass[m
+[31m-    torch.backends.cudnn.benchmark = False[m
+[32m+[m[32m    torch.backends.cudnn.benchmark = cudnn_benchmark[m
+ [m
+ [m
+ def release():[m
+[36m@@ -268,25 +471,62 @@[m [mdef release():[m
+ [m
+ [m
+ @torch.no_grad()[m
+[31m-def predict_volume(model: nn.Module, image: np.ndarray, device: str) -> np.ndarray:[m
+[31m-    """One patch on the GPU at a time. Votes stay uint16 so the full scan is not copied as float."""[m
+[32m+[m[32mdef predict_volume([m
+[32m+[m[32m    model: nn.Module,[m
+[32m+[m[32m    image: np.ndarray,[m
+[32m+[m[32m    device: str,[m
+[32m+[m[32m    val_batch_size: int = 1,[m
+[32m+[m[32m    use_amp: bool = False,[m
+[32m+[m[32m    channels_last: bool = False,[m
+[32m+[m[32m) -> np.ndarray:[m
+[32m+[m[32m    """Sliding-window inference. Supports val_batch_size >= 1 for faster evaluation."""[m
+     model.eval()[m
+     shape = image.shape[m
+     padded = pad_volume(image)[m
+     votes_bone = np.zeros(padded.shape, dtype=np.uint16)[m
+     votes_bme = np.zeros(padded.shape, dtype=np.uint16)[m
+     hits = np.zeros(padded.shape, dtype=np.uint16)[m
+[31m-    for origin in window_origins(padded.shape):[m
+[31m-        patch = np.ascontiguousarray(crop(padded, origin))[m
+[31m-        x = torch.from_numpy(patch).float().unsqueeze(0).unsqueeze(0).to(device)[m
+[31m-        prob = torch.sigmoid(model(x)[0])[m
+[31m-        bone = (prob[0] >= 0.5).cpu().numpy()[m
+[31m-        bme = ((prob[1] >= 0.5).cpu().numpy() & bone)[m
+[31m-        del x, prob[m
+[31m-        sl = tuple(slice(o, o + p) for o, p in zip(origin, PATCH))[m
+[31m-        votes_bone[sl] += bone[m
+[31m-        votes_bme[sl] += bme[m
+[31m-        hits[sl] += 1[m
+[32m+[m[32m    origins = window_origins(padded.shape)[m
+[32m+[m
+[32m+[m[32m    if val_batch_size <= 1:[m
+[32m+[m[32m        for origin in origins:[m
+[32m+[m[32m            patch = np.ascontiguousarray(crop(padded, origin))[m
+[32m+[m[32m            x = torch.from_numpy(patch).float().unsqueeze(0).unsqueeze(0).to(device)[m
+[32m+[m[32m            if channels_last:[m
+[32m+[m[32m                x = x.to(memory_format=torch.channels_last_3d)[m
+[32m+[m[32m            if use_amp and device == "cuda":[m
+[32m+[m[32m                with torch.amp.autocast(device_type="cuda"):[m
+[32m+[m[32m                    prob = torch.sigmoid(model(x)[0])[m
+[32m+[m[32m            else:[m
+[32m+[m[32m                prob = torch.sigmoid(model(x)[0])[m
+[32m+[m[32m            bone = (prob[0] >= 0.5).cpu().numpy()[m
+[32m+[m[32m            bme = ((prob[1] >= 0.5).cpu().numpy() & bone)[m
+[32m+[m[32m            del x, prob[m
+[32m+[m[32m            sl = tuple(slice(o, o + p) for o, p in zip(origin, PATCH))[m
+[32m+[m[32m            votes_bone[sl] += bone[m
+[32m+[m[32m            votes_bme[sl] += bme[m
+[32m+[m[32m            hits[sl] += 1[m
+[32m+[m[32m    else:[m
+[32m+[m[32m        for i in range(0, len(origins), val_batch_size):[m
+[32m+[m[32m            batch_orig = origins[i : i + val_batch_size][m
+[32m+[m[32m            batch_arr = np.stack([crop(padded, o) for o in batch_orig])[m
+[32m+[m[32m            x = torch.from_numpy(batch_arr).float().unsqueeze(1).to(device)[m
+[32m+[m[32m            if channels_last:[m
+[32m+[m[32m                x = x.to(memory_format=torch.channels_last_3d)[m
+[32m+[m[32m            if use_amp and device == "cuda":[m
+[32m+[m[32m                with torch.amp.autocast(device_type="cuda"):[m
+[32m+[m[32m                    probs = torch.sigmoid(model(x)).cpu().numpy()[m
+[32m+[m[32m            else:[m
+[32m+[m[32m                probs = torch.sigmoid(model(x)).cpu().numpy()[m
+[32m+[m[32m            for j, o in enumerate(batch_orig):[m
+[32m+[m[32m                bone = probs[j, 0] >= 0.5[m
+[32m+[m[32m                bme = (probs[j, 1] >= 0.5) & bone[m
+[32m+[m[32m                sl = tuple(slice(o[k], o[k] + PATCH[k]) for k in range(3))[m
+[32m+[m[32m                votes_bone[sl] += bone[m
+[32m+[m[32m                votes_bme[sl] += bme[m
+[32m+[m[32m                hits[sl] += 1[m
+[32m+[m[32m            del x, probs[m
+[32m+[m
+     votes_bone = votes_bone[: shape[0], : shape[1], : shape[2]][m
+     votes_bme = votes_bme[: shape[0], : shape[1], : shape[2]][m
+     hits = np.maximum(hits[: shape[0], : shape[1], : shape[2]], 1)[m
+[36m@@ -304,12 +544,200 @@[m [mdef mean_std(vals: list[float]) -> dict | None:[m
+     return {"mean": float(a.mean()), "std": std}[m
+ [m
+ [m
+[32m+[m[32mdef compute_dataset_fingerprint([m
+[32m+[m[32m    case_ids: list[str],[m
+[32m+[m[32m    groups: list[list[dict]],[m
+[32m+[m[32m    batch_size: int,[m
+[32m+[m[32m    patches_per_case: int,[m
+[32m+[m[32m    lesion_sampling_ratio: float,[m
+[32m+[m[32m    learning_rate: float,[m
+[32m+[m[32m    loss_config: dict,[m
+[32m+[m[32m    independent_fold_seeds: bool,[m
+[32m+[m[32m    data_flags: dict,[m
+[32m+[m[32m    fold_mode: str = "patient_grouped",[m
+[32m+[m[32m    patient_count: int = 0,[m
+[32m+[m[32m    sampling_mix: dict | None = None,[m
+[32m+[m[32m) -> tuple[str, dict]:[m
+[32m+[m[32m    val_cases_per_fold = {[m
+[32m+[m[32m        str(f): sorted([c["id"] for c in groups[f]])[m
+[32m+[m[32m        for f in range(len(groups))[m
+[32m+[m[32m    }[m
+[32m+[m[32m    payload = {[m
+[32m+[m[32m        "case_ids": sorted(case_ids),[m
+[32m+[m[32m        "val_cases_per_fold": val_cases_per_fold,[m
+[32m+[m[32m        "fold_mode": fold_mode,[m
+[32m+[m[32m        "patient_count": patient_count,[m
+[32m+[m[32m        "batch_size": batch_size,[m
+[32m+[m[32m        "patches_per_case": patches_per_case,[m
+[32m+[m[32m        "lesion_sampling_ratio": lesion_sampling_ratio,[m
+[32m+[m[32m        "sampling_mix": sampling_mix or {"lesion": 0.7, "bone": 0.0, "random": 0.3},[m
+[32m+[m[32m        "learning_rate": learning_rate,[m
+[32m+[m[32m        "loss_config": loss_config,[m
+[32m+[m[32m        "independent_fold_seeds": independent_fold_seeds,[m
+[32m+[m[32m        "data_flags": data_flags,[m
+[32m+[m[32m    }[m
+[32m+[m[32m    raw = json.dumps(payload, sort_keys=True)[m
+[32m+[m[32m    fingerprint = hashlib.sha256(raw.encode("utf-8")).hexdigest()[m
+[32m+[m[32m    return fingerprint, payload[m
+[32m+[m
+[32m+[m
+[32m+[m[32mdef merge_metrics_files(out_dir: Path, folds_n: int = 5) -> dict | None:[m
+[32m+[m[32m    """Merge per-fold metric files into final metrics.json (for parallel fold training)."""[m
+[32m+[m[32m    fold_files = sorted(out_dir.glob("metrics_fold_*.json"))[m
+[32m+[m[32m    fold_rows = [][m
+[32m+[m[32m    if fold_files:[m
+[32m+[m[32m        for f in fold_files:[m
+[32m+[m[32m            try:[m
+[32m+[m[32m                row = json.loads(f.read_text(encoding="utf-8"))[m
+[32m+[m[32m                fold_rows.append(row)[m
+[32m+[m[32m            except Exception:[m
+[32m+[m[32m                pass[m
+[32m+[m[32m        fold_rows.sort(key=lambda r: r.get("fold", 0))[m
+[32m+[m
+[32m+[m[32m    # Check for incomplete or missing folds[m
+[32m+[m[32m    incomplete_folds = [][m
+[32m+[m[32m    for f_idx in range(folds_n):[m
+[32m+[m[32m        status_file = out_dir / f"status_fold_{f_idx}.json"[m
+[32m+[m[32m        if status_file.exists():[m
+[32m+[m[32m            try:[m
+[32m+[m[32m                st = json.loads(status_file.read_text(encoding="utf-8"))[m
+[32m+[m[32m                if st.get("status") == "incomplete":[m
+[32m+[m[32m                    incomplete_folds.append((f_idx, st.get("epoch_reached", "?"), st.get("target_epochs", "?")))[m
+[32m+[m[32m            except Exception:[m
+[32m+[m[32m                pass[m
+[32m+[m[32m        elif not any(r.get("fold") == f_idx for r in fold_rows):[m
+[32m+[m[32m            incomplete_folds.append((f_idx, 0, "?"))[m
+[32m+[m
+[32m+[m[32m    if incomplete_folds or len(fold_rows) < folds_n:[m
+[32m+[m[32m        print("=" * 70, flush=True)[m
+[32m+[m[32m        print("[WARNING] TRAINING RUN INCOMPLETE - REFUSING TO WRITE COMPLETE metrics.json", flush=True)[m
+[32m+[m[32m        print("=" * 70, flush=True)[m
+[32m+[m[32m        for f_idx, ep, target_ep in incomplete_folds:[m
+[32m+[m[32m            print(f"  Fold {f_idx}: INCOMPLETE (reached epoch {ep}/{target_ep})", flush=True)[m
+[32m+[m[32m        print(f"  Completed folds found: {len(fold_rows)}/{folds_n}", flush=True)[m
+[32m+[m[32m        if fold_rows:[m
+[32m+[m[32m            (out_dir / "metrics_partial.json").write_text(json.dumps(fold_rows, indent=2), encoding="utf-8")[m
+[32m+[m[32m            print(f"  Wrote partial metrics ({len(fold_rows)} folds) to {out_dir / 'metrics_partial.json'}", flush=True)[m
+[32m+[m[32m        print("=" * 70, flush=True)[m
+[32m+[m[32m        return None[m
+[32m+[m
+[32m+[m[32m    first = fold_rows[0][m
+[32m+[m[32m    first_fp = first.get("fingerprint")[m
+[32m+[m[32m    first_mode = first.get("fold_mode", "patient_grouped")[m
+[32m+[m[32m    for r in fold_rows:[m
+[32m+[m[32m        if r.get("fingerprint") and first_fp and r.get("fingerprint") != first_fp:[m
+[32m+[m[32m            print(f"[ERROR] Fingerprint mismatch across folds in merge: {r.get('fingerprint')} != {first_fp}", flush=True)[m
+[32m+[m[32m            return None[m
+[32m+[m[32m        if r.get("fold_mode") and first_mode and r.get("fold_mode") != first_mode:[m
+[32m+[m[32m            print(f"[ERROR] Fold mode mismatch across folds in merge: {r.get('fold_mode')} != {first_mode}", flush=True)[m
+[32m+[m[32m            return None[m
+[32m+[m[32m    epochs = first.get("epochs", 40)[m
+[32m+[m[32m    seed = first.get("seed", SEED)[m
+[32m+[m[32m    device = first.get("device", "cuda")[m
+[32m+[m[32m    n_cases = first.get("n_cases", 61)[m
+[32m+[m[32m    n_bme = first.get("n_bme", 61)[m
+[32m+[m[32m    n_neg = first.get("n_negative", 0)[m
+[32m+[m[32m    total_skipped = sum(r.get("amp_skipped_steps", 0) for r in fold_rows)[m
+[32m+[m[32m    mean_skipped_pct = float(np.mean([r.get("amp_skipped_pct", 0.0) for r in fold_rows]))[m
+[32m+[m[32m    data_config = first.get("data_config", None)[m
+[32m+[m[32m    fingerprint = first_fp[m
+[32m+[m[32m    fold_mode = first_mode[m
+[32m+[m[32m    patient_count = first.get("patient_count", 0)[m
+[32m+[m[32m    sampling_mix = first.get("sampling_mix")[m
+[32m+[m[32m    val_cases_per_fold = {[m
+[32m+[m[32m        str(r.get("fold", idx)): r.get("val_cases", [])[m
+[32m+[m[32m        for idx, r in enumerate(fold_rows)[m
+[32m+[m[32m    }[m
+[32m+[m
+[32m+[m[32m    metrics = {[m
+[32m+[m[32m        "model": "3d-unet",[m
+[32m+[m[32m        "device": device,[m
+[32m+[m[32m        "folds": len(fold_rows),[m
+[32m+[m[32m        "fold_mode": fold_mode,[m
+[32m+[m[32m        "patient_count": patient_count,[m
+[32m+[m[32m        "val_cases_per_fold": val_cases_per_fold,[m
+[32m+[m[32m        "sampling_mix": sampling_mix,[m
+[32m+[m[32m        "epochs": epochs,[m
+[32m+[m[32m        "seed": seed,[m
+[32m+[m[32m        "patch": list(PATCH),[m
+[32m+[m[32m        "data_config": data_config,[m
+[32m+[m[32m        "fingerprint": fingerprint,[m
+[32m+[m[32m        "n_cases": n_cases,[m
+[32m+[m[32m        "n_bme": n_bme,[m
+[32m+[m[32m        "n_negative": n_neg,[m
+[32m+[m[32m        "summary": {[m
+[32m+[m[32m            "bone_dice": mean_std([r["bone_dice"] for r in fold_rows]),[m
+[32m+[m[32m            "bme_dice": mean_std([r["bme_dice"] for r in fold_rows]),[m
+[32m+[m[32m            "lesion_sensitivity": mean_std([r["lesion_sensitivity"] for r in fold_rows]),[m
+[32m+[m[32m            "fp_per_case": mean_std([r["fp_per_case"] for r in fold_rows]),[m
+[32m+[m[32m        },[m
+[32m+[m[32m        "presence_correct": sum(r.get("presence_correct", 0) for r in fold_rows),[m
+[32m+[m[32m        "presence_n": sum(r.get("presence_n", 0) for r in fold_rows),[m
+[32m+[m[32m        "amp_skipped_steps_total": total_skipped,[m
+[32m+[m[32m        "amp_skipped_pct_mean": round(mean_skipped_pct, 4),[m
+[32m+[m[32m        "per_fold": fold_rows,[m
+[32m+[m[32m        "merged_at": datetime.now(timezone.utc).isoformat(),[m
+[32m+[m[32m        "note": ([m
+[32m+[m[32m            f"{n_cases} volumes ({n_bme} with edema, {n_neg} without), "[m
+[32m+[m[32m            f"{len(fold_rows)} {fold_mode} folds, patch {PATCH[0]}x{PATCH[1]}x{PATCH[2]}. "[m
+[32m+[m[32m            "Bone and edema are trained together. Edema outside the predicted bone is removed. "[m
+[32m+[m[32m            "Dice, lesion sensitivity, and false positives per case are mean ± std across folds."[m
+[32m+[m[32m        ),[m
+[32m+[m[32m    }[m
+[32m+[m[32m    (out_dir / "metrics.json").write_text(json.dumps(metrics, indent=2), encoding="utf-8")[m
+[32m+[m[32m    print(f"[OK] Successfully merged {len(fold_rows)} folds into {out_dir / 'metrics.json'}:", flush=True)[m
+[32m+[m[32m    for key, s in metrics["summary"].items():[m
+[32m+[m[32m        if s:[m
+[32m+[m[32m            print(f"  {key:<20}: {s['mean']:.4f} \u00b1 {s['std']:.4f}", flush=True)[m
+[32m+[m[32m    if total_skipped > 0:[m
+[32m+[m[32m        print(f"  amp_skipped_steps   : {total_skipped} ({mean_skipped_pct:.2f}%)", flush=True)[m
+[32m+[m[32m        if mean_skipped_pct > 1.0:[m
+[32m+[m[32m            print("[WARNING] AMP skipped steps exceeded 1% of total steps!", flush=True)[m
+[32m+[m[32m    return metrics[m
+[32m+[m
+[32m+[m
+ def main():[m
+     ap = argparse.ArgumentParser()[m
+[31m-    ap.add_argument("base")[m
+[32m+[m[32m    ap.add_argument("base", nargs="?", default=".")[m
+     ap.add_argument("--epochs", type=int, default=40)[m
+     ap.add_argument("--folds", type=int, default=5)[m
+     ap.add_argument("--device", choices=("auto", "cuda", "cpu"), default="auto")[m
+[32m+[m[32m    ap.add_argument("--out-dir", type=str, default=None)[m
+[32m+[m[32m    ap.add_argument("--amp", action="store_true", help="Automatic Mixed Precision (FP16)")[m
+[32m+[m[32m    ap.add_argument("--resume", action="store_true", help="Resume from latest checkpoints")[m
+[32m+[m[32m    ap.add_argument("--checkpoint-every-epoch", action="store_true", help="Save latest checkpoint per epoch")[m
+[32m+[m[32m    ap.add_argument("--quick-test", action="store_true", help="Run fast 2-epoch 2-fold test")[m
+[32m+[m[32m    ap.add_argument("--fold", type=int, default=None, help="Train only a specific fold index")[m
+[32m+[m[32m    ap.add_argument("--show-ids", action="store_true", help="Print patient/case IDs in logs (default: anonymized counts)")[m
+[32m+[m[32m    ap.add_argument("--profile", action="store_true", help="Profile per-epoch time breakdown (data, train, save, val)")[m
+[32m+[m[32m    ap.add_argument("--cudnn-benchmark", action="store_true", help="Enable cuDNN auto-tuner (fast on static patch sizes)")[m
+[32m+[m[32m    ap.add_argument("--channels-last-3d", action="store_true", help="Use channels_last_3d memory format")[m
+[32m+[m[32m    ap.add_argument("--val-batch-size", type=int, default=1, help="Validation sliding window batch size (default: 1)")[m
+[32m+[m[32m    ap.add_argument("--merge-metrics", action="store_true", help="Merge per-fold metrics files and exit")[m
+[32m+[m[32m    ap.add_argument("--independent-fold-seeds", action="store_true", help="Seed each fold with SEED + fold (default: False)")[m
+[32m+[m[32m    ap.add_argument("--run-folds", nargs="+", type=int, default=None, help="Explicit list of fold indices to run (e.g. --run-folds 0 1)")[m
+[32m+[m[32m    ap.add_argument("--skip-completed", dest="skip_completed", action="store_true", default=True, help="Skip folds whose completed checkpoint and metrics match config (default: True)")[m
+[32m+[m[32m    ap.add_argument("--no-skip-completed", dest="skip_completed", action="store_false", help="Do not skip completed folds")[m
+[32m+[m[32m    ap.add_argument("--max-runtime-minutes", type=float, default=None, help="Maximum training runtime in minutes before clean checkpoint and exit")[m
+[32m+[m[32m    # Data Experiment options (OPT-IN, OFF by default, baseline behavior unchanged when off):[m
+[32m+[m[32m    ap.add_argument("--resample-patches-each-epoch", action="store_true",[m
+[32m+[m[32m                    help="Resample training patches each epoch in memory (requires --out-dir outside data/)")[m
+[32m+[m[32m    ap.add_argument("--augment", action="store_true",[m
+[32m+[m[32m                    help="Enable all 3D data augmentations (flip, intensity, noise) on training patches")[m
+[32m+[m[32m    ap.add_argument("--aug-flip", action="store_true",[m
+[32m+[m[32m                    help="Enable horizontal left-right flip augmentation (axis 1)")[m
+[32m+[m[32m    ap.add_argument("--aug-intensity", action="store_true",[m
+[32m+[m[32m                    help="Enable intensity scale [0.9, 1.1] and shift [-0.05, 0.05]")[m
+[32m+[m[32m    ap.add_argument("--aug-noise", action="store_true",[m
+[32m+[m[32m                    help="Enable additive Gaussian noise (sigma=0.01)")[m
+[32m+[m[32m    ap.add_argument("--legacy-case-folds", action="store_true",[m
+[32m+[m[32m                    help="Reproduce legacy case-level fold assignment instead of patient grouping")[m
+[32m+[m[32m    ap.add_argument("--allow-case-level-folds", action="store_true",[m
+[32m+[m[32m                    help="Allow case-level folds if patient_id is missing or blank in worklist.csv")[m
+[32m+[m[32m    ap.add_argument("--sampling-mix", type=str, default="lesion=0.7,bone=0.0,random=0.3",[m
+[32m+[m[32m                    help="Patch sampling proportions: lesion=A,bone=B,random=C (fractions summing to 1.0)")[m
+[32m+[m[32m    # Experimental options (OFF by default, changes experiment):[m
+[32m+[m[32m    ap.add_argument("--batch-size", type=int, default=1, help="[EXPERIMENT CHANGE] Training patch batch size (default: 1)")[m
+     args = ap.parse_args()[m
+ [m
+     random.seed(SEED)[m
+[36m@@ -317,47 +745,187 @@[m [mdef main():[m
+     torch.manual_seed(SEED)[m
+ [m
+     base = Path(args.base)[m
+[31m-    ann = base / "data" / "annotations"[m
+[31m-    files = sorted([m
+[31m-        p for p in ann.glob("*/*.seg.nrrd") if p.name == f"{p.parent.name}.seg.nrrd"[m
+[31m-    ) if ann.is_dir() else [][m
+[31m-    if not files:[m
+[31m-        raise SystemExit("No 3D annotations. Paint and save a case on the Annotate page first.")[m
+[31m-[m
+[31m-    classes = worklist_class(base)[m
+[32m+[m
+[32m+[m[32m    try:[m
+[32m+[m[32m        sampling_mix_dict = parse_sampling_mix(args.sampling_mix)[m
+[32m+[m[32m    except ValueError as e:[m
+[32m+[m[32m        raise SystemExit(f"[ERROR] {e}")[m
+[32m+[m
+[32m+[m[32m    is_data_experiment = bool([m
+[32m+[m[32m        args.resample_patches_each_epoch or args.augment or[m
+[32m+[m[32m        args.aug_flip or args.aug_intensity or args.aug_noise or[m
+[32m+[m[32m        (args.sampling_mix != "lesion=0.7,bone=0.0,random=0.3")[m
+[32m+[m[32m    )[m
+[32m+[m[32m    if is_data_experiment:[m
+[32m+[m[32m        if not args.out_dir:[m
+[32m+[m[32m            raise SystemExit([m
+[32m+[m[32m                "[ERROR] Output isolation violation: data experiment runs must explicitly specify "[m
+[32m+[m[32m                "--out-dir OUTSIDE data/ (e.g. --out-dir ../results3d_exp or /kaggle/working/results3d_exp)."[m
+[32m+[m[32m            )[m
+[32m+[m[32m        resolved_out = Path(args.out_dir).resolve()[m
+[32m+[m[32m        resolved_data = (base / "data").resolve()[m
+[32m+[m[32m        if ([m
+[32m+[m[32m            resolved_out == resolved_data or[m
+[32m+[m[32m            resolved_data in resolved_out.parents or[m
+[32m+[m[32m            "data/results3d" in str(args.out_dir).replace("\\", "/") or[m
+[32m+[m[32m            resolved_out == (resolved_data / "results3d")[m
+[32m+[m[32m        ):[m
+[32m+[m[32m            raise SystemExit([m
+[32m+[m[32m                f"[ERROR] Output isolation violation: --out-dir ({resolved_out}) is inside data/. "[m
+[32m+[m[32m                "Experiment runs must write to a directory outside data/ to protect baseline results."[m
+[32m+[m[32m            )[m
+[32m+[m
+[32m+[m[32m    data_config = {[m
+[32m+[m[32m        "resample_patches_each_epoch": bool(args.resample_patches_each_epoch),[m
+[32m+[m[32m        "augment": bool(args.augment),[m
+[32m+[m[32m        "aug_flip": bool(args.augment or args.aug_flip),[m
+[32m+[m[32m        "aug_intensity": bool(args.augment or args.aug_intensity),[m
+[32m+[m[32m        "aug_noise": bool(args.augment or args.aug_noise),[m
+[32m+[m[32m        "sampling_mix": sampling_mix_dict,[m
+[32m+[m[32m    }[m
+[32m+[m
+[32m+[m[32m    out_dir = Path(args.out_dir) if args.out_dir else base / "data" / "results3d"[m
+[32m+[m
+[32m+[m[32m    if args.merge_metrics:[m
+[32m+[m[32m        merge_metrics_files(out_dir, args.folds)[m
+[32m+[m[32m        return[m
+[32m+[m
+[32m+[m[32m    ann = None[m
+[32m+[m[32m    for candidate in [[m
+[32m+[m[32m        base / "data" / "annotations",[m
+[32m+[m[32m        base / "annotations",[m
+[32m+[m[32m        base / "bme_dataset_bundle" / "data" / "annotations",[m
+[32m+[m[32m        base / "bme_dataset_bundle" / "annotations",[m
+[32m+[m[32m    ]:[m
+[32m+[m[32m        if candidate.is_dir():[m
+[32m+[m[32m            ann = candidate[m
+[32m+[m[32m            break[m
+[32m+[m[32m    if ann is None:[m
+[32m+[m[32m        cands = [p for p in base.rglob("annotations") if p.is_dir()][m
+[32m+[m[32m        ann = cands[0] if cands else None[m
+[32m+[m
+[32m+[m[32m    case_ids = [][m
+[32m+[m[32m    if ann and ann.is_dir():[m
+[32m+[m[32m        for d in ann.iterdir():[m
+[32m+[m[32m            if d.is_dir():[m
+[32m+[m[32m                if list(d.glob("*_labels.nii*")) or list(d.glob("*.seg.nrrd")):[m
+[32m+[m[32m                    case_ids.append(d.name)[m
+[32m+[m[32m        case_ids.sort()[m
+[32m+[m
+[32m+[m[32m    if not case_ids:[m
+[32m+[m[32m        all_labels = list(base.rglob("*_labels.nii*")) + list(base.rglob("*.seg.nrrd"))[m
+[32m+[m[32m        case_ids = sorted(list({p.parent.name for p in all_labels if p.is_file()}))[m
+[32m+[m
+[32m+[m[32m    if not case_ids:[m
+[32m+[m[32m        raise SystemExit(f"No 3D annotations found under {base}. Paint and save a case on the Annotate page first.")[m
+[32m+[m
+[32m+[m[32m    if args.quick_test:[m
+[32m+[m[32m        case_ids = case_ids[:min(len(case_ids), 4)][m
+[32m+[m[32m        args.epochs = min(args.epochs, 2)[m
+[32m+[m[32m        args.folds = min(args.folds, 2)[m
+[32m+[m[32m        print(f"[QUICK TEST] Smoke test mode: {len(case_ids)} cases, {args.epochs} epochs, {args.folds} folds.", flush=True)[m
+[32m+[m
+[32m+[m[32m    t_pipeline_start = time.time()[m
+[32m+[m[32m    classes, patients = load_worklist_metadata(base)[m
+     print("Loading volumes", flush=True)[m
+     print("One scan at a time. Only the training patches are kept, then the volume is released.", flush=True)[m
+     rng_load = np.random.default_rng(SEED)[m
+     cases = [][m
+[31m-    for p in files:[m
+[31m-        item = load_case(base, p.parent.name)[m
+[32m+[m[32m    t_load_start = time.time()[m
+[32m+[m[32m    t_sampling_total = 0.0[m
+[32m+[m[32m    for cid in case_ids:[m
+[32m+[m[32m        item = load_case(base, cid)[m
+         if not item:[m
+             continue[m
+         image = pad_volume(item["image"])[m
+         labels = pad_volume(item["labels"])[m
+[32m+[m[32m        t_s0 = time.time()[m
+         patches, patch_labels = [], [][m
+         for _ in range(PATCHES_PER_CASE):[m
+[31m-            origin = sample_origin(image.shape, labels, rng_load)[m
+[32m+[m[32m            origin = sample_origin(image.shape, labels, rng_load, sampling_mix_dict)[m
+             patches.append(np.ascontiguousarray(crop(image, origin)))[m
+             patch_labels.append(np.ascontiguousarray(crop(labels, origin)))[m
+[31m-        cases.append({[m
+[32m+[m[32m        t_sampling_total += (time.time() - t_s0)[m
+[32m+[m[32m        pid = patients.get(item["id"], "").strip()[m
+[32m+[m[32m        case_item = {[m
+             "id": item["id"],[m
+[32m+[m[32m            "patient_id": pid,[m
+             "cls": classes.get(item["id"], ""),[m
+             "bme_voxels": item["bme_voxels"],[m
+             "patches": patches,[m
+             "patch_labels": patch_labels,[m
+[31m-        })[m
+[32m+[m[32m        }[m
+[32m+[m[32m        if args.resample_patches_each_epoch:[m
+[32m+[m[32m            case_item["volume_image"] = np.ascontiguousarray(image, dtype=np.float32)[m
+[32m+[m[32m            case_item["volume_labels"] = np.ascontiguousarray(labels, dtype=np.uint8)[m
+[32m+[m[32m        cases.append(case_item)[m
+         del item, image, labels, patches, patch_labels[m
+         release()[m
+[32m+[m[32m    t_load_total = max(0.0, (time.time() - t_load_start) - t_sampling_total)[m
+     if len(cases) < 2:[m
+         raise SystemExit(f"Need at least 2 annotated volumes to hold one out. Found {len(cases)}.")[m
+ [m
+     n_bme = sum(1 for c in cases if c["bme_voxels"] > 0)[m
+     n_neg = len(cases) - n_bme[m
+     folds_n = max(2, min(args.folds, len(cases)))[m
+[32m+[m
+[32m+[m[32m    # Fold assignment logic[m
+[32m+[m[32m    if args.legacy_case_folds:[m
+[32m+[m[32m        fold_mode = "legacy_case_level"[m
+[32m+[m[32m        for c in cases:[m
+[32m+[m[32m            if not c.get("patient_id"):[m
+[32m+[m[32m                c["patient_id"] = c["id"][m
+[32m+[m[32m        order = cases[:][m
+[32m+[m[32m        random.Random(SEED).shuffle(order)[m
+[32m+[m[32m        groups: list[list[dict]] = [[] for _ in range(folds_n)][m
+[32m+[m[32m        for i, case in enumerate(order):[m
+[32m+[m[32m            groups[i % folds_n].append(case)[m
+[32m+[m[32m        patient_count = len(set(c["patient_id"] for c in cases))[m
+[32m+[m[32m    else:[m
+[32m+[m[32m        missing_patients = [c["id"] for c in cases if not c.get("patient_id")][m
+[32m+[m[32m        if missing_patients:[m
+[32m+[m[32m            if not args.allow_case_level_folds:[m
+[32m+[m[32m                raise SystemExit([m
+[32m+[m[32m                    f"[ERROR] Found {len(missing_patients)} cases with missing or blank patient_id in worklist.csv. "[m
+[32m+[m[32m                    "Patient-grouped folds cannot be formed safely without patient IDs. "[m
+[32m+[m[32m                    "To allow case-level splits, pass --allow-case-level-folds, or use --legacy-case-folds."[m
+[32m+[m[32m                )[m
+[32m+[m[32m            fold_mode = "case_level"[m
+[32m+[m[32m            for c in cases:[m
+[32m+[m[32m                if not c.get("patient_id"):[m
+[32m+[m[32m                    c["patient_id"] = c["id"][m
+[32m+[m[32m        else:[m
+[32m+[m[32m            fold_mode = "patient_grouped"[m
+[32m+[m
+[32m+[m[32m        # 1. Group cases by patient[m
+[32m+[m[32m        patient_to_cases: dict[str, list[dict]] = {}[m
+[32m+[m[32m        for case in cases:[m
+[32m+[m[32m            pid = case["patient_id"][m
+[32m+[m[32m            if pid not in patient_to_cases:[m
+[32m+[m[32m                patient_to_cases[pid] = [][m
+[32m+[m[32m            patient_to_cases[pid].append(case)[m
+[32m+[m
+[32m+[m[32m        # Sort cases within each patient group by case ID for determinism[m
+[32m+[m[32m        for pid in patient_to_cases:[m
+[32m+[m[32m            patient_to_cases[pid].sort(key=lambda c: c["id"])[m
+[32m+[m
+[32m+[m[32m        # 2. Shuffle sorted unique patient IDs with SEED[m
+[32m+[m[32m        unique_patient_ids = sorted(patient_to_cases.keys())[m
+[32m+[m[32m        rng_patients = random.Random(SEED)[m
+[32m+[m[32m        rng_patients.shuffle(unique_patient_ids)[m
+[32m+[m
+[32m+[m[32m        # 3. Assign each patient group to the currently smallest fold (ties to lowest fold index)[m
+[32m+[m[32m        groups = [[] for _ in range(folds_n)][m
+[32m+[m[32m        for pid in unique_patient_ids:[m
+[32m+[m[32m            p_cases = patient_to_cases[pid][m
+[32m+[m[32m            smallest_fold_idx = min(range(folds_n), key=lambda f: len(groups[f]))[m
+[32m+[m[32m            groups[smallest_fold_idx].extend(p_cases)[m
+[32m+[m
+[32m+[m[32m        patient_count = len(unique_patient_ids)[m
+[32m+[m
+     print([m
+[31m-        f"{len(cases)} volumes ({n_bme} with edema, {n_neg} without). "[m
+[31m-        f"Using {folds_n} patient-level folds. Seed {SEED}.",[m
+[32m+[m[32m        f"{len(cases)} volumes across {patient_count} patients ({n_bme} with edema, {n_neg} without). "[m
+[32m+[m[32m        f"Using {folds_n} {fold_mode} folds. Seed {SEED}.",[m
+         flush=True,[m
+     )[m
+     print([m
+[36m@@ -368,51 +936,363 @@[m [mdef main():[m
+     )[m
+ [m
+     device = resolve_device(args.device)[m
+[31m-    guard_device(device)[m
+[32m+[m[32m    guard_device(device, cudnn_benchmark=args.cudnn_benchmark)[m
+     print(f"device {device}", flush=True)[m
+     if device == "cuda":[m
+[31m-        print("GPU memory capped at 65% so the desktop is not starved.", flush=True)[m
+[31m-    order = cases[:][m
+[31m-    random.Random(SEED).shuffle(order)[m
+[31m-    groups: list[list[dict]] = [[] for _ in range(folds_n)][m
+[31m-    for i, case in enumerate(order):[m
+[31m-        groups[i % folds_n].append(case)[m
+[31m-[m
+[31m-    out_dir = base / "data" / "results3d"[m
+[32m+[m[32m        print(f"GPU memory capped at 65% so the desktop is not starved. cuDNN benchmark: {args.cudnn_benchmark}.", flush=True)[m
+[32m+[m
+[32m+[m[32m    loss_config = {"type": "dice_focal", "bone_weight": 1.0, "edema_weight": 1.0}[m
+[32m+[m[32m    current_fingerprint, fingerprint_payload = compute_dataset_fingerprint([m
+[32m+[m[32m        case_ids=[c["id"] for c in cases],[m
+[32m+[m[32m        groups=groups,[m
+[32m+[m[32m        batch_size=1,[m
+[32m+[m[32m        patches_per_case=PATCHES_PER_CASE,[m
+[32m+[m[32m        lesion_sampling_ratio=0.7,[m
+[32m+[m[32m        learning_rate=1e-3,[m
+[32m+[m[32m        loss_config=loss_config,[m
+[32m+[m[32m        independent_fold_seeds=bool(args.independent_fold_seeds),[m
+[32m+[m[32m        data_flags=data_config,[m
+[32m+[m[32m        fold_mode=fold_mode,[m
+[32m+[m[32m        patient_count=patient_count,[m
+[32m+[m[32m        sampling_mix=sampling_mix_dict,[m
+[32m+[m[32m    )[m
+[32m+[m[32m    print(f"Dataset fingerprint: {current_fingerprint[:16]}... ({len(cases)} cases, {folds_n} folds, mode: {fold_mode})", flush=True)[m
+[32m+[m
+     out_dir.mkdir(parents=True, exist_ok=True)[m
+[32m+[m
+[32m+[m[32m    partial_path = out_dir / "metrics_partial.json"[m
+     fold_rows = [][m
+[32m+[m[32m    if args.resume and partial_path.exists():[m
+[32m+[m[32m        try:[m
+[32m+[m[32m            fold_rows = json.loads(partial_path.read_text(encoding="utf-8"))[m
+[32m+[m[32m        except Exception:[m
+[32m+[m[32m            fold_rows = [][m
+[32m+[m
+[32m+[m[32m    epoch_times = [][m
+[32m+[m[32m    use_amp = args.amp and (device == "cuda")[m
+[32m+[m
+[32m+[m[32m    if args.run_folds is not None:[m
+[32m+[m[32m        folds_to_run = [f for f in args.run_folds if 0 <= f < folds_n][m
+[32m+[m[32m    elif args.fold is not None:[m
+[32m+[m[32m        folds_to_run = [args.fold][m
+[32m+[m[32m    else:[m
+[32m+[m[32m        folds_to_run = list(range(folds_n))[m
+[32m+[m
+[32m+[m[32m    t_train_accum = 0.0[m
+[32m+[m[32m    t_val_accum = 0.0[m
+[32m+[m[32m    t_save_accum = 0.0[m
+[32m+[m[32m    time_guard_triggered = False[m
+[32m+[m
+[32m+[m[32m    for fold in folds_to_run:[m
+[32m+[m[32m        val = groups[fold][m
+[32m+[m[32m        if args.independent_fold_seeds:[m
+[32m+[m[32m            random.seed(SEED + fold)[m
+[32m+[m[32m            np.random.seed(SEED + fold)[m
+[32m+[m[32m            torch.manual_seed(SEED + fold)[m
+[32m+[m
+[32m+[m[32m        final_ckpt = out_dir / f"fold_{fold}.pt"[m
+[32m+[m[32m        final_metric = out_dir / f"metrics_fold_{fold}.json"[m
+[32m+[m[32m        should_check_skip = args.skip_completed and (final_ckpt.exists() or final_metric.exists())[m
+[32m+[m[32m        if should_check_skip and final_ckpt.exists():[m
+[32m+[m[32m            try:[m
+[32m+[m[32m                ckpt = torch.load(final_ckpt, map_location="cpu", weights_only=False)[m
+[32m+[m[32m                ckpt_seed = ckpt.get("seed")[m
+[32m+[m[32m                ckpt_patch = ckpt.get("patch")[m
+[32m+[m[32m                ckpt_data_cfg = ckpt.get("data_config")[m
+[32m+[m[32m                ckpt_fp = ckpt.get("fingerprint")[m
+[32m+[m[32m                ckpt_val_cases = ckpt.get("val_cases")[m
+[32m+[m
+[32m+[m[32m                m_epochs = None[m
+[32m+[m[32m                if final_metric.exists():[m
+[32m+[m[32m                    try:[m
+[32m+[m[32m                        m_row = json.loads(final_metric.read_text(encoding="utf-8"))[m
+[32m+[m[32m                        m_epochs = m_row.get("epochs")[m
+[32m+[m[32m                        m_seed = m_row.get("seed")[m
+[32m+[m[32m                        if m_seed is not None and ckpt_seed is None:[m
+[32m+[m[32m                            ckpt_seed = m_seed[m
+[32m+[m[32m                        if ckpt_fp is None:[m
+[32m+[m[32m                            ckpt_fp = m_row.get("fingerprint")[m
+[32m+[m[32m                        if ckpt_val_cases is None:[m
+[32m+[m[32m                            ckpt_val_cases = m_row.get("val_cases") or m_row.get("val")[m
+[32m+[m[32m                    except Exception:[m
+[32m+[m[32m                        pass[m
+[32m+[m
+[32m+[m[32m                mismatches = [][m
+[32m+[m[32m                if ckpt_seed is not None and ckpt_seed != SEED:[m
+[32m+[m[32m                    mismatches.append(f"seed (saved {ckpt_seed} != current {SEED})")[m
+[32m+[m[32m                if ckpt_patch is not None and list(ckpt_patch) != list(PATCH):[m
+[32m+[m[32m                    mismatches.append(f"patch shape (saved {ckpt_patch} != current {list(PATCH)})")[m
+[32m+[m[32m                if ckpt_data_cfg is not None and ckpt_data_cfg != data_config:[m
+[32m+[m[32m                    mismatches.append(f"data_config (saved {ckpt_data_cfg} != current {data_config})")[m
+[32m+[m[32m                if m_epochs is not None and m_epochs != args.epochs:[m
+[32m+[m[32m                    mismatches.append(f"epochs (saved {m_epochs} != current {args.epochs})")[m
+[32m+[m[32m                ckpt_fold_mode = ckpt.get("fold_mode")[m
+[32m+[m[32m                if ckpt_fold_mode is not None and ckpt_fold_mode != fold_mode:[m
+[32m+[m[32m                    mismatches.append(f"fold_mode (saved {ckpt_fold_mode} != current {fold_mode})")[m
+[32m+[m[32m                if ckpt_fp is not None and ckpt_fp != current_fingerprint:[m
+[32m+[m[32m                    mismatches.append(f"dataset fingerprint (saved {ckpt_fp} != current {current_fingerprint})")[m
+[32m+[m[32m                current_val = sorted([c["id"] for c in val])[m
+[32m+[m[32m                if ckpt_val_cases is not None and sorted(ckpt_val_cases) != current_val:[m
+[32m+[m[32m                    mismatches.append(f"val_cases (saved {ckpt_val_cases} != current {current_val})")[m
+[32m+[m
+[32m+[m[32m                if mismatches:[m
+[32m+[m[32m                    raise ValueError([m
+[32m+[m[32m                        f"[ERROR] Refusing to skip completed fold {fold}: recorded configuration mismatch in existing checkpoint {final_ckpt.name}!\n"[m
+[32m+[m[32m                        f"  Mismatches: {'; '.join(mismatches)}.\n"[m
+[32m+[m[32m                        "  To test a different configuration, specify a separate --out-dir or remove obsolete checkpoints."[m
+[32m+[m[32m                    )[m
+[32m+[m
+[32m+[m[32m                print(f"fold {fold}: already completed ({final_ckpt.name} verified: seed={SEED}, epochs={args.epochs}), skipping training.", flush=True)[m
+[32m+[m[32m                if not any(r.get("fold") == fold for r in fold_rows):[m
+[32m+[m[32m                    if final_metric.exists():[m
+[32m+[m[32m                        try:[m
+[32m+[m[32m                            m_data = json.loads(final_metric.read_text(encoding="utf-8"))[m
+[32m+[m[32m                            fold_rows.append(m_data)[m
+[32m+[m[32m                        except Exception:[m
+[32m+[m[32m                            pass[m
+[32m+[m[32m                    else:[m
+[32m+[m[32m                        m_file = out_dir / "metrics.json"[m
+[32m+[m[32m                        if m_file.exists():[m
+[32m+[m[32m                            try:[m
+[32m+[m[32m                                m_data = json.loads(m_file.read_text(encoding="utf-8"))[m
+[32m+[m[32m                                for r in m_data.get("per_fold", []):[m
+[32m+[m[32m                                    if r.get("fold") == fold:[m
+[32m+[m[32m                                        fold_rows.append(r)[m
+[32m+[m[32m                                        break[m
+[32m+[m[32m                            except Exception:[m
+[32m+[m[32m                                pass[m
+[32m+[m[32m                continue[m
+[32m+[m[32m            except ValueError:[m
+[32m+[m[32m                raise[m
+[32m+[m[32m            except Exception as e:[m
+[32m+[m[32m                print(f"fold {fold}: could not verify existing checkpoint ({e}), training fresh.", flush=True)[m
+ [m
+[31m-    for fold, val in enumerate(groups):[m
+         train = [c for g in groups if g is not val for c in g][m
+[31m-        print(f"fold {fold}: train {[c['id'] for c in train]}  val {[c['id'] for c in val]}", flush=True)[m
+[32m+[m[32m        if args.show_ids:[m
+[32m+[m[32m            print(f"fold {fold}: train {[c['id'] for c in train]}  val {[c['id'] for c in val]}", flush=True)[m
+[32m+[m[32m        else:[m
+[32m+[m[32m            print(f"fold {fold}: train {len(train)} cases  val {len(val)} cases", flush=True)[m
+[32m+[m
+         model = UNet3D().to(device)[m
+[32m+[m[32m        if args.channels_last_3d:[m
+[32m+[m[32m            model = model.to(memory_format=torch.channels_last_3d)[m
+         opt = torch.optim.Adam(model.parameters(), lr=1e-3)[m
+[31m-        for epoch in range(1, args.epochs + 1):[m
+[32m+[m[32m        scaler = torch.cuda.amp.GradScaler() if use_amp else None[m
+[32m+[m[32m        start_epoch = 1[m
+[32m+[m
+[32m+[m[32m        latest_ckpt = out_dir / f"fold_{fold}_latest.pt"[m
+[32m+[m[32m        if args.resume and latest_ckpt.exists():[m
+[32m+[m[32m            try:[m
+[32m+[m[32m                ckpt = torch.load(latest_ckpt, map_location=device, weights_only=False)[m
+[32m+[m[32m                ckpt_data_cfg = ckpt.get("data_config")[m
+[32m+[m[32m                ckpt_fp = ckpt.get("fingerprint")[m
+[32m+[m[32m                ckpt_val_cases = ckpt.get("val_cases")[m
+[32m+[m[32m                ckpt_fold_mode = ckpt.get("fold_mode")[m
+[32m+[m[32m                if ckpt_fold_mode is not None and ckpt_fold_mode != fold_mode:[m
+[32m+[m[32m                    raise ValueError([m
+[32m+[m[32m                        f"Cannot resume fold {fold}: checkpoint {latest_ckpt.name} fold_mode {ckpt_fold_mode} != current {fold_mode}."[m
+[32m+[m[32m                    )[m
+[32m+[m[32m                if ckpt_data_cfg is not None and ckpt_data_cfg != data_config:[m
+[32m+[m[32m                    raise ValueError([m
+[32m+[m[32m                        f"Cannot resume fold {fold}: checkpoint {latest_ckpt.name} was trained with data_config={ckpt_data_cfg}, "[m
+[32m+[m[32m                        f"but current run specifies {data_config}. To test a new experiment, train in a separate --out-dir."[m
+[32m+[m[32m                    )[m
+[32m+[m[32m                if ckpt_fp is not None and ckpt_fp != current_fingerprint:[m
+[32m+[m[32m                    raise ValueError([m
+[32m+[m[32m                        f"Cannot resume fold {fold}: checkpoint {latest_ckpt.name} has dataset fingerprint {ckpt_fp}, "[m
+[32m+[m[32m                        f"but current run specifies {current_fingerprint}. Refusing to resume with mismatched data/config."[m
+[32m+[m[32m                    )[m
+[32m+[m[32m                current_val = sorted([c["id"] for c in val])[m
+[32m+[m[32m                if ckpt_val_cases is not None and sorted(ckpt_val_cases) != current_val:[m
+[32m+[m[32m                    raise ValueError([m
+[32m+[m[32m                        f"Cannot resume fold {fold}: checkpoint {latest_ckpt.name} validation cases {ckpt_val_cases} != current {current_val}."[m
+[32m+[m[32m                    )[m
+[32m+[m[32m                model.load_state_dict(ckpt["state"])[m
+[32m+[m[32m                if "opt" in ckpt:[m
+[32m+[m[32m                    opt.load_state_dict(ckpt["opt"])[m
+[32m+[m[32m                if scaler and "scaler" in ckpt and ckpt["scaler"] is not None:[m
+[32m+[m[32m                    scaler.load_state_dict(ckpt["scaler"])[m
+[32m+[m[32m                start_epoch = int(ckpt.get("epoch", 0)) + 1[m
+[32m+[m[32m                print(f"fold {fold}: resumed from epoch {start_epoch - 1} ({latest_ckpt.name})", flush=True)[m
+[32m+[m[32m            except ValueError:[m
+[32m+[m[32m                raise[m
+[32m+[m[32m            except Exception as e:[m
+[32m+[m[32m                print(f"fold {fold}: failed to resume latest checkpoint ({e}), starting fresh", flush=True)[m
+[32m+[m[32m                start_epoch = 1[m
+[32m+[m
+[32m+[m[32m        amp_skipped_total = 0[m
+[32m+[m[32m        total_steps_fold = 0[m
+[32m+[m
+[32m+[m[32m        for epoch in range(start_epoch, args.epochs + 1):[m
+[32m+[m[32m            t_ep_start = time.time()[m
+[32m+[m[32m            t_data_total = 0.0[m
+[32m+[m[32m            t_train_total = 0.0[m
+             model.train()[m
+             total = 0.0[m
+             steps = 0[m
+[32m+[m[32m            amp_skipped_epoch = 0[m
+[32m+[m[32m            seed_base = (SEED + fold) if args.independent_fold_seeds else SEED[m
+[32m+[m[32m            rng_epoch_data = np.random.default_rng(np.random.SeedSequence([seed_base, fold, epoch]))[m
+[32m+[m
+[32m+[m[32m            do_flip = bool(args.augment or args.aug_flip)[m
+[32m+[m[32m            do_intensity = bool(args.augment or args.aug_intensity)[m
+[32m+[m[32m            do_noise = bool(args.augment or args.aug_noise)[m
+[32m+[m[32m            has_aug = do_flip or do_intensity or do_noise[m
+[32m+[m
+             order_cases = train[:][m
+             random.shuffle(order_cases)[m
+[32m+[m
+             for case in order_cases:[m
+[31m-                for image, labels in zip(case["patches"], case["patch_labels"]):[m
+[32m+[m[32m                t_d0 = time.time()[m
+[32m+[m[32m                if args.resample_patches_each_epoch:[m
+[32m+[m[32m                    cur_patches = [][m
+[32m+[m[32m                    cur_labels = [][m
+[32m+[m[32m                    vol_img = case["volume_image"][m
+[32m+[m[32m                    vol_lbl = case["volume_labels"][m
+[32m+[m[32m                    for _ in range(PATCHES_PER_CASE):[m
+[32m+[m[32m                        origin = sample_origin(vol_img.shape, vol_lbl, rng_epoch_data, sampling_mix_dict)[m
+[32m+[m[32m                        p_img = np.ascontiguousarray(crop(vol_img, origin))[m
+[32m+[m[32m                        p_lbl = np.ascontiguousarray(crop(vol_lbl, origin))[m
+[32m+[m[32m                        if has_aug:[m
+[32m+[m[32m                            p_img, p_lbl = apply_augmentation([m
+[32m+[m[32m                                p_img, p_lbl, rng_epoch_data,[m
+[32m+[m[32m                                do_flip=do_flip, do_intensity=do_intensity, do_noise=do_noise[m
+[32m+[m[32m                            )[m
+[32m+[m[32m                        cur_patches.append(p_img)[m
+[32m+[m[32m                        cur_labels.append(p_lbl)[m
+[32m+[m[32m                elif has_aug:[m
+[32m+[m[32m                    cur_patches = [][m
+[32m+[m[32m                    cur_labels = [][m
+[32m+[m[32m                    for p_img, p_lbl in zip(case["patches"], case["patch_labels"]):[m
+[32m+[m[32m                        a_img, a_lbl = apply_augmentation([m
+[32m+[m[32m                            p_img, p_lbl, rng_epoch_data,[m
+[32m+[m[32m                            do_flip=do_flip, do_intensity=do_intensity, do_noise=do_noise[m
+[32m+[m[32m                        )[m
+[32m+[m[32m                        cur_patches.append(a_img)[m
+[32m+[m[32m                        cur_labels.append(a_lbl)[m
+[32m+[m[32m                else:[m
+[32m+[m[32m                    cur_patches = case["patches"][m
+[32m+[m[32m                    cur_labels = case["patch_labels"][m
+[32m+[m[32m                t_data_total += (time.time() - t_d0)[m
+[32m+[m
+[32m+[m[32m                for image, labels in zip(cur_patches, cur_labels):[m
+[32m+[m[32m                    t_d0 = time.time()[m
+                     x = torch.from_numpy(image).float().unsqueeze(0).unsqueeze(0).to(device)[m
+[32m+[m[32m                    if args.channels_last_3d:[m
+[32m+[m[32m                        x = x.to(memory_format=torch.channels_last_3d)[m
+                     lab = torch.from_numpy(labels).to(device)[m
+                     tgt, valid = targets(lab)[m
+[32m+[m[32m                    t_data_total += (time.time() - t_d0)[m
+[32m+[m
+[32m+[m[32m                    t_tr0 = time.time()[m
+                     opt.zero_grad(set_to_none=True)[m
+[31m-                    loss = dice_focal(model(x)[0], tgt, valid)[m
+[31m-                    loss.backward()[m
+[31m-                    opt.step()[m
+[31m-                    total += float(loss)[m
+[32m+[m[32m                    total_steps_fold += 1[m
+[32m+[m[32m                    if use_amp:[m
+[32m+[m[32m                        with torch.amp.autocast(device_type="cuda"):[m
+[32m+[m[32m                            logits = model(x)[0][m
+[32m+[m[32m                        # Compute loss in full FP32 precision[m
+[32m+[m[32m                        loss = dice_focal(logits.float(), tgt, valid)[m
+[32m+[m[32m                        if not torch.isfinite(loss):[m
+[32m+[m[32m                            amp_skipped_epoch += 1[m
+[32m+[m[32m                            amp_skipped_total += 1[m
+[32m+[m[32m                            continue[m
+[32m+[m[32m                        scale_before = scaler.get_scale()[m
+[32m+[m[32m                        scaler.scale(loss).backward()[m
+[32m+[m[32m                        scaler.step(opt)[m
+[32m+[m[32m                        scaler.update()[m
+[32m+[m[32m                        scale_after = scaler.get_scale()[m
+[32m+[m[32m                        if scale_after < scale_before:[m
+[32m+[m[32m                            amp_skipped_epoch += 1[m
+[32m+[m[32m                            amp_skipped_total += 1[m
+[32m+[m[32m                    else:[m
+[32m+[m[32m                        loss = dice_focal(model(x)[0], tgt, valid)[m
+[32m+[m[32m                        loss.backward()[m
+[32m+[m[32m                        opt.step()[m
+[32m+[m[32m                    total += float(loss.detach())[m
+                     steps += 1[m
+[32m+[m[32m                    t_tr_delta = time.time() - t_tr0[m
+[32m+[m[32m                    t_train_total += t_tr_delta[m
+[32m+[m[32m                    t_train_accum += t_tr_delta[m
+                     del x, lab, tgt, valid, loss[m
+[31m-            print(f"epoch {epoch}/{args.epochs}  loss={total / max(steps, 1):.4f}", flush=True)[m
+ [m
+[32m+[m[32m            t_save_start = time.time()[m
+[32m+[m[32m            if args.checkpoint_every_epoch or args.max_runtime_minutes is not None:[m
+[32m+[m[32m                torch.save([m
+[32m+[m[32m                    {[m
+[32m+[m[32m                        "epoch": epoch,[m
+[32m+[m[32m                        "state": model.state_dict(),[m
+[32m+[m[32m                        "opt": opt.state_dict(),[m
+[32m+[m[32m                        "scaler": scaler.state_dict() if scaler else None,[m
+[32m+[m[32m                        "patch": PATCH,[m
+[32m+[m[32m                        "seed": SEED,[m
+[32m+[m[32m                        "data_config": data_config,[m
+[32m+[m[32m                        "fold_mode": fold_mode,[m
+[32m+[m[32m                        "patient_count": patient_count,[m
+[32m+[m[32m                        "sampling_mix": sampling_mix_dict,[m
+[32m+[m[32m                        "fingerprint": current_fingerprint,[m
+[32m+[m[32m                        "val_cases": sorted([c["id"] for c in val]),[m
+[32m+[m[32m                    },[m
+[32m+[m[32m                    latest_ckpt,[m
+[32m+[m[32m                )[m
+[32m+[m[32m            t_save_total = time.time() - t_save_start[m
+[32m+[m[32m            t_save_accum += t_save_total[m
+[32m+[m
+[32m+[m[32m            ep_time = time.time() - t_ep_start[m
+[32m+[m[32m            epoch_times.append(ep_time)[m
+[32m+[m[32m            mean_ep_time = float(np.mean(epoch_times[-10:]))[m
+[32m+[m[32m            rem_ep = (args.epochs - epoch) + ((folds_n - 1 - fold) * args.epochs)[m
+[32m+[m[32m            eta_sec = int(rem_ep * mean_ep_time)[m
+[32m+[m[32m            eta_str = f"{eta_sec // 60}m {eta_sec % 60:02d}s" if eta_sec >= 60 else f"{eta_sec}s"[m
+[32m+[m[32m            amp_info = f", amp_skipped={amp_skipped_epoch}" if (use_amp and amp_skipped_epoch > 0) else ""[m
+[32m+[m[32m            if args.profile:[m
+[32m+[m[32m                print([m
+[32m+[m[32m                    f"epoch {epoch}/{args.epochs}  loss={total / max(steps, 1):.4f}  "[m
+[32m+[m[32m                    f"[{ep_time:.1f}s: data={t_data_total:.2f}s, train={t_train_total:.2f}s, save={t_save_total:.2f}s{amp_info} | ETA: {eta_str}]",[m
+[32m+[m[32m                    flush=True,[m
+[32m+[m[32m                )[m
+[32m+[m[32m            else:[m
+[32m+[m[32m                print(f"epoch {epoch}/{args.epochs}  loss={total / max(steps, 1):.4f}  [{ep_time:.1f}s/epoch | ETA: {eta_str}{amp_info}]", flush=True)[m
+[32m+[m
+[32m+[m[32m            if args.max_runtime_minutes is not None:[m
+[32m+[m[32m                elapsed_min = (time.time() - t_pipeline_start) / 60.0[m
+[32m+[m[32m                if elapsed_min >= args.max_runtime_minutes:[m
+[32m+[m[32m                    print("\n" + "=" * 70, flush=True)[m
+[32m+[m[32m                    print(f"[TIME GUARD] Runtime limit reached: {elapsed_min:.2f}m >= {args.max_runtime_minutes:.2f}m.", flush=True)[m
+[32m+[m[32m                    print(f"Completed epoch {epoch}/{args.epochs} of fold {fold}.", flush=True)[m
+[32m+[m[32m                    print(f"Resumable checkpoint safely saved to: {latest_ckpt.name}", flush=True)[m
+[32m+[m[32m                    print(f"To resume in next version: run with --resume. Training will resume from epoch {epoch + 1}.", flush=True)[m
+[32m+[m[32m                    print("Exiting cleanly.", flush=True)[m
+[32m+[m[32m                    print("=" * 70 + "\n", flush=True)[m
+[32m+[m[32m                    time_guard_triggered = True[m
+[32m+[m[32m                    status_payload = {[m
+[32m+[m[32m                        "fold": fold,[m
+[32m+[m[32m                        "status": "incomplete",[m
+[32m+[m[32m                        "epoch_reached": epoch,[m
+[32m+[m[32m                        "target_epochs": args.epochs,[m
+[32m+[m[32m                        "fingerprint": current_fingerprint,[m
+[32m+[m[32m                        "val_cases": sorted([c["id"] for c in val]),[m
+[32m+[m[32m                        "timestamp": datetime.now(timezone.utc).isoformat(),[m
+[32m+[m[32m                    }[m
+[32m+[m[32m                    (out_dir / f"status_fold_{fold}.json").write_text(json.dumps(status_payload, indent=2), encoding="utf-8")[m
+[32m+[m[32m                    break[m
+[32m+[m
+[32m+[m[32m        if time_guard_triggered:[m
+[32m+[m[32m            break[m
+[32m+[m
+[32m+[m[32m        t_val_start = time.time()[m
+         bone_d, bme_d, sens, fps, present_hit, present_n = [], [], [], [], 0, 0[m
+[31m-        for case in val:[m
+[32m+[m[32m        for val_idx, case in enumerate(val, 1):[m
+             loaded = load_case(base, case["id"])[m
+             if not loaded:[m
+                 continue[m
+[31m-            pred = predict_volume(model, loaded["image"], device)[m
+[32m+[m[32m            pred = predict_volume([m
+[32m+[m[32m                model,[m
+[32m+[m[32m                loaded["image"],[m
+[32m+[m[32m                device,[m
+[32m+[m[32m                val_batch_size=args.val_batch_size,[m
+[32m+[m[32m                use_amp=use_amp,[m
+[32m+[m[32m                channels_last=args.channels_last_3d,[m
+[32m+[m[32m            )[m
+             bone_d.append(dice(loaded["labels"], pred, 1))[m
+             bme_d.append(dice(loaded["labels"], pred, 2))[m
+             s, fp = lesion_stats(loaded["labels"], pred)[m
+[36m@@ -422,60 +1302,176 @@[m [mdef main():[m
+             pr_pos = bool((pred == 2).any())[m
+             present_n += 1[m
+             present_hit += int(gt_pos == pr_pos)[m
+[32m+[m[32m            prefix = f"  {case['id']}" if args.show_ids else f"  val case {val_idx}/{len(val)}"[m
+             print([m
+[31m-                f"  {case['id']}  bone_dice={bone_d[-1]:.3f}  bme_dice={bme_d[-1]:.3f}  "[m
+[32m+[m[32m                f"{prefix}  bone_dice={bone_d[-1]:.3f}  bme_dice={bme_d[-1]:.3f}  "[m
+                 f"edema={'yes' if pr_pos else 'no'}",[m
+                 flush=True,[m
+             )[m
+             del loaded, pred[m
+             release()[m
+[32m+[m[32m        t_val_total = time.time() - t_val_start[m
+[32m+[m[32m        t_val_accum += t_val_total[m
+[32m+[m[32m        if args.profile:[m
+[32m+[m[32m            print(f"fold {fold} validation time: {t_val_total:.1f}s ({len(val)} cases, val_batch_size={args.val_batch_size})", flush=True)[m
+[32m+[m
+[32m+[m[32m        t_save_f0 = time.time()[m
+         torch.save([m
+[31m-            {"state": model.state_dict(), "patch": PATCH, "seed": SEED},[m
+[31m-            out_dir / f"fold_{fold}.pt",[m
+[32m+[m[32m            {[m
+[32m+[m[32m                "state": model.state_dict(),[m
+[32m+[m[32m                "patch": PATCH,[m
+[32m+[m[32m                "seed": SEED,[m
+[32m+[m[32m                "data_config": data_config,[m
+[32m+[m[32m                "fold_mode": fold_mode,[m
+[32m+[m[32m                "patient_count": patient_count,[m
+[32m+[m[32m                "sampling_mix": sampling_mix_dict,[m
+[32m+[m[32m                "fingerprint": current_fingerprint,[m
+[32m+[m[32m                "val_cases": sorted([c["id"] for c in val]),[m
+[32m+[m[32m            },[m
+[32m+[m[32m            final_ckpt,[m
+         )[m
+[31m-        fold_rows.append({[m
+[32m+[m[32m        t_save_accum += (time.time() - t_save_f0)[m
+[32m+[m[32m        if latest_ckpt.exists():[m
+[32m+[m[32m            try:[m
+[32m+[m[32m                latest_ckpt.unlink()[m
+[32m+[m[32m            except Exception:[m
+[32m+[m[32m                pass[m
+[32m+[m
+[32m+[m[32m        status_payload = {[m
+[32m+[m[32m            "fold": fold,[m
+[32m+[m[32m            "status": "completed",[m
+[32m+[m[32m            "epoch_reached": args.epochs,[m
+[32m+[m[32m            "target_epochs": args.epochs,[m
+[32m+[m[32m            "fold_mode": fold_mode,[m
+[32m+[m[32m            "patient_count": patient_count,[m
+[32m+[m[32m            "sampling_mix": sampling_mix_dict,[m
+[32m+[m[32m            "fingerprint": current_fingerprint,[m
+[32m+[m[32m            "val_cases": sorted([c["id"] for c in val]),[m
+[32m+[m[32m            "timestamp": datetime.now(timezone.utc).isoformat(),[m
+[32m+[m[32m        }[m
+[32m+[m[32m        (out_dir / f"status_fold_{fold}.json").write_text(json.dumps(status_payload, indent=2), encoding="utf-8")[m
+[32m+[m
+[32m+[m[32m        amp_pct = (amp_skipped_total / max(total_steps_fold, 1)) * 100 if use_amp else 0.0[m
+[32m+[m[32m        if use_amp:[m
+[32m+[m[32m            print(f"fold {fold}: AMP non-finite steps skipped: {amp_skipped_total}/{total_steps_fold} ({amp_pct:.2f}%)", flush=True)[m
+[32m+[m[32m            if amp_pct > 1.0:[m
+[32m+[m[32m                print(f"[WARNING] fold {fold}: AMP skipped steps ({amp_pct:.2f}%) exceeded 1% threshold!", flush=True)[m
+[32m+[m
+[32m+[m[32m        fold_row = {[m
+             "fold": fold,[m
+             "val": [c["id"] for c in val],[m
+[32m+[m[32m            "val_cases": sorted([c["id"] for c in val]),[m
+[32m+[m[32m            "fold_mode": fold_mode,[m
+[32m+[m[32m            "patient_count": patient_count,[m
+[32m+[m[32m            "sampling_mix": sampling_mix_dict,[m
+[32m+[m[32m            "fingerprint": current_fingerprint,[m
+[32m+[m[32m            "final_loss": float(total / max(steps, 1)) if steps > 0 else 0.0,[m
+             "bone_dice": float(np.mean(bone_d)),[m
+             "bme_dice": float(np.mean(bme_d)),[m
+             "lesion_sensitivity": float(np.mean(sens)),[m
+             "fp_per_case": float(np.mean(fps)),[m
+             "presence_correct": present_hit,[m
+             "presence_n": present_n,[m
+[31m-        })[m
+[32m+[m[32m            "amp_skipped_steps": amp_skipped_total,[m
+[32m+[m[32m            "amp_skipped_pct": round(amp_pct, 4),[m
+[32m+[m[32m            "data_config": data_config,[m
+[32m+[m[32m            "epochs": args.epochs,[m
+[32m+[m[32m            "seed": SEED,[m
+[32m+[m[32m            "device": device,[m
+[32m+[m[32m            "n_cases": len(cases),[m
+[32m+[m[32m            "n_bme": n_bme,[m
+[32m+[m[32m            "n_negative": n_neg,[m
+[32m+[m[32m        }[m
+[32m+[m[32m        fold_rows.append(fold_row)[m
+ [m
+[31m-    metrics = {[m
+[31m-        "model": "3d-unet",[m
+[31m-        "device": device,[m
+[31m-        "folds": folds_n,[m
+[31m-        "epochs": args.epochs,[m
+[31m-        "seed": SEED,[m
+[31m-        "patch": list(PATCH),[m
+[31m-        "n_cases": len(cases),[m
+[31m-        "n_bme": n_bme,[m
+[31m-        "n_negative": n_neg,[m
+[31m-        "summary": {[m
+[31m-            "bone_dice": mean_std([r["bone_dice"] for r in fold_rows]),[m
+[31m-            "bme_dice": mean_std([r["bme_dice"] for r in fold_rows]),[m
+[31m-            "lesion_sensitivity": mean_std([r["lesion_sensitivity"] for r in fold_rows]),[m
+[31m-            "fp_per_case": mean_std([r["fp_per_case"] for r in fold_rows]),[m
+[31m-        },[m
+[31m-        "presence_correct": sum(r["presence_correct"] for r in fold_rows),[m
+[31m-        "presence_n": sum(r["presence_n"] for r in fold_rows),[m
+[31m-        "per_fold": fold_rows,[m
+[31m-        "trained_at": datetime.now(timezone.utc).isoformat(),[m
+[31m-        "note": ([m
+[31m-            f"{len(cases)} volumes ({n_bme} with edema, {n_neg} without), "[m
+[31m-            f"{folds_n} patient-level folds, patch {PATCH[0]}×{PATCH[1]}×{PATCH[2]}. "[m
+[31m-            "Bone and edema are trained together. Edema outside the predicted bone is removed. "[m
+[31m-            "Dice, lesion sensitivity, and false positives per case are mean ± std across folds."[m
+[31m-        ),[m
+[31m-    }[m
+[31m-    (out_dir / "metrics.json").write_text(json.dumps(metrics, indent=2), encoding="utf-8")[m
+[31m-    print(metrics["note"], flush=True)[m
+[31m-    for key, s in metrics["summary"].items():[m
+[31m-        if s:[m
+[31m-            print(f"  {key}  {s['mean']:.3f} ± {s['std']:.3f}", flush=True)[m
+[32m+[m[32m        fold_metric_path = out_dir / f"metrics_fold_{fold}.json"[m
+[32m+[m[32m        try:[m
+[32m+[m[32m            fold_metric_path.write_text(json.dumps(fold_row, indent=2), encoding="utf-8")[m
+[32m+[m[32m            partial_path.write_text(json.dumps(fold_rows, indent=2), encoding="utf-8")[m
+[32m+[m[32m        except Exception:[m
+[32m+[m[32m            pass[m
+[32m+[m
+[32m+[m[32m    if time_guard_triggered:[m
+[32m+[m[32m        print("\n" + "=" * 70, flush=True)[m
+[32m+[m[32m        print("[WARNING] TRAINING RUN PAUSED BY TIME GUARD - CHECKPOINT PRESERVED", flush=True)[m
+[32m+[m[32m        print("=" * 70, flush=True)[m
+[32m+[m[32m        print("  Process exiting cleanly (exit code 0).", flush=True)[m
+[32m+[m[32m        if fold_rows:[m
+[32m+[m[32m            (out_dir / "metrics_partial.json").write_text(json.dumps(fold_rows, indent=2), encoding="utf-8")[m
+[32m+[m[32m            print(f"  Wrote partial metrics ({len(fold_rows)} completed folds) to {out_dir / 'metrics_partial.json'}", flush=True)[m
+[32m+[m[32m        print("=" * 70 + "\n", flush=True)[m
+[32m+[m[32m        return[m
+[32m+[m
+[32m+[m[32m    t_total_pipeline = time.time() - t_pipeline_start[m
+[32m+[m[32m    print("=" * 60, flush=True)[m
+[32m+[m[32m    print("3D U-NET WALL-CLOCK TIMING BREAKDOWN", flush=True)[m
+[32m+[m[32m    print("=" * 60, flush=True)[m
+[32m+[m[32m    print(f"  Volume loading         : {t_load_total:6.1f}s", flush=True)[m
+[32m+[m[32m    print(f"  Patch sampling         : {t_sampling_total:6.1f}s", flush=True)[m
+[32m+[m[32m    print(f"  Training forward/back  : {t_train_accum:6.1f}s", flush=True)[m
+[32m+[m[32m    print(f"  Validation inference   : {t_val_accum:6.1f}s", flush=True)[m
+[32m+[m[32m    print(f"  Checkpoint saves       : {t_save_accum:6.1f}s", flush=True)[m
+[32m+[m[32m    print(f"  Total pipeline time    : {t_total_pipeline:6.1f}s", flush=True)[m
+[32m+[m[32m    print("=" * 60, flush=True)[m
+[32m+[m
+[32m+[m[32m    if len(fold_rows) >= folds_n:[m
+[32m+[m[32m        total_skipped = sum(r.get("amp_skipped_steps", 0) for r in fold_rows)[m
+[32m+[m[32m        mean_skipped_pct = float(np.mean([r.get("amp_skipped_pct", 0.0) for r in fold_rows]))[m
+[32m+[m[32m        metrics = {[m
+[32m+[m[32m            "model": "3d-unet",[m
+[32m+[m[32m            "device": device,[m
+[32m+[m[32m            "folds": folds_n,[m
+[32m+[m[32m            "fold_mode": fold_mode,[m
+[32m+[m[32m            "patient_count": patient_count,[m
+[32m+[m[32m            "val_cases_per_fold": {str(r["fold"]): r["val_cases"] for r in fold_rows},[m
+[32m+[m[32m            "sampling_mix": sampling_mix_dict,[m
+[32m+[m[32m            "epochs": args.epochs,[m
+[32m+[m[32m            "seed": SEED,[m
+[32m+[m[32m            "patch": list(PATCH),[m
+[32m+[m[32m            "data_config": data_config,[m
+[32m+[m[32m            "fingerprint": current_fingerprint,[m
+[32m+[m[32m            "n_cases": len(cases),[m
+[32m+[m[32m            "n_bme": n_bme,[m
+[32m+[m[32m            "n_negative": n_neg,[m
+[32m+[m[32m            "summary": {[m
+[32m+[m[32m                "bone_dice": mean_std([r["bone_dice"] for r in fold_rows]),[m
+[32m+[m[32m                "bme_dice": mean_std([r["bme_dice"] for r in fold_rows]),[m
+[32m+[m[32m                "lesion_sensitivity": mean_std([r["lesion_sensitivity"] for r in fold_rows]),[m
+[32m+[m[32m                "fp_per_case": mean_std([r["fp_per_case"] for r in fold_rows]),[m
+[32m+[m[32m            },[m
+[32m+[m[32m            "presence_correct": sum(r["presence_correct"] for r in fold_rows),[m
+[32m+[m[32m            "presence_n": sum(r["presence_n"] for r in fold_rows),[m
+[32m+[m[32m            "amp_skipped_steps_total": total_skipped,[m
+[32m+[m[32m            "amp_skipped_pct_mean": round(mean_skipped_pct, 4),[m
+[32m+[m[32m            "per_fold": fold_rows,[m
+[32m+[m[32m            "timing": {[m
+[32m+[m[32m                "volume_load_s": round(t_load_total, 2),[m
+[32m+[m[32m                "patch_sampling_s": round(t_sampling_total, 2),[m
+[32m+[m[32m                "train_s": round(t_train_accum, 2),[m
+[32m+[m[32m                "val_s": round(t_val_accum, 2),[m
+[32m+[m[32m                "save_s": round(t_save_accum, 2),[m
+[32m+[m[32m                "total_s": round(t_total_pipeline, 2),[m
+[32m+[m[32m            },[m
+[32m+[m[32m            "trained_at": datetime.now(timezone.utc).isoformat(),[m
+[32m+[m[32m            "note": ([m
+[32m+[m[32m                f"{len(cases)} volumes ({n_bme} with edema, {n_neg} without), "[m
+[32m+[m[32m                f"{folds_n} {fold_mode} folds, patch {PATCH[0]}×{PATCH[1]}×{PATCH[2]}. "[m
+[32m+[m[32m                "Bone and edema are trained together. Edema outside the predicted bone is removed. "[m
+[32m+[m[32m                "Dice, lesion sensitivity, and false positives per case are mean ± std across folds."[m
+[32m+[m[32m            ),[m
+[32m+[m[32m        }[m
+[32m+[m[32m        (out_dir / "metrics.json").write_text(json.dumps(metrics, indent=2), encoding="utf-8")[m
+[32m+[m[32m        print(metrics["note"], flush=True)[m
+[32m+[m[32m        for key, s in metrics["summary"].items():[m
+[32m+[m[32m            if s:[m
+[32m+[m[32m                print(f"  {key}  {s['mean']:.3f} \u00b1 {s['std']:.3f}", flush=True)[m
+[32m+[m[32m        if total_skipped > 0:[m
+[32m+[m[32m            print(f"  amp_skipped_steps   : {total_skipped} ({mean_skipped_pct:.2f}%)", flush=True)[m
+[32m+[m[32m            if mean_skipped_pct > 1.0:[m
+[32m+[m[32m                print("[WARNING] AMP skipped steps exceeded 1% of total steps!", flush=True)[m
+[32m+[m[32m    elif args.fold is not None or args.run_folds is not None:[m
+[32m+[m[32m        # Check if all folds are now complete across independent processes[m
+[32m+[m[32m        merge_metrics_files(out_dir, folds_n)[m
+ [m
+ [m
+ if __name__ == "__main__":[m
