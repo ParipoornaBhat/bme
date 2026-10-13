@@ -177,6 +177,8 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("base")
     ap.add_argument("--apply", action="store_true")
+    ap.add_argument("--keep", "--no-delete", action="store_true", dest="keep",
+                    help="leave the DICOM zip in Non BME/3d")
     ap.add_argument("--relabel", action="store_true", help="rename nrrds already written in Non BME/new")
     args = ap.parse_args()
 
@@ -208,8 +210,9 @@ def main():
         except (zipfile.BadZipFile, RuntimeError, OSError) as e:
             print(f"  new/{number}  skipped: {e}")
             continue
-        zip_path.unlink()
-        print(f"  new/{number}  {count} nrrd, zip removed")
+        if not args.keep:
+            zip_path.unlink()
+        print(f"  new/{number}  {count} nrrd" + ("" if args.keep else ", zip removed"))
         done += 1
         number += 1
     print(f"\nconverted {done}. Names stay in Non BME/new/<n>/name.json only.")

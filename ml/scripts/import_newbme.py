@@ -283,6 +283,8 @@ def main():
     ap.add_argument("base")
     ap.add_argument("--src", default="data/newbme", help="folder of one subfolder per patient")
     ap.add_argument("--apply", action="store_true")
+    ap.add_argument("--keep", "--no-delete", action="store_true", dest="keep",
+                    help="leave the source folder or zip in data/newbme")
     args = ap.parse_args()
 
     base = Path(args.base)
@@ -357,12 +359,14 @@ def main():
             "status": "ok",
             "notes": f"edema on {ready['annotated']}; scans={names}",
         }])
-        if folder.is_dir():
-            shutil.rmtree(folder)
-        else:
-            folder.unlink()
+        if not args.keep:
+            if folder.is_dir():
+                shutil.rmtree(folder)
+            else:
+                folder.unlink()
         imported += 1
-        print(f"  {cid}  imported ({names}; edema on {ready['annotated']}), source folder removed")
+        print(f"  {cid}  imported ({names}; edema on {ready['annotated']})"
+              + ("" if args.keep else ", source removed"))
 
     with report.open("w", newline="", encoding="utf-8") as f:
         writer = csv.writer(f)
