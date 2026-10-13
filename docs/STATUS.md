@@ -83,7 +83,7 @@ In order. Each step's output is the next step's input.
    also looked up in `data/exports/`). A scan with the same voxels is left alone; anything
    else it replaces goes to `data/sync_backup/<stamp>/` first; local files the hub lacks
    stay. Tested on scratch copies (fresh, re-run, diverged); first zips made 10:10.
-   A laptop that already ran `pnpm data:process` takes the annotations alone:
+   A laptop that already ran `pnpm data:process:bme` takes the annotations alone:
    `pnpm data:sync <annotations zip>`. The zip carries a fingerprint of each hub scan;
    a case whose local scan differs or is missing is skipped and listed. Worklist and
    scans are not touched. Tested on a scratch copy (one altered scan, one missing).
@@ -159,7 +159,7 @@ In order. Each step's output is the next step's input.
    The 61 are the 55 earlier imports minus the five same-patient folders (21, 22a, 7a, 8,
    12a), plus 15a, 23 and nine cases whose scan was rebuilt from DICOM. Teammates, for the
    same IDs: `pnpm data:3d:erase`, copy the folders from `newbme.zip` into `data/newbme/`,
-   then `pnpm data:process`. **Next:** paint bone marrow on BME-001..061 in the 3D tab.
+   then `pnpm data:process:bme`. **Next:** paint bone marrow on BME-001..061 in the 3D tab.
 
 0. **3D annotate tab now matches 2D (2026-09-30).** Hand/pan per view (6 / H), pencil fills
    on release, Auto Save, flag a case for review (stored in `data/annotations3d_flags.json`,
@@ -176,7 +176,7 @@ In order. Each step's output is the next step's input.
    | Command | What it does |
    |---|---|
    | `pnpm data:3d:erase` | Deletes `data/raw`, `data/nifti`, `data/annotations`, and `data/nnunet`. Clears `BME-` / `NBME-` rows from `data/worklist.csv`, `data/deid_map.csv`, and the Postgres `patient` table (studies and series cascade). Does **not** delete `data/newbme` or `Non BME/`. The next import starts at `BME-001`. |
-   | `pnpm data:process` | Imports `data/newbme`. Each item is one `.zip` in that folder, or one subfolder that contains one `.zip`. The zip holds the scan `.nrrd` files and one `Segmentation.seg.nrrd`. Every scan is kept (`BME-001_tra.nii.gz`, `_cor.nii.gz`, `_cor-1.nii.gz`). The edema outline is attached to the scan it was drawn on (`_primary`). Optional `name.json` is `{ "name": "..." }` or `{ "patient": "..." }`; if it is missing, the zip filename is stored instead. The source zip is deleted only after the case is written. Dry run: `python ml/scripts/import_newbme.py .` |
+   | `pnpm data:process:bme` | Imports `data/newbme`. Each item is one `.zip` in that folder, or one subfolder that contains one `.zip`. The zip holds the scan `.nrrd` files and one `Segmentation.seg.nrrd`. Every scan is kept (`BME-001_tra.nii.gz`, `_cor.nii.gz`, `_cor-1.nii.gz`). The edema outline is attached to the scan it was drawn on (`_primary`). Optional `name.json` is `{ "name": "..." }` or `{ "patient": "..." }`; if it is missing, the zip filename is stored instead. The source zip is deleted only after the case is written. Dry run: `python ml/scripts/import_newbme.py .` |
    | `pnpm data:3d:nonbme:process` | Converts every `.zip` in `Non BME/3d` (DICOM) into `Non BME/new/1/`, `new/2/`, … Each folder gets `name.json` (the zip filename) and one compressed `.nrrd` per series, named `tra`, `cor`, `sag`, then `tra-1`, `cor-1` when a direction repeats. Every series is kept. A slice-size mismatch inside one series becomes its own file instead of failing the zip. The zip is deleted only after the nrrd files exist. A non-uniform-spacing line from SimpleITK is a warning; the file is still written. |
    | `pnpm data:nonbme:process` | Imports `Non BME/new/<n>/` and `data/newnonbme` (a folder of scans, or a zip) as `NBME-001` onward. Same series buttons as BME. `name.json` is optional. Flags: `-- --limit 3` imports only 3, `-- --keep` does not delete the source. `pnpm data:nonbme:erase` deletes the imported `NBME-` volumes, annotations, worklist rows, and database rows. It does not touch `Non BME/new` or `data/newnonbme`. |
 
@@ -418,7 +418,7 @@ ml/scripts/gradcam.py   heatmaps from the saved checkpoints; never trains
 ml/scripts/inventory.py re-run the dataset inventory
 ml/scripts/deid.py      de-identification
 ml/scripts/convert.py   DICOM -> NIfTI + picks each case's primary series
-ml/scripts/import_newbme.py   data/newbme zips -> BME-nnn (pnpm data:process)
+ml/scripts/import_newbme.py   data/newbme zips -> BME-nnn (pnpm data:process:bme)
 ml/scripts/nonbme_to_nrrd.py  Non BME/3d zips -> Non BME/new (pnpm data:3d:nonbme:process)
 scripts/erase-3d.js     wipe 3D volumes and case numbers (pnpm data:3d:erase)
 ml/scripts/seg2nifti.py .seg.nrrd -> validated training labelmap
