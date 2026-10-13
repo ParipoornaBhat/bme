@@ -20,7 +20,7 @@ import torch
 from scipy.ndimage import label as cc_label
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from train_3d import UNet3D, guard_device, normalize, predict_volume  # noqa: E402
+from train_3d import build_model, guard_device, normalize, predict_volume  # noqa: E402
 
 
 def read_nrrd(path: Path):
@@ -42,23 +42,37 @@ def pack(vol: np.ndarray) -> str:
     return base64.b64encode(np.asfortranarray(vol).ravel(order="F").tobytes()).decode("ascii")
 
 
+WEIGHTS = {
+    "results3d": "unet",
+    "results3d-attn": "attention-unet",
+}
+
+
 def main():
     if len(sys.argv) < 4:
         raise SystemExit(__doc__)
     base, src, dest = Path(sys.argv[1]), Path(sys.argv[2]), Path(sys.argv[3])
-    ckpts = sorted((base / "data" / "results3d").glob("fold_*.pt"))
+    out_name = sys.argv[4] if len(sys.argv) > 4 else "results3d"
+    if out_name not in WEIGHTS:
+        raise SystemExit(f"unknown weights folder {out_name!r}. choices: {', '.join(WEIGHTS)}")
+    ckpts = sorted((base / "data" / out_name).glob("fold_*.pt"))
     if not ckpts:
-        raise SystemExit("No 3D weights yet. Train the 3D model on the Training page first.")
+        raise SystemExit(f"No weights in data/{out_name}. Train that model on the Training page first.")
 
     raw, spacing, affine = read_nrrd(src)
     norm = normalize(raw)
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
     guard_device(device)
-    model = UNet3D().to(device)
-    masks = []
-    for ck in ckpts:
+    first = torch.load(ckpts[0], map_location=device, weights_only=False)
+    model_name = str(first.get("model") or WEIGHTS[out_name])
+    model = build_model(model_name).to(device)
+    model.load_state_dict(first["state"])
+    masks = [predict_volume(model, norm, device)]
+    for ck in ckpts[1:]:
         blob = torch.load(ck, map_location=device, weights_only=False)
+        if str(blob.get("model") or model_name) != model_name:
+            raise SystemExit(f"{ck.name} is a different architecture from {ckpts[0].name}")
         model.load_state_dict(blob["state"])
         masks.append(predict_volume(model, norm, device))
     # Majority across folds, then drop edema that is not inside bone in that vote.
@@ -81,6 +95,8 @@ def main():
     image_u8 = np.clip(np.rint(norm * 255), 0, 255).astype(np.uint8)
     out = {
         "ok": True,
+        "model": model_name,
+        "weights": out_name,
         "device": device,
         "folds": len(ckpts),
         "edema_present": bme_n > 0,

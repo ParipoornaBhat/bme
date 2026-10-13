@@ -16,10 +16,16 @@ an edema mask, all from saved checkpoints. **3D** is the segmentation system fro
 is still waiting on annotations.
 
 The web app does the whole loop in the browser: annotate, train, test a slice, inspect
-results, check storage. Training keeps the two 2D tabs. A third tab trains a 3D U-Net
+results, check storage. `pnpm train:2d` and `pnpm train:3d` ask which model (U-Net or
+Attention U-Net), then train on this PC's GPU with VRAM capped at 90%. Each run
+writes its own `metrics.json` and appends a row to `data/training_log.csv`. Training keeps the two 2D tabs. A third tab trains a 3D U-Net
 (bone and edema together, patient-level folds, Dice + focal, sliding-window prediction).
 Results → 3D segmentation accepts one `.nrrd` and shows axial, coronal, and sagittal
-marks, edema present or not, and volume in mm³. Every filename in the dataset is pseudonymous — no patient name
+marks, edema present or not, and volume in mm³. The Training page and that Results
+tab both offer **3D U-Net** (`data/results3d`) and **3D Attention U-Net**
+(`data/results3d-attn`), the same two choices as `pnpm train:3d`. The metrics card
+reads that model's `metrics.json`, so a command-line run and a web run show the
+same numbers. The test upload runs the model that is selected. Every filename in the dataset is pseudonymous — no patient name
 survives anywhere on disk. The critical path is unchanged: annotate more cases, measure
 inter-rater Dice, then train the bone/lesion model properly.
 

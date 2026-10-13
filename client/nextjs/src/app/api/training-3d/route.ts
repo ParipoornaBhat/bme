@@ -3,6 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { spawn } from "node:child_process";
 import { conflictingJob } from "~/lib/jobs";
+import { MODELS_3D, model3d, model3dInfo, type Model3DId } from "~/lib/models3d";
 
 /**
  * 3D bone and edema training. Separate from the 2D classifier and the 2D U-Net.
@@ -23,11 +24,9 @@ function python() {
   return fs.existsSync(local) ? local : process.platform === "win32" ? "python" : "python3";
 }
 
-const DIR = () => path.join(root(), "data", "results3d");
-const LOG = () => path.join(DIR(), "train.log");
-const PID = () => path.join(DIR(), "train.pid");
-const METRICS = () => path.join(DIR(), "metrics.json");
-const JOB = () => path.join(DIR(), "train.job.json");
+function dirOf(model: Model3DId) {
+  return path.join(root(), "data", model3dInfo(model).out);
+}
 
 function alive(pid: number) {
   try {
@@ -38,8 +37,12 @@ function alive(pid: number) {
   }
 }
 
-function running() {
-  const f = PID();
+function pidFile(model: Model3DId) {
+  return path.join(dirOf(model), "train.pid");
+}
+
+function running(model: Model3DId) {
+  const f = pidFile(model);
   if (!fs.existsSync(f)) return false;
   const pid = Number(fs.readFileSync(f, "utf8").trim());
   if (!pid || !alive(pid)) {
@@ -47,6 +50,13 @@ function running() {
     return false;
   }
   return true;
+}
+
+function runningModel(): Model3DId | null {
+  for (const spec of MODELS_3D) {
+    if (running(spec.id)) return spec.id;
+  }
+  return null;
 }
 
 function annotated() {
@@ -105,25 +115,33 @@ function progress(logText: string, startedAt: number | null, folds: number, epoc
   };
 }
 
-export async function GET() {
+export async function GET(req: NextRequest) {
+  const model = model3d(new URL(req.url).searchParams.get("model"));
+  const dir = dirOf(model);
   const info = annotated();
   let metrics: unknown = null;
-  if (fs.existsSync(METRICS())) {
-    try { metrics = JSON.parse(fs.readFileSync(METRICS(), "utf8")); } catch { metrics = null; }
+  const metricsPath = path.join(dir, "metrics.json");
+  if (fs.existsSync(metricsPath)) {
+    try { metrics = JSON.parse(fs.readFileSync(metricsPath, "utf8")); } catch { metrics = null; }
   }
-  const rawLog = fs.existsSync(LOG()) ? fs.readFileSync(LOG(), "utf8") : "";
+  const logPath = path.join(dir, "train.log");
+  const rawLog = fs.existsSync(logPath) ? fs.readFileSync(logPath, "utf8") : "";
   let job: { startedAt?: number; folds?: number; epochs?: number } = {};
+  const jobPath = path.join(dir, "train.job.json");
   try {
-    if (fs.existsSync(JOB())) job = JSON.parse(fs.readFileSync(JOB(), "utf8"));
+    if (fs.existsSync(jobPath)) job = JSON.parse(fs.readFileSync(jobPath, "utf8"));
   } catch { /* partial */ }
-  const isRunning = running();
+  const isRunning = running(model);
   const log = rawLog.length > 8000 ? rawLog.slice(-8000) : rawLog;
   return NextResponse.json({
+    model,
+    out: model3dInfo(model).out,
     annotated: info.cases.length,
     bme: info.bme,
     nonBme: info.nonBme,
     cases: info.cases.map((c) => c.id),
     running: isRunning,
+    runningModel: runningModel(),
     metrics,
     log,
     progress: isRunning
@@ -133,10 +151,14 @@ export async function GET() {
 }
 
 export async function POST(req: NextRequest) {
-  if (running()) {
+  const body = await req.json().catch(() => ({}));
+  const model = model3d(body.model);
+  const spec = model3dInfo(model);
+  const live = runningModel();
+  if (live) {
     return NextResponse.json({ error: "already training" }, { status: 409 });
   }
-  const clash = conflictingJob("segmentation3d");
+  const clash = conflictingJob(spec.kind);
   if (clash) return NextResponse.json({ error: clash.message }, { status: 409 });
   const info = annotated();
   if (info.cases.length < 2) {
@@ -145,18 +167,22 @@ export async function POST(req: NextRequest) {
       { status: 400 },
     );
   }
-  const body = await req.json().catch(() => ({}));
   const epochs = Math.min(Math.max(Number(body.epochs ?? 40), 1), 200);
   const folds = Math.min(Math.max(Number(body.folds ?? 5), 2), info.cases.length);
   const device = ["auto", "cuda", "cpu"].includes(body.device) ? body.device : "auto";
 
-  fs.mkdirSync(DIR(), { recursive: true });
-  const log = fs.openSync(LOG(), "w");
+  const dir = dirOf(model);
+  fs.mkdirSync(dir, { recursive: true });
+  const log = fs.openSync(path.join(dir, "train.log"), "w");
   const r = root();
   const child = spawn(
     python(),
     ["-u", path.join(r, "ml", "scripts", "train_3d.py"), r,
-      "--epochs", String(epochs), "--folds", String(folds), "--device", device],
+      "--model", model,
+      "--out", spec.out,
+      "--epochs", String(epochs),
+      "--folds", String(folds),
+      "--device", device],
     {
       cwd: r,
       detached: true,
@@ -172,16 +198,24 @@ export async function POST(req: NextRequest) {
     },
   );
   child.unref();
-  if (child.pid) fs.writeFileSync(PID(), String(child.pid));
-  fs.writeFileSync(JOB(), JSON.stringify({ startedAt: Date.now(), folds, epochs, device }, null, 2));
-  return NextResponse.json({ ok: true, pid: child.pid, epochs, folds, cases: info.cases.length });
+  if (child.pid) fs.writeFileSync(path.join(dir, "train.pid"), String(child.pid));
+  fs.writeFileSync(
+    path.join(dir, "train.job.json"),
+    JSON.stringify({ startedAt: Date.now(), folds, epochs, device, model }, null, 2),
+  );
+  return NextResponse.json({
+    ok: true, pid: child.pid, epochs, folds, cases: info.cases.length, model, out: spec.out,
+  });
 }
 
-export async function DELETE() {
-  const f = PID();
+export async function DELETE(req: NextRequest) {
+  const asked = new URL(req.url).searchParams.get("model");
+  const model = asked ? model3d(asked) : runningModel();
+  if (!model) return NextResponse.json({ ok: true, note: "nothing running" });
+  const f = pidFile(model);
   if (!fs.existsSync(f)) return NextResponse.json({ ok: true, note: "nothing running" });
   const pid = Number(fs.readFileSync(f, "utf8").trim());
   try { process.kill(pid); } catch { /* already exited */ }
   try { fs.unlinkSync(f); } catch { /* gone */ }
-  return NextResponse.json({ ok: true, stopped: pid });
+  return NextResponse.json({ ok: true, stopped: pid, model });
 }

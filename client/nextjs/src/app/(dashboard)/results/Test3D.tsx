@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { ImageUp, Loader2 } from "lucide-react";
 import Render3D from "../annotate/Render3D";
+import { model3dInfo, type Model3DId } from "~/lib/models3d";
 
 type Plane = "axial" | "coronal" | "sagittal";
 const PLANES: Plane[] = ["axial", "coronal", "sagittal"];
@@ -22,6 +23,7 @@ type Cursor = { i: number; j: number; k: number };
 
 type Result = {
   filename: string;
+  model?: string;
   device: string;
   folds: number;
   edema_present: boolean;
@@ -268,6 +270,7 @@ function FourUp({ result }: { result: Result }) {
           <p className="mt-2 text-muted-foreground">
             {result.lesion_count} lesion{result.lesion_count === 1 ? "" : "s"}
             {result.fraction_of_bone != null ? ` · ${(result.fraction_of_bone * 100).toFixed(2)}% of predicted bone` : ""}
+            {" · "}{result.model === "attention-unet" ? "3D Attention U-Net" : "3D U-Net"}
             {" · "}{result.folds} folds · {result.device}
           </p>
           <p className="mt-1 text-muted-foreground">{result.filename}. Click a view to move the crosshair. Scroll to zoom that view.</p>
@@ -277,21 +280,17 @@ function FourUp({ result }: { result: Result }) {
   );
 }
 
-export default function Test3D({ ready = false }: { ready?: boolean }) {
-  const [trained, setTrained] = useState<boolean | null>(ready ? true : null);
+export default function Test3D({ model, ready = false }: { model: Model3DId; ready?: boolean }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [result, setResult] = useState<Result | null>(null);
+  const picked = model3dInfo(model);
+  const enabled = ready;
 
-  useEffect(() => { if (ready) setTrained(true); }, [ready]);
   useEffect(() => {
-    fetch("/api/predict-3d", { cache: "no-store" })
-      .then((r) => r.json())
-      .then((j) => { if (j.trained) setTrained(true); else if (!ready) setTrained(false); })
-      .catch(() => { if (!ready) setTrained(false); });
-  }, [ready]);
-
-  const enabled = ready || trained === true;
+    setResult(null);
+    setError(null);
+  }, [model]);
 
   const onFile = async (file: File | undefined) => {
     if (!file) return;
@@ -301,6 +300,7 @@ export default function Test3D({ ready = false }: { ready?: boolean }) {
     try {
       const body = new FormData();
       body.set("file", file);
+      body.set("model", model);
       const r = await fetch("/api/predict-3d", { method: "POST", body });
       const j = await r.json();
       if (!r.ok) throw new Error(j.error ?? "failed");
@@ -315,10 +315,11 @@ export default function Test3D({ ready = false }: { ready?: boolean }) {
   return (
     <div className="space-y-4">
       <div className="rounded-lg border border-border bg-card p-4">
-        <div className="text-sm font-semibold">Test one scan</div>
+        <div className="text-sm font-semibold">Test one scan with {picked.label}</div>
         <p className="mt-1 text-sm text-muted-foreground">
           Upload the scan <code className="rounded bg-muted px-1">.nrrd</code>, the same file 3D Slicer saves.
           The direction in the file decides which way is axial, coronal, and sagittal, and the three views stay linked.
+          This uses the weights in <code className="rounded bg-muted px-1">data/{picked.out}</code>.
         </p>
         <label className={`mt-3 inline-flex items-center gap-2 rounded-md bg-primary px-4 py-2 text-sm font-medium text-primary-foreground ${!enabled || busy ? "pointer-events-none opacity-40" : "cursor-pointer"}`}>
           {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : <ImageUp className="h-4 w-4" />}
@@ -328,7 +329,7 @@ export default function Test3D({ ready = false }: { ready?: boolean }) {
         </label>
         {!enabled && (
           <p className="mt-3 text-xs text-muted-foreground">
-            No 3D weights yet. Open Training, use the 3D tab, and train the model first.
+            No weights for {picked.label} yet. Train it on the Training page or with pnpm train:3d.
           </p>
         )}
         {error && <p className="mt-3 text-sm text-destructive">{error}</p>}

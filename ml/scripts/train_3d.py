@@ -17,6 +17,7 @@ import argparse
 import csv
 import gc
 import json
+import os
 import random
 import sys
 from datetime import datetime, timezone
@@ -192,6 +193,65 @@ class UNet3D(nn.Module):
         return self.out(y)
 
 
+class AttentionGate3d(nn.Module):
+    def __init__(self, skip_ch, gate_ch, inter):
+        super().__init__()
+        self.theta = nn.Conv3d(skip_ch, inter, 1, bias=False)
+        self.phi = nn.Conv3d(gate_ch, inter, 1, bias=False)
+        self.psi = nn.Sequential(nn.ReLU(inplace=True), nn.Conv3d(inter, 1, 1), nn.Sigmoid())
+
+    def forward(self, skip, gate):
+        if gate.shape[-3:] != skip.shape[-3:]:
+            gate = nn.functional.interpolate(gate, size=skip.shape[-3:], mode="nearest")
+        return skip * self.psi(self.theta(skip) + self.phi(gate))
+
+
+class AttentionUNet3D(nn.Module):
+    """3D U-Net with attention on the skip links. Same two outputs, same patch size."""
+
+    def __init__(self):
+        super().__init__()
+
+        def block(i, o):
+            return nn.Sequential(
+                nn.Conv3d(i, o, 3, padding=1, bias=False),
+                nn.InstanceNorm3d(o),
+                nn.ReLU(inplace=True),
+            )
+
+        self.e1 = block(1, 16)
+        self.e2 = block(16, 32)
+        self.e3 = block(32, 64)
+        self.pool = nn.MaxPool3d(2)
+        self.up2 = nn.ConvTranspose3d(64, 32, 2, stride=2)
+        self.gate2 = AttentionGate3d(32, 32, 16)
+        self.d2 = block(64, 32)
+        self.up1 = nn.ConvTranspose3d(32, 16, 2, stride=2)
+        self.gate1 = AttentionGate3d(16, 16, 8)
+        self.d1 = block(32, 16)
+        self.out = nn.Conv3d(16, 2, 1)
+
+    def forward(self, x):
+        a = self.e1(x)
+        b = self.e2(self.pool(a))
+        c = self.e3(self.pool(b))
+        y = self.up2(c)
+        b = self.gate2(b, y)
+        y = self.d2(torch.cat([y, b], 1))
+        y = self.up1(y)
+        a = self.gate1(a, y)
+        y = self.d1(torch.cat([y, a], 1))
+        return self.out(y)
+
+
+def build_model(name: str) -> nn.Module:
+    if name == "unet":
+        return UNet3D()
+    if name == "attention-unet":
+        return AttentionUNet3D()
+    raise SystemExit(f"unknown model {name!r}. choices: unet, attention-unet")
+
+
 def targets(labels: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
     """Bone includes the lesion. Uncertain voxels are left out of the loss."""
     bone = ((labels == 1) | (labels == 2)).float()
@@ -216,6 +276,14 @@ def dice_focal(logits: torch.Tensor, target: torch.Tensor, valid: torch.Tensor, 
         focal = ((1 - pt).pow(gamma) * bce * valid).sum() / denom_v
         loss = loss + dice + focal
     return loss
+
+
+def rates(tp, fp, fn):
+    prec = float(tp / (tp + fp)) if tp + fp else 1.0
+    rec = float(tp / (tp + fn)) if tp + fn else 1.0
+    f1 = float(2 * prec * rec / (prec + rec)) if prec + rec else 0.0
+    iou = float(tp / (tp + fp + fn)) if tp + fp + fn else 1.0
+    return prec, rec, f1, iou
 
 
 def lesion_stats(gt: np.ndarray, pred: np.ndarray) -> tuple[float, float]:
@@ -250,15 +318,17 @@ def dice(gt: np.ndarray, pred: np.ndarray, value: int) -> float:
 
 
 def guard_device(device: str):
-    """Leave VRAM for the Windows desktop. A full GPU allocation can freeze the screen."""
+    """Limit this process. BME_GPU_FRACTION overrides the laptop default of 90%."""
     torch.set_num_threads(1)
     if device != "cuda":
         return
+    frac = min(0.95, max(0.05, float(os.environ.get("BME_GPU_FRACTION", "0.90"))))
     try:
-        torch.cuda.set_per_process_memory_fraction(0.65)
+        torch.cuda.set_per_process_memory_fraction(frac)
     except RuntimeError:
         pass
     torch.backends.cudnn.benchmark = False
+    print(f"GPU memory capped at {frac:.0%} for this process.", flush=True)
 
 
 def release():
@@ -309,6 +379,8 @@ def main():
     ap.add_argument("base")
     ap.add_argument("--epochs", type=int, default=40)
     ap.add_argument("--folds", type=int, default=5)
+    ap.add_argument("--model", choices=("unet", "attention-unet"), default="unet")
+    ap.add_argument("--out", default="", help="folder under data/. Default depends on the model.")
     ap.add_argument("--device", choices=("auto", "cuda", "cpu"), default="auto")
     args = ap.parse_args()
 
@@ -329,7 +401,8 @@ def main():
     print("One scan at a time. Only the training patches are kept, then the volume is released.", flush=True)
     rng_load = np.random.default_rng(SEED)
     cases = []
-    for p in files:
+    for n, p in enumerate(files, start=1):
+        print(f"Reading {p.parent.name} ({n}/{len(files)}). Cutting patches, then releasing the scan.", flush=True)
         item = load_case(base, p.parent.name)
         if not item:
             continue
@@ -370,23 +443,27 @@ def main():
     device = resolve_device(args.device)
     guard_device(device)
     print(f"device {device}", flush=True)
-    if device == "cuda":
-        print("GPU memory capped at 65% so the desktop is not starved.", flush=True)
     order = cases[:]
     random.Random(SEED).shuffle(order)
     groups: list[list[dict]] = [[] for _ in range(folds_n)]
     for i, case in enumerate(order):
         groups[i % folds_n].append(case)
 
-    out_dir = base / "data" / "results3d"
+    out_name = args.out or ("results3d" if args.model == "unet" else "results3d-attn")
+    out_dir = base / "data" / out_name
     out_dir.mkdir(parents=True, exist_ok=True)
     fold_rows = []
 
     for fold, val in enumerate(groups):
         train = [c for g in groups if g is not val for c in g]
-        print(f"fold {fold}: train {[c['id'] for c in train]}  val {[c['id'] for c in val]}", flush=True)
-        model = UNet3D().to(device)
+        print(
+            f"Fold {fold + 1} of {folds_n}: training on {len(train)} scans, "
+            f"then scoring {len(val)} held-out scan(s).",
+            flush=True,
+        )
+        model = build_model(args.model).to(device)
         opt = torch.optim.Adam(model.parameters(), lr=1e-3)
+        total_steps = folds_n * args.epochs
         for epoch in range(1, args.epochs + 1):
             model.train()
             total = 0.0
@@ -405,16 +482,40 @@ def main():
                     total += float(loss)
                     steps += 1
                     del x, lab, tgt, valid, loss
-            print(f"epoch {epoch}/{args.epochs}  loss={total / max(steps, 1):.4f}", flush=True)
+            done = fold * args.epochs + epoch
+            width = 24
+            fill = int(width * done / total_steps)
+            print(
+                f"[{'#' * fill}{'.' * (width - fill)}] {done}/{total_steps}  "
+                f"fold {fold + 1}/{folds_n}  epoch {epoch}/{args.epochs}  "
+                f"learning bone and edema  loss={total / max(steps, 1):.4f}",
+                flush=True,
+            )
 
         bone_d, bme_d, sens, fps, present_hit, present_n = [], [], [], [], 0, 0
-        for case in val:
+        bone_box = [0, 0, 0]
+        edema_box = [0, 0, 0]
+        for vi, case in enumerate(val, start=1):
+            print(
+                f"Scoring held-out scan {case['id']} ({vi}/{len(val)}). Walking the whole volume.",
+                flush=True,
+            )
             loaded = load_case(base, case["id"])
             if not loaded:
                 continue
             pred = predict_volume(model, loaded["image"], device)
             bone_d.append(dice(loaded["labels"], pred, 1))
             bme_d.append(dice(loaded["labels"], pred, 2))
+            gt_bone = (loaded["labels"] == 1) | (loaded["labels"] == 2)
+            pr_bone = (pred == 1) | (pred == 2)
+            bone_box[0] += int(np.logical_and(gt_bone, pr_bone).sum())
+            bone_box[1] += int(np.logical_and(~gt_bone, pr_bone).sum())
+            bone_box[2] += int(np.logical_and(gt_bone, ~pr_bone).sum())
+            gt_ed = loaded["labels"] == 2
+            pr_ed = pred == 2
+            edema_box[0] += int(np.logical_and(gt_ed, pr_ed).sum())
+            edema_box[1] += int(np.logical_and(~gt_ed, pr_ed).sum())
+            edema_box[2] += int(np.logical_and(gt_ed, ~pr_ed).sum())
             s, fp = lesion_stats(loaded["labels"], pred)
             sens.append(s)
             fps.append(fp)
@@ -429,8 +530,10 @@ def main():
             )
             del loaded, pred
             release()
+        b_prec, b_rec, b_f1, b_iou = rates(*bone_box)
+        e_prec, e_rec, e_f1, e_iou = rates(*edema_box)
         torch.save(
-            {"state": model.state_dict(), "patch": PATCH, "seed": SEED},
+            {"state": model.state_dict(), "patch": PATCH, "seed": SEED, "model": args.model},
             out_dir / f"fold_{fold}.pt",
         )
         fold_rows.append({
@@ -442,10 +545,18 @@ def main():
             "fp_per_case": float(np.mean(fps)),
             "presence_correct": present_hit,
             "presence_n": present_n,
+            "bone_precision": b_prec,
+            "bone_recall": b_rec,
+            "bone_f1": b_f1,
+            "bone_iou": b_iou,
+            "edema_precision": e_prec,
+            "edema_recall": e_rec,
+            "edema_f1": e_f1,
+            "edema_iou": e_iou,
         })
 
     metrics = {
-        "model": "3d-unet",
+        "model": args.model,
         "device": device,
         "folds": folds_n,
         "epochs": args.epochs,
@@ -459,6 +570,14 @@ def main():
             "bme_dice": mean_std([r["bme_dice"] for r in fold_rows]),
             "lesion_sensitivity": mean_std([r["lesion_sensitivity"] for r in fold_rows]),
             "fp_per_case": mean_std([r["fp_per_case"] for r in fold_rows]),
+            "bone_precision": mean_std([r["bone_precision"] for r in fold_rows]),
+            "bone_recall": mean_std([r["bone_recall"] for r in fold_rows]),
+            "bone_f1": mean_std([r["bone_f1"] for r in fold_rows]),
+            "bone_iou": mean_std([r["bone_iou"] for r in fold_rows]),
+            "edema_precision": mean_std([r["edema_precision"] for r in fold_rows]),
+            "edema_recall": mean_std([r["edema_recall"] for r in fold_rows]),
+            "edema_f1": mean_std([r["edema_f1"] for r in fold_rows]),
+            "edema_iou": mean_std([r["edema_iou"] for r in fold_rows]),
         },
         "presence_correct": sum(r["presence_correct"] for r in fold_rows),
         "presence_n": sum(r["presence_n"] for r in fold_rows),
@@ -472,10 +591,21 @@ def main():
         ),
     }
     (out_dir / "metrics.json").write_text(json.dumps(metrics, indent=2), encoding="utf-8")
+    from metrics_log import from_summary
+    log_path = from_summary(
+        base, task="3d", model=args.model, device=device,
+        out_dir=f"data/{out_name}", folds=folds_n, epochs=args.epochs,
+        n_cases=len(cases), summary=metrics["summary"],
+        n_bme=n_bme, n_negative=n_neg, fp_key="fp_per_case", fp_unit="per_case",
+        presence_correct=metrics["presence_correct"], presence_n=metrics["presence_n"],
+        patch="x".join(str(p) for p in PATCH),
+    )
     print(metrics["note"], flush=True)
     for key, s in metrics["summary"].items():
         if s:
             print(f"  {key}  {s['mean']:.3f} ± {s['std']:.3f}", flush=True)
+    print(f"-> {out_dir / 'metrics.json'}", flush=True)
+    print(f"-> {log_path}", flush=True)
 
 
 if __name__ == "__main__":

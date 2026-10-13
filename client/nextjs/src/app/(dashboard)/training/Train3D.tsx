@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Loader2, Play, Square } from "lucide-react";
+import { MODELS_3D, model3dInfo, type Model3DId } from "~/lib/models3d";
 
 type Torch = {
   cudaAvailable: boolean; deviceName: string | null; vramGB: number | null; reason: string | null;
@@ -19,6 +20,7 @@ type Prog = {
 };
 type State = {
   annotated: number; bme: number; nonBme: number; running: boolean;
+  runningModel: Model3DId | null;
   metrics: Metrics | null; log: string; progress: Prog | null;
 };
 
@@ -38,26 +40,35 @@ export default function Train3D({
   onRunning: (running: boolean) => void;
 }) {
   const [state, setState] = useState<State | null>(null);
+  const [model, setModel] = useState<Model3DId>("unet");
   const [epochs, setEpochs] = useState(40);
   const [folds, setFolds] = useState(5);
   const [busy, setBusy] = useState(false);
   const onRunningRef = useRef(onRunning);
   onRunningRef.current = onRunning;
+  const picked = model3dInfo(model);
+
+  useEffect(() => {
+    try {
+      const saved = localStorage.getItem("bme_training_3d_model");
+      if (saved === "unet" || saved === "attention-unet") setModel(saved);
+    } catch { /* ignore */ }
+  }, []);
 
   const load = useCallback(async () => {
-    const r = await fetch("/api/training-3d", { cache: "no-store" });
+    const r = await fetch(`/api/training-3d?model=${model}`, { cache: "no-store" });
     if (!r.ok) return;
     const j = await r.json() as State;
     setState(j);
-    onRunningRef.current(j.running);
-  }, []);
+    onRunningRef.current(Boolean(j.running || j.runningModel));
+  }, [model]);
 
   useEffect(() => { load(); }, [load]);
   useEffect(() => {
-    if (!state?.running) return;
+    if (!state?.running && !state?.runningModel) return;
     const id = setInterval(load, 3000);
     return () => clearInterval(id);
-  }, [state?.running, load]);
+  }, [state?.running, state?.runningModel, load]);
 
   const start = async () => {
     setBusy(true);
@@ -65,7 +76,7 @@ export default function Train3D({
       const r = await fetch("/api/training-3d", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ epochs, folds, device }),
+        body: JSON.stringify({ epochs, folds, device, model }),
       });
       const j = await r.json();
       if (!r.ok) alert(j.error ?? "could not start");
@@ -76,7 +87,8 @@ export default function Train3D({
   };
 
   const stop = async () => {
-    await fetch("/api/training-3d", { method: "DELETE" });
+    const stopModel = state?.runningModel ?? model;
+    await fetch(`/api/training-3d?model=${stopModel}`, { method: "DELETE" });
     load();
   };
 
@@ -86,7 +98,7 @@ export default function Train3D({
     <div className="space-y-4">
       <div className="rounded-lg border border-border border-l-4 border-l-primary bg-card p-4 text-sm text-muted-foreground">
         <div className="mb-2 flex flex-wrap items-center gap-2">
-          <span className="text-base font-semibold text-foreground">3D U-Net</span>
+          <span className="text-base font-semibold text-foreground">{picked.label}</span>
           <span className="rounded bg-primary/10 px-2 py-0.5 text-xs font-medium text-primary">Patch 96×96×12</span>
           <span className="rounded bg-muted px-2 py-0.5 text-xs font-medium">Loss: Dice + focal</span>
           <span className="rounded bg-muted px-2 py-0.5 text-xs font-medium">Bone + edema, edema kept inside bone</span>
@@ -110,6 +122,25 @@ export default function Train3D({
               </span>
             </div>
           </div>
+          <div className="text-sm">
+            <span className="mb-1 block text-xs font-semibold uppercase tracking-wider text-muted-foreground">Model</span>
+            <div className="flex flex-wrap gap-2">
+              {MODELS_3D.map((spec) => (
+                <button key={spec.id} type="button"
+                  disabled={Boolean(state?.runningModel)}
+                  onClick={() => {
+                    setModel(spec.id);
+                    try { localStorage.setItem("bme_training_3d_model", spec.id); } catch { /* ignore */ }
+                  }}
+                  className={`rounded-md border px-3 py-2 text-left disabled:opacity-40 ${
+                    model === spec.id ? "border-primary text-foreground" : "border-border text-muted-foreground"
+                  }`}>
+                  <span className="block text-sm font-medium">{spec.label}</span>
+                  <span className="block text-[11px] text-muted-foreground">{spec.hours} · data/{spec.out}</span>
+                </button>
+              ))}
+            </div>
+          </div>
           <label className="text-sm">
             <span className="mb-1 block text-xs font-semibold uppercase tracking-wider text-muted-foreground">Epochs</span>
             <input type="number" min={1} max={200} value={epochs} disabled={state?.running}
@@ -123,7 +154,7 @@ export default function Train3D({
               className="w-20 rounded-md border border-border bg-background px-3 py-2 text-sm" />
           </label>
           <div className="ml-auto">
-            {state?.running ? (
+            {state?.running || state?.runningModel ? (
               <button onClick={stop}
                 className="inline-flex items-center gap-2 rounded-md border border-destructive px-4 py-2 text-sm font-medium text-destructive">
                 <Square className="h-4 w-4" /> Stop
@@ -132,7 +163,7 @@ export default function Train3D({
               <button onClick={start} disabled={busy || n < 2}
                 className="inline-flex items-center gap-2 rounded-md bg-primary px-4 py-2 text-sm font-medium text-primary-foreground disabled:opacity-40">
                 {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : <Play className="h-4 w-4" />}
-                Train 3D U-Net
+                Train {picked.label}
               </button>
             )}
           </div>
@@ -149,6 +180,11 @@ export default function Train3D({
             )}
           </div>
         </div>
+        {state?.runningModel && state.runningModel !== model && (
+          <p className="mt-3 text-xs text-muted-foreground">
+            {model3dInfo(state.runningModel).label} is training. Stop it before starting another run.
+          </p>
+        )}
         {n < 2 && (
           <p className="mt-3 text-xs text-muted-foreground">
             Save at least two 3D annotations first. The 2D training tabs are unchanged.
@@ -160,7 +196,7 @@ export default function Train3D({
         <div className="rounded-lg border border-border bg-card p-4">
           <div className="mb-2 inline-flex items-center gap-2 text-xs font-semibold uppercase tracking-wider text-muted-foreground">
             {state?.running && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
-            {state?.running ? "Training 3D U-Net" : "Last run"}
+            {state?.running ? `Training ${picked.label}` : `Last ${picked.label} run`}
           </div>
           {state?.running && state.progress && (
             <div className="mb-3">
@@ -193,7 +229,7 @@ export default function Train3D({
       {state?.metrics && (
         <div className="rounded-lg border border-border bg-card p-4">
           <div className="mb-3 text-xs font-semibold uppercase tracking-wider text-muted-foreground">
-            3D result — {state.metrics.n_cases} volumes, {state.metrics.n_bme} with edema, {state.metrics.n_negative} without
+            {picked.label} — {state.metrics.n_cases} volumes, {state.metrics.n_bme} with edema, {state.metrics.n_negative} without
           </div>
           <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
             {(["bone_dice", "bme_dice", "lesion_sensitivity", "fp_per_case"] as const).map((k) => {
