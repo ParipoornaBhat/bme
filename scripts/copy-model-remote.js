@@ -1,8 +1,8 @@
 import { spawn, spawnSync } from "node:child_process";
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { chooseH200 } from "./h200-login.js";
 
 /**
  * Copy the finished 2D H200 model and its metrics back to this PC.
@@ -12,48 +12,8 @@ import { fileURLToPath } from "node:url";
  */
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const host = process.env.H200_HOST || "172.18.0.83";
-const user = process.env.H200_USER || "nnm23cs124_stu_cse";
-const target = `${user}@${host}`;
-const askpass = path.join(os.tmpdir(), "bme-ssh-askpass.cmd");
+let session;
 const remoteRel = "data/results2dseg3d";
-
-function readPassword(prompt) {
-  return new Promise((resolve) => {
-    process.stdout.write(prompt);
-    const stdin = process.stdin;
-    stdin.setRawMode?.(true);
-    stdin.resume();
-    stdin.setEncoding("utf8");
-    let pw = "";
-    const onData = (ch) => {
-      if (ch === "\r" || ch === "\n") {
-        stdin.setRawMode?.(false);
-        stdin.pause();
-        stdin.off("data", onData);
-        process.stdout.write("\n");
-        resolve(pw);
-      } else if (ch === "\u0003") {
-        process.exit(1);
-      } else if (ch === "\u007f" || ch === "\b") {
-        pw = pw.slice(0, -1);
-      } else {
-        pw += ch;
-      }
-    };
-    stdin.on("data", onData);
-  });
-}
-
-function sshEnv(password) {
-  return {
-    ...process.env,
-    SSH_ASKPASS: askpass,
-    SSH_ASKPASS_REQUIRE: "force",
-    DISPLAY: "localhost:0",
-    BME_SSH_PASS: password,
-  };
-}
 
 function run(cmd, args, { input, capture, env } = {}) {
   return new Promise((resolve, reject) => {
@@ -73,13 +33,13 @@ function run(cmd, args, { input, capture, env } = {}) {
 async function ssh(password, remoteCommand) {
   return run(
     "ssh",
-    ["-o", "ConnectTimeout=30", "-o", "StrictHostKeyChecking=accept-new", target, remoteCommand],
-    { capture: true, env: sshEnv(password) },
+    ["-o", "ConnectTimeout=30", "-o", "StrictHostKeyChecking=accept-new", session.target, remoteCommand],
+    { capture: true, env: session.env },
   );
 }
 
-const password = await readPassword(`${target} password: `);
-fs.writeFileSync(askpass, "@echo off\r\necho %BME_SSH_PASS%\r\n");
+session = await chooseH200(root);
+const password = session.password;
 
 try {
   const check = await ssh(
@@ -109,9 +69,9 @@ try {
 
   const remote = spawn(
     "ssh",
-    ["-o", "ConnectTimeout=30", "-o", "StrictHostKeyChecking=accept-new", target,
+    ["-o", "ConnectTimeout=30", "-o", "StrictHostKeyChecking=accept-new", session.target,
       `cd "$HOME/bme" && tar -cf - ${remoteRel}/metrics.json ${remoteRel}/checkpoints`],
-    { cwd: root, env: sshEnv(password), stdio: ["ignore", "pipe", "inherit"] },
+    { cwd: root, env: session.env, stdio: ["ignore", "pipe", "inherit"] },
   );
   const untar = spawn("tar", ["-xf", "-", "-C", root], {
     cwd: root,
@@ -150,5 +110,5 @@ print(from_summary(
   }
   console.log(`Saved to ${remoteRel}/`);
 } finally {
-  try { fs.unlinkSync(askpass); } catch { /* already gone */ }
+  session?.close();
 }

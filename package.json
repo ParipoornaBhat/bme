@@ -47,6 +47,7 @@
     "train:2d:remote": "node scripts/train-2d-remote.js",
     "remote:2d:remote": "node scripts/train-2d-remote.js",
     "copy:model:remote": "node scripts/copy-model-remote.js",
+    "h200": "node scripts/h200-menu.js",
     "migrate:generate": "pnpm --filter @bme/db db:generate --name",
     "migrate:deploy": "pnpm --filter @bme/db db:migrate",
     "clean": "node scripts/clean.js",
