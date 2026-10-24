@@ -95,60 +95,99 @@ python ml/scripts/train_3d.py <base> --legacy-case-folds
 
 ## Kaggle Cloud GPU Training (3D U-Net)
 
-For fast training on free cloud GPUs (NVIDIA T4, 30 free hours/week) without local hardware bottlenecks.
+For fast training on free cloud GPUs (NVIDIA T4) without local hardware bottlenecks.
 
 ### Safeguarded CLI Pipeline (`ml/scripts/kaggle_pipeline.py`)
 
-Every step requires explicit subcommands and confirmations. No data is ever transmitted automatically:
+Every step requires explicit subcommands and confirmations. No data is ever transmitted automatically.
 
-1. **Preflight**: Verify de-identification, leak guards, and volume integrity:
-   ```bash
-   python ml/scripts/kaggle_pipeline.py preflight --export-dir ../bme_colab_export --mapping-file ../bme_recovery/export_mapping.json
-   ```
-2. **Upload**: Upload strictly the verified de-identified export to a private Kaggle dataset:
-   ```bash
-   python ml/scripts/kaggle_pipeline.py upload --confirm-upload --export-dir ../bme_colab_export --mapping-file ../bme_recovery/export_mapping.json
-   ```
-3. **Launch**: Push and execute the notebook kernel on Kaggle GPU (`--mode quick` smoke test by default; `--mode bench` for 1 fold x 1 epoch speedup benchmark; `--mode fold0` for fold 0 x 40 epochs; `--mode full` for all 5 folds x 40 epochs, with optional `--folds`):
-   ```bash
-   python ml/scripts/kaggle_pipeline.py launch --confirm-launch [--mode {bench,quick,fold0,full}] [--folds 0 1 ...]
-   ```
-4. **Status**: Monitor cloud execution:
-   ```bash
-   python ml/scripts/kaggle_pipeline.py status
-   ```
-5. **Download**: Download outputs into an isolated staging directory outside the repo:
-   ```bash
-   python ml/scripts/kaggle_pipeline.py download --staging-dir ../bme_kaggle_staging
-   ```
-6. **Import**: Validate weights (weights_only=True, tensor shapes, allowlist) into `data/results3d`:
-   ```bash
-   python ml/scripts/kaggle_pipeline.py import --staging-dir ../bme_kaggle_staging
-   ```
+#### 1. Diagnostics (`doctor`)
+Runs 12-point system, environment, network, and security diagnostics without exposing credentials:
+```bash
+pnpm kaggle:doctor
+# Or check remote dataset visibility:
+pnpm kaggle:doctor --remote
+```
 
-### Manual Fallback (Zero API Dependencies)
-
-If you prefer not to use the Kaggle API or CLI:
-1. **Export & Verify Dataset Locally**:
+#### 2. One-Time Setup Flow (Approve & Upload Once)
+1. **Export & Verify Locally**:
    ```bash
    python ml/scripts/export_for_colab.py --src . --dst ../bme_colab_export --mapping-file ../bme_recovery/export_mapping.json
-   python ml/scripts/export_for_colab.py --verify --src . --dst ../bme_colab_export --mapping-file ../bme_recovery/export_mapping.json
    ```
-2. **Upload to Kaggle as Private Dataset**:
-   - Go to [kaggle.com/datasets](https://www.kaggle.com/datasets) -> **New Dataset**.
-   - Upload the folder `../bme_colab_export` (upload the folder directly, not a zip, never both).
-   - Title: `BME 3D Dataset` (slug `bme-3d-dataset`).
-   - **Crucial**: Set visibility to **Private Dataset** and click Create.
-3. **Upload & Run Notebook**:
-   - Go to [kaggle.com/code](https://www.kaggle.com/code) -> **New Notebook** -> **File > Upload Notebook**.
-   - Select `ml/notebooks/train_3d_colab.ipynb`.
-   - Under **Input** (right sidebar), click **+ Add Input** and add your private `bme-3d-dataset`.
-   - Under **Settings**, select **Accelerator > GPU T4** and enable **Internet**.
-   - Set `CONFIG_MODE = "quick_test"` (for smoke test), `"bench"` (for speedup benchmark), `"fold0"` (for single fold), or `"full"` (for production) in the config cell.
-   - Click **Save Version > Save & Run All (Commit)**.
-4. **Import Downloaded Weights**:
-   - When training finishes, download `results3d.zip` from the notebook's **Output** tab.
-   - Verify and import locally:
-     ```bash
-     python ml/scripts/verify_and_import_weights.py path/to/results3d.zip data/results3d
-     ```
+2. **Approve Dataset**:
+   Runs preflight and `check_deid_folder.py` to record a tamper-proof approval hash:
+   ```bash
+   pnpm kaggle:approve --confirm-approve
+   ```
+3. **Upload Once (Fast Network Recommended)**:
+   Compares local hash to approval record and queries Kaggle remotely. If the remote dataset already carries the approved hash, nothing is uploaded:
+   ```bash
+   pnpm kaggle:upload --confirm-upload
+   ```
+
+#### 3. Per-Run Training Flow (`run`)
+Launches the notebook kernel with your desired mode, tracks execution status, downloads filtered outputs (`fold_*.pt`, `metrics*.json`, `run_status.json`), and executes verified import:
+```bash
+# Smoke test (quick_test: 2 folds x 2 epochs)
+pnpm kaggle:run --mode quick --confirm-launch
+
+# Speed benchmark (bench: 1 fold x 1 epoch)
+pnpm kaggle:run --mode bench --confirm-launch
+
+# Single fold (fold0: fold 0 x 40 epochs)
+pnpm kaggle:run --mode fold0 --confirm-launch
+
+# Production training (full: 5 folds x 40 epochs)
+pnpm kaggle:run --mode full --confirm-launch
+
+# Evaluation suite & post-processing diagnostics
+pnpm kaggle:run --mode eval_suite --confirm-launch
+```
+
+If the training process or your laptop restarts, resume tracking and download without re-launching:
+```bash
+pnpm kaggle:run --resume
+# Or fetch latest results directly:
+pnpm kaggle:fetch
+```
+
+### Import Safety Policy
+- **Production Weights (`data/results3d/`)**: Only runs whose `run_status.json` verifies `mode == "full"`, `complete == true`, and dataset fingerprint matches are imported into `data/results3d/` through `verify_and_import_weights.py` (with automatic backup of previous weights).
+- **Experimental Runs**: Outputs from `quick`, `bench`, `fold0`, incomplete runs, or fingerprint mismatches are safely archived to `data/results3d_experiments/<run_id>/` and are never permitted to overwrite production results.
+
+### Stale-Build Warning
+If you pull new changes or edit frontend/backend code, ensure you rebuild and restart the production server:
+```bash
+pnpm build
+next start -H 127.0.0.1
+```
+The Train3D UI automatically displays a build-stamp alert if the server build is out-of-sync with current source code.
+
+### Manual Fallback (Zero API Dependencies)
+If you prefer not to use the Kaggle API or CLI:
+1. Export and verify locally using `export_for_colab.py`.
+2. Go to [kaggle.com/datasets](https://www.kaggle.com/datasets) -> New Dataset. Upload `../bme_colab_export` directly as a **Private Dataset**.
+3. Upload `ml/notebooks/train_3d_colab.ipynb` to [kaggle.com/code](https://www.kaggle.com/code).
+4. Attach your private dataset, enable GPU T4 and Internet, select `CONFIG_MODE`, and click **Save & Run All (Commit)**.
+5. Download `results3d.zip` from outputs and verify locally:
+   ```bash
+   python ml/scripts/verify_and_import_weights.py path/to/results3d.zip data/results3d
+   ```
+
+## Evaluation Suite & Post-Processing (`ml/scripts/eval_suite.py`)
+
+### 1. Leakage Rule & Multi-Fold Ensembling
+- **Cross-Validation Patients**: Any case that was part of the cross-validation training pool must **never** be evaluated with a multi-fold ensemble. For CV cases, out-of-fold (OOF) inference is strictly enforced: only the fold model whose recorded `val_cases` contain the case may evaluate it.
+- **Ensemble Policy**: Multi-fold ensembling (averaging soft probabilities across all 5 folds) is mathematically valid **only** on an external test set or a locked test cohort (`--test-patients-file`). Running multi-fold ensembles on cross-validation data causes in-sample information leakage because every case was in 4 out of 5 fold models' training sets.
+
+### 2. Honest Nested Cross-Validation for Post-Processing
+- Post-processing thresholds (edema probability threshold $\theta \in [0.3, 0.8]$ and 3D connected-component minimum size in $\text{mm}^3$) are selected through **nested cross-validation**:
+  - For each held-out fold $k$, parameter optimization is performed strictly on the remaining 4 folds ($folds \ne k$).
+  - The chosen parameters are then applied without modification to evaluate the held-out fold $k$.
+  - This prevents post-processing hyperparameter overfitting and yields an honest generalization estimate.
+  - An optimistic "tuned on everything" baseline is also computed for comparison and clearly flagged as optimistic.
+
+### 3. Patient-Level Bootstrap Confidence Intervals
+- Because several patients have bilateral knee scans or repeat sessions, confidence intervals are computed using **patient-level bootstrap resampling** (2,000 iterations).
+- All scans belonging to the same patient move together into each resample, preserving intra-subject correlations and preventing overconfident confidence intervals.
+- Paired bootstrap resampling is used to evaluate significance differences between competing configurations.

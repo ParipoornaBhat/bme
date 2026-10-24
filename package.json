@@ -48,7 +48,13 @@
     "clean:install": "node scripts/clean.js && pnpm install",
     "ci": "pnpm run clean:install",
     "native": "cross-env EXPO_NO_METRO_LAZY=1 pnpm --filter mobile start --clear",
-    "dev:seed": "pnpm db:seed && turbo run dev"
+    "dev:seed": "pnpm db:seed && turbo run dev",
+    "kaggle:doctor": "node scripts/kaggle-cli.js doctor",
+    "kaggle:approve": "node scripts/kaggle-cli.js approve-dataset --confirm-approve",
+    "kaggle:upload": "node scripts/kaggle-cli.js upload --confirm-upload",
+    "kaggle:run": "node scripts/kaggle-cli.js run --confirm-launch",
+    "kaggle:onetap": "node scripts/kaggle-cli.js onetap",
+    "kaggle:fetch": "node scripts/kaggle-cli.js download"
   },
   "devDependencies": {
     "cross-env": "^10.1.0",

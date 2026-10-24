@@ -152,11 +152,13 @@ export async function middleware(req: NextRequest) {
 
   const hostname = req.nextUrl.hostname || "";
   const host = req.headers.get("host") || "";
+  const isTrainingRoute = /^\/api\/training-3d(\/|$)/.test(path);
   if (
-    hostname === "localhost" ||
-    hostname === "127.0.0.1" ||
-    host.includes("localhost") ||
-    host.includes("127.0.0.1")
+    !isTrainingRoute &&
+    (hostname === "localhost" ||
+      hostname === "127.0.0.1" ||
+      host.includes("localhost") ||
+      host.includes("127.0.0.1"))
   ) {
     return NextResponse.next();
   }
