@@ -190,9 +190,12 @@ secrets/
 service-account*.json
 gcp-key*.json
 .kaggle/
+<<<<<<< Updated upstream
 temp_klog/
 **/kaggle.json
 
+=======
+>>>>>>> Stashed changes
 
 # ---------- EDITOR / OS ----------
 .vscode/*
@@ -224,6 +227,7 @@ $RECYCLE.BIN/
 scratch/
 tmp/
 temp/
+temp_klog/
 notebooks/scratch/
 
 # ---------- THUNDER STACK TEMPLATE EXTRAS ----------
