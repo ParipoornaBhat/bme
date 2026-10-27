@@ -11,6 +11,10 @@ trains. Annotations are gitignored, so they travel as a zip.
     python ml/scripts/team_annotations.py export . --who paripoorna
     #   -> data/exports/annotations_paripoorna_<stamp>.zip   (send it to the hub)
 
+    # the hub: merge every teammate zip lying in the repo root or data/exports/
+    python ml/scripts/team_annotations.py import-all .            (dry run)
+    python ml/scripts/team_annotations.py import-all . --apply
+
     # the hub: merge one or more zips
     python ml/scripts/team_annotations.py import . <zip> [<zip> ...]            (dry run)
     python ml/scripts/team_annotations.py import . <zip> [<zip> ...] --apply
@@ -76,14 +80,14 @@ import numpy as np  # noqa: E402
 
 from seg2nifti import build_labelmap, read_segmentation  # noqa: E402
 
-# Owner of every case, 1-based numbers of BME-xxx. Agreed by the team; the
-# cases each person finished before the split (1-5, 60-61) belong to whoever
-# painted them, not to whoever's range they would otherwise fall in.
+# Owner of every case, 1-based numbers. Each range covers both BME-xxx and
+# NBME-xxx. Agreed by the team on 2026-10-27; the earlier BME-only split was
+# 1-5,58-59 / 6-26,46-47 / 27-45,55-57,60-61 / 48-53.
 TEAM = {
-    "aditi": "6-26,46-47",
-    "paripoorna": "1-5,58-59",
-    "reegan": "27-45,55-57,60-61",
-    "elvin": "48-53",
+    "paripoorna": "1-15",
+    "elvin": "16-30",
+    "aditi": "31-45",
+    "reegan": "46-61",
 }
 
 
@@ -93,6 +97,7 @@ def parse_ranges(spec: str) -> list[str]:
         lo, _, hi = part.partition("-")
         for n in range(int(lo), int(hi or lo) + 1):
             ids.append(f"BME-{n:03d}")
+            ids.append(f"NBME-{n:03d}")
     return ids
 
 
@@ -156,7 +161,7 @@ def cmd_assign(base: Path, apply: bool):
     for who, spec in TEAM.items():
         n = sum(1 for c in parse_ranges(spec) if c in present)
         print(f"  {who:12s} {spec:12s} {n:3d} case(s)")
-    unowned = sorted(c for c in present if c.startswith("BME-") and c not in own)
+    unowned = sorted(c for c in present if c.startswith(("BME-", "NBME-")) and c not in own)
     missing = sorted(c for c in own if c not in present)
     if unowned:
         print(f"  no owner     : {', '.join(unowned)}")
@@ -210,6 +215,35 @@ def cmd_export(base: Path, who: str):
         for p in files:
             z.write(p, f"{p.parent.name}/{p.name}")
     print(f"{len(manifest['cases'])} case(s), {len(files)} file(s). Send this zip to the hub laptop.")
+
+
+def find_team_zips(base: Path) -> list[Path]:
+    """annotations_<who>_<stamp>.zip in the repo root and data/exports/, newest per person.
+
+    Byte-identical copies (the same zip downloaded twice) count once. An older zip
+    from the same person is superseded by their newer one, so two versions of one
+    file never race each other.
+    """
+    seen: dict[str, Path] = {}
+    for folder in (base, base / "data" / "exports"):
+        for zp in sorted(folder.glob("annotations_*.zip")):
+            seen.setdefault(hashlib.sha256(zp.read_bytes()).hexdigest(), zp)
+    newest: dict[str, tuple[str, Path]] = {}
+    for zp in seen.values():
+        try:
+            with zipfile.ZipFile(zp) as z:
+                man = json.loads(z.read("manifest.json"))
+        except (zipfile.BadZipFile, KeyError, json.JSONDecodeError):
+            print(f"  {zp.name}: not an annotations export, ignored")
+            continue
+        who, stamp = man.get("who", "?"), str(man.get("created", ""))
+        if who not in newest or stamp > newest[who][0]:
+            if who in newest:
+                print(f"  {newest[who][1].name}: older than {zp.name}, ignored")
+            newest[who] = (stamp, zp)
+        else:
+            print(f"  {zp.name}: older than {newest[who][1].name}, ignored")
+    return [zp for _, zp in sorted(newest.values(), key=lambda t: t[1].name)]
 
 
 def cmd_import(base: Path, zips: list[Path], apply: bool, prefer_incoming: bool, any_owner: bool):
@@ -457,6 +491,10 @@ def main():
     i.add_argument("--prefer-incoming", action="store_true")
     i.add_argument("--any-owner", action="store_true")
 
+    ia = sub.add_parser("import-all")
+    ia.add_argument("base")
+    ia.add_argument("--apply", action="store_true")
+
     sh = sub.add_parser("share")
     sh.add_argument("base")
 
@@ -473,6 +511,12 @@ def main():
         cmd_export(base, args.who)
     elif args.cmd == "share":
         cmd_share(base)
+    elif args.cmd == "import-all":
+        zips = find_team_zips(base)
+        if not zips:
+            sys.exit("no annotations_*.zip in the repo root or data/exports/")
+        print("using: " + ", ".join(z.name for z in zips))
+        cmd_import(base, zips, args.apply, prefer_incoming=False, any_owner=False)
     elif args.cmd == "restore":
         cmd_restore(base, args.zips, args.apply)
     else:

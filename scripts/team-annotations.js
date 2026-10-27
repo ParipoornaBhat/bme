@@ -1,4 +1,6 @@
 import { spawnSync } from "node:child_process";
+import readline from "node:readline/promises";
+import { stdin as input, stdout as output } from "node:process";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -6,6 +8,7 @@ import { fileURLToPath } from "node:url";
 // pnpm zipbme:<name>          ->  team_annotations.py export <root> --who <name>
 // pnpm data:share              ->  team_annotations.py share <root>
 // pnpm data:sync [<mri>] <ann> ->  team_annotations.py restore <root> [<mri>] <ann> --apply
+// pnpm data:import:team        ->  team_annotations.py import-all <root>, then --apply on a yes
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const python =
   process.platform === "win32"
@@ -28,7 +31,18 @@ function zipPath(arg) {
 
 const [first, ...extra] = process.argv.slice(2).filter((arg) => arg !== "--");
 let args;
-if (first === "share") {
+if (first === "import-all") {
+  const dry = spawnSync(python, [script, "import-all", root], { cwd: root, stdio: "inherit" });
+  if (dry.status !== 0) process.exit(dry.status ?? 1);
+  const rl = readline.createInterface({ input, output });
+  const yes = (await rl.question("\nImport these? Nothing local is overwritten. [y/N] ")).trim().toLowerCase();
+  rl.close();
+  if (yes !== "y") {
+    console.log("Nothing written.");
+    process.exit(0);
+  }
+  args = [script, "import-all", root, "--apply"];
+} else if (first === "share") {
   args = [script, "share", root];
 } else if (first === "restore") {
   const zips = extra.filter((arg) => !arg.startsWith("--"));
