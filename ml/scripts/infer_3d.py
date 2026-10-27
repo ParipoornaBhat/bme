@@ -20,7 +20,7 @@ import torch
 from scipy.ndimage import label as cc_label
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from train_3d import build_model, guard_device, normalize, predict_volume  # noqa: E402
+from train_3d import PATCH, build_model, guard_device, normalize, predict_volume  # noqa: E402
 
 
 def read_nrrd(path: Path):
@@ -66,15 +66,17 @@ def main():
     guard_device(device)
     first = torch.load(ckpts[0], map_location=device, weights_only=False)
     model_name = str(first.get("model") or WEIGHTS[out_name])
-    model = build_model(model_name).to(device)
+    width = int(first.get("width") or 16)
+    patch = tuple(first.get("patch") or PATCH)
+    model = build_model(model_name, width).to(device)
     model.load_state_dict(first["state"])
-    masks = [predict_volume(model, norm, device)]
+    masks = [predict_volume(model, norm, device, patch)]
     for ck in ckpts[1:]:
         blob = torch.load(ck, map_location=device, weights_only=False)
         if str(blob.get("model") or model_name) != model_name:
             raise SystemExit(f"{ck.name} is a different architecture from {ckpts[0].name}")
         model.load_state_dict(blob["state"])
-        masks.append(predict_volume(model, norm, device))
+        masks.append(predict_volume(model, norm, device, patch))
     # Majority across folds, then drop edema that is not inside bone in that vote.
     bone_votes = sum((m > 0).astype(np.uint8) for m in masks)
     bme_votes = sum((m == 2).astype(np.uint8) for m in masks)

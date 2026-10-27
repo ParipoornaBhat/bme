@@ -18,8 +18,10 @@ import csv
 import gc
 import json
 import os
+import math
 import random
 import sys
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -63,44 +65,59 @@ def normalize(raw: np.ndarray) -> np.ndarray:
     return out
 
 
-def pad_volume(vol: np.ndarray) -> np.ndarray:
-    pads = [(0, max(0, PATCH[i] - vol.shape[i])) for i in range(3)]
+def pad_volume(vol: np.ndarray, patch=PATCH) -> np.ndarray:
+    pads = [(0, max(0, patch[i] - vol.shape[i])) for i in range(3)]
     if any(b for _, b in pads):
         return np.pad(vol, pads)
     return vol
 
 
-def window_origins(shape: tuple[int, int, int]) -> list[tuple[int, int, int]]:
+def window_origins(shape: tuple[int, int, int], patch=PATCH) -> list[tuple[int, int, int]]:
+    stride = tuple(max(1, p // 2) for p in patch)
     ranges = []
     for ax in range(3):
-        last = max(0, shape[ax] - PATCH[ax])
+        last = max(0, shape[ax] - patch[ax])
         if last == 0:
             ranges.append([0])
             continue
-        starts = list(range(0, last + 1, STRIDE[ax]))
+        starts = list(range(0, last + 1, stride[ax]))
         if starts[-1] != last:
             starts.append(last)
         ranges.append(starts)
     return [(x, y, z) for x in ranges[0] for y in ranges[1] for z in ranges[2]]
 
 
-def crop(vol: np.ndarray, origin: tuple[int, int, int]) -> np.ndarray:
-    sl = tuple(slice(o, o + p) for o, p in zip(origin, PATCH))
+def crop(vol: np.ndarray, origin: tuple[int, int, int], patch=PATCH) -> np.ndarray:
+    sl = tuple(slice(o, o + p) for o, p in zip(origin, patch))
     return vol[sl]
 
 
-def sample_origin(shape: tuple[int, int, int], labels: np.ndarray, rng: np.random.Generator):
-    if (labels == 2).any() and rng.random() < 0.7:
-        pts = np.argwhere(labels == 2)
+def sample_origin(shape: tuple[int, int, int], labels: np.ndarray, rng: np.random.Generator,
+                  patch=PATCH, lesion_pts: np.ndarray | None = None):
+    pts = lesion_pts if lesion_pts is not None else (np.argwhere(labels == 2) if (labels == 2).any() else None)
+    if pts is not None and len(pts) and rng.random() < 0.7:
         point = pts[int(rng.integers(len(pts)))]
         return tuple(
-            int(np.clip(point[ax] - PATCH[ax] // 2, 0, max(0, shape[ax] - PATCH[ax])))
+            int(np.clip(point[ax] - patch[ax] // 2, 0, max(0, shape[ax] - patch[ax])))
             for ax in range(3)
         )
     return tuple(
-        0 if shape[ax] <= PATCH[ax] else int(rng.integers(0, shape[ax] - PATCH[ax] + 1))
+        0 if shape[ax] <= patch[ax] else int(rng.integers(0, shape[ax] - patch[ax] + 1))
         for ax in range(3)
     )
+
+
+def augment(image: np.ndarray, labels: np.ndarray, rng: np.random.Generator):
+    """In-plane flips and a mild intensity change. No resampling, so labels stay exact."""
+    for ax in (0, 1):
+        if rng.random() < 0.5:
+            image = np.flip(image, ax)
+            labels = np.flip(labels, ax)
+    if rng.random() < 0.8:
+        gamma = np.float32(np.exp(rng.uniform(-0.3, 0.3)))
+        image = np.power(np.clip(image, 0, 1), gamma)
+        image = image * np.float32(rng.uniform(0.9, 1.1)) + np.float32(rng.uniform(-0.05, 0.05))
+    return np.ascontiguousarray(image, dtype=np.float32), np.ascontiguousarray(labels)
 
 
 def volume_path(base: Path, case_id: str) -> Path:
@@ -164,8 +181,9 @@ def load_case(base: Path, case_id: str) -> dict | None:
 class UNet3D(nn.Module):
     """Joint bone and lesion. Two channels, lesion clipped to bone at inference."""
 
-    def __init__(self):
+    def __init__(self, width: int = 16):
         super().__init__()
+        w = width
 
         def block(i, o):
             return nn.Sequential(
@@ -174,15 +192,15 @@ class UNet3D(nn.Module):
                 nn.ReLU(inplace=True),
             )
 
-        self.e1 = block(1, 16)
-        self.e2 = block(16, 32)
-        self.e3 = block(32, 64)
+        self.e1 = block(1, w)
+        self.e2 = block(w, 2 * w)
+        self.e3 = block(2 * w, 4 * w)
         self.pool = nn.MaxPool3d(2)
-        self.up2 = nn.ConvTranspose3d(64, 32, 2, stride=2)
-        self.d2 = block(64, 32)
-        self.up1 = nn.ConvTranspose3d(32, 16, 2, stride=2)
-        self.d1 = block(32, 16)
-        self.out = nn.Conv3d(16, 2, 1)
+        self.up2 = nn.ConvTranspose3d(4 * w, 2 * w, 2, stride=2)
+        self.d2 = block(4 * w, 2 * w)
+        self.up1 = nn.ConvTranspose3d(2 * w, w, 2, stride=2)
+        self.d1 = block(2 * w, w)
+        self.out = nn.Conv3d(w, 2, 1)
 
     def forward(self, x):
         a = self.e1(x)
@@ -209,8 +227,9 @@ class AttentionGate3d(nn.Module):
 class AttentionUNet3D(nn.Module):
     """3D U-Net with attention on the skip links. Same two outputs, same patch size."""
 
-    def __init__(self):
+    def __init__(self, width: int = 16):
         super().__init__()
+        w = width
 
         def block(i, o):
             return nn.Sequential(
@@ -219,17 +238,17 @@ class AttentionUNet3D(nn.Module):
                 nn.ReLU(inplace=True),
             )
 
-        self.e1 = block(1, 16)
-        self.e2 = block(16, 32)
-        self.e3 = block(32, 64)
+        self.e1 = block(1, w)
+        self.e2 = block(w, 2 * w)
+        self.e3 = block(2 * w, 4 * w)
         self.pool = nn.MaxPool3d(2)
-        self.up2 = nn.ConvTranspose3d(64, 32, 2, stride=2)
-        self.gate2 = AttentionGate3d(32, 32, 16)
-        self.d2 = block(64, 32)
-        self.up1 = nn.ConvTranspose3d(32, 16, 2, stride=2)
-        self.gate1 = AttentionGate3d(16, 16, 8)
-        self.d1 = block(32, 16)
-        self.out = nn.Conv3d(16, 2, 1)
+        self.up2 = nn.ConvTranspose3d(4 * w, 2 * w, 2, stride=2)
+        self.gate2 = AttentionGate3d(2 * w, 2 * w, w)
+        self.d2 = block(4 * w, 2 * w)
+        self.up1 = nn.ConvTranspose3d(2 * w, w, 2, stride=2)
+        self.gate1 = AttentionGate3d(w, w, max(1, w // 2))
+        self.d1 = block(2 * w, w)
+        self.out = nn.Conv3d(w, 2, 1)
 
     def forward(self, x):
         a = self.e1(x)
@@ -244,11 +263,11 @@ class AttentionUNet3D(nn.Module):
         return self.out(y)
 
 
-def build_model(name: str) -> nn.Module:
+def build_model(name: str, width: int = 16) -> nn.Module:
     if name == "unet":
-        return UNet3D()
+        return UNet3D(width)
     if name == "attention-unet":
-        return AttentionUNet3D()
+        return AttentionUNet3D(width)
     raise SystemExit(f"unknown model {name!r}. choices: unet, attention-unet")
 
 
@@ -338,22 +357,23 @@ def release():
 
 
 @torch.no_grad()
-def predict_volume(model: nn.Module, image: np.ndarray, device: str) -> np.ndarray:
+def predict_volume(model: nn.Module, image: np.ndarray, device: str, patch_size=PATCH) -> np.ndarray:
     """One patch on the GPU at a time. Votes stay uint16 so the full scan is not copied as float."""
     model.eval()
+    patch_size = tuple(int(p) for p in patch_size)
     shape = image.shape
-    padded = pad_volume(image)
+    padded = pad_volume(image, patch_size)
     votes_bone = np.zeros(padded.shape, dtype=np.uint16)
     votes_bme = np.zeros(padded.shape, dtype=np.uint16)
     hits = np.zeros(padded.shape, dtype=np.uint16)
-    for origin in window_origins(padded.shape):
-        patch = np.ascontiguousarray(crop(padded, origin))
+    for origin in window_origins(padded.shape, patch_size):
+        patch = np.ascontiguousarray(crop(padded, origin, patch_size))
         x = torch.from_numpy(patch).float().unsqueeze(0).unsqueeze(0).to(device)
-        prob = torch.sigmoid(model(x)[0])
+        prob = torch.sigmoid(model(x)[0].float())
         bone = (prob[0] >= 0.5).cpu().numpy()
         bme = ((prob[1] >= 0.5).cpu().numpy() & bone)
         del x, prob
-        sl = tuple(slice(o, o + p) for o, p in zip(origin, PATCH))
+        sl = tuple(slice(o, o + p) for o, p in zip(origin, patch_size))
         votes_bone[sl] += bone
         votes_bme[sl] += bme
         hits[sl] += 1
@@ -382,7 +402,25 @@ def main():
     ap.add_argument("--model", choices=("unet", "attention-unet"), default="unet")
     ap.add_argument("--out", default="", help="folder under data/. Default depends on the model.")
     ap.add_argument("--device", choices=("auto", "cuda", "cpu"), default="auto")
+    # Defaults reproduce the laptop run. The H200 job (ml/slurm/train_3d.sbatch) raises them.
+    ap.add_argument("--width", type=int, default=16, help="channels in the first layer")
+    ap.add_argument("--patch", default="96,96,12", help="x,y,z, each divisible by 4")
+    ap.add_argument("--patches-per-case", type=int, default=PATCHES_PER_CASE)
+    ap.add_argument("--batch", type=int, default=1)
+    ap.add_argument("--lr", type=float, default=1e-3)
+    ap.add_argument("--resample", action="store_true",
+                    help="keep scans in memory and cut fresh patches every epoch (needs RAM)")
+    ap.add_argument("--augment", action="store_true", help="in-plane flips and intensity jitter")
+    ap.add_argument("--amp", action="store_true", help="bfloat16 autocast on CUDA")
+    ap.add_argument("--cosine", action="store_true", help="cosine learning-rate decay per fold")
+    ap.add_argument("--hours", type=float, default=0.0,
+                    help="training time budget across all folds; epochs are fitted to it (0 = off)")
+    ap.add_argument("--max-cases", type=int, default=0, help="smoke tests only")
     args = ap.parse_args()
+    patch = tuple(int(v) for v in args.patch.split(","))
+    if len(patch) != 3 or any(p % 4 for p in patch):
+        raise SystemExit(f"--patch must be three numbers divisible by 4, got {args.patch}")
+    started = time.monotonic()
 
     random.seed(SEED)
     np.random.seed(SEED)
@@ -395,6 +433,8 @@ def main():
     ) if ann.is_dir() else []
     if not files:
         raise SystemExit("No 3D annotations. Paint and save a case on the Annotate page first.")
+    if args.max_cases:
+        files = files[: args.max_cases]
 
     classes = worklist_class(base)
     print("Loading volumes", flush=True)
@@ -406,21 +446,28 @@ def main():
         item = load_case(base, p.parent.name)
         if not item:
             continue
-        image = pad_volume(item["image"])
-        labels = pad_volume(item["labels"])
-        patches, patch_labels = [], []
-        for _ in range(PATCHES_PER_CASE):
-            origin = sample_origin(image.shape, labels, rng_load)
-            patches.append(np.ascontiguousarray(crop(image, origin)))
-            patch_labels.append(np.ascontiguousarray(crop(labels, origin)))
-        cases.append({
+        image = pad_volume(item["image"], patch)
+        labels = pad_volume(item["labels"], patch)
+        case = {
             "id": item["id"],
             "cls": classes.get(item["id"], ""),
             "bme_voxels": item["bme_voxels"],
-            "patches": patches,
-            "patch_labels": patch_labels,
-        })
-        del item, image, labels, patches, patch_labels
+        }
+        if args.resample:
+            # float16 halves the RAM; patches are cast back to float32 when cut.
+            case["image"] = image.astype(np.float16)
+            case["labels"] = labels
+            case["lesion_pts"] = np.argwhere(labels == 2).astype(np.int32)
+        else:
+            patches, patch_labels = [], []
+            for _ in range(args.patches_per_case):
+                origin = sample_origin(image.shape, labels, rng_load, patch)
+                patches.append(np.ascontiguousarray(crop(image, origin, patch)))
+                patch_labels.append(np.ascontiguousarray(crop(labels, origin, patch)))
+            case["patches"] = patches
+            case["patch_labels"] = patch_labels
+        cases.append(case)
+        del item, image, labels
         release()
     if len(cases) < 2:
         raise SystemExit(f"Need at least 2 annotated volumes to hold one out. Found {len(cases)}.")
@@ -434,8 +481,10 @@ def main():
         flush=True,
     )
     print(
-        f"Patch {PATCH[0]}×{PATCH[1]}×{PATCH[2]} on the original voxel grid, "
-        f"{PATCHES_PER_CASE} patches per case per epoch. "
+        f"Patch {patch[0]}×{patch[1]}×{patch[2]} on the original voxel grid, "
+        f"{args.patches_per_case} patches per case per epoch"
+        f"{' (fresh every epoch)' if args.resample else ''}, width {args.width}, batch {args.batch}"
+        f"{', augmented' if args.augment else ''}. "
         "Edema outside predicted bone is removed.",
         flush=True,
     )
@@ -461,33 +510,80 @@ def main():
             f"then scoring {len(val)} held-out scan(s).",
             flush=True,
         )
-        model = build_model(args.model).to(device)
-        opt = torch.optim.Adam(model.parameters(), lr=1e-3)
+        model = build_model(args.model, args.width).to(device)
+        opt = torch.optim.Adam(model.parameters(), lr=args.lr)
+        rng_train = np.random.default_rng(SEED + fold)
+        use_amp = args.amp and device == "cuda"
+        fold_epochs = args.epochs
+        if args.hours > 0:
+            # Whatever is left of the budget, shared by the folds not yet trained.
+            left = args.hours * 3600 - (time.monotonic() - started)
+            fold_budget = max(60.0, left / (folds_n - fold))
+        fold_start = time.monotonic()
         total_steps = folds_n * args.epochs
-        for epoch in range(1, args.epochs + 1):
-            model.train()
-            total = 0.0
-            steps = 0
+
+        def batches():
+            items = []
             order_cases = train[:]
             random.shuffle(order_cases)
             for case in order_cases:
-                for image, labels in zip(case["patches"], case["patch_labels"]):
-                    x = torch.from_numpy(image).float().unsqueeze(0).unsqueeze(0).to(device)
-                    lab = torch.from_numpy(labels).to(device)
-                    tgt, valid = targets(lab)
-                    opt.zero_grad(set_to_none=True)
-                    loss = dice_focal(model(x)[0], tgt, valid)
-                    loss.backward()
-                    opt.step()
-                    total += float(loss)
-                    steps += 1
-                    del x, lab, tgt, valid, loss
-            done = fold * args.epochs + epoch
+                if args.resample:
+                    for _ in range(args.patches_per_case):
+                        origin = sample_origin(case["image"].shape, case["labels"], rng_train,
+                                               patch, case["lesion_pts"])
+                        items.append((crop(case["image"], origin, patch).astype(np.float32),
+                                      crop(case["labels"], origin, patch)))
+                else:
+                    items.extend(zip(case["patches"], case["patch_labels"]))
+            random.shuffle(items)
+            for i in range(0, len(items), args.batch):
+                chunk = items[i: i + args.batch]
+                if args.augment:
+                    chunk = [augment(im, lb, rng_train) for im, lb in chunk]
+                yield chunk
+
+        epoch = 0
+        while epoch < fold_epochs:
+            epoch += 1
+            if args.cosine and fold_epochs > 1:
+                lr = 1e-5 + (args.lr - 1e-5) * 0.5 * (1 + math.cos(math.pi * (epoch - 1) / (fold_epochs - 1)))
+                for g in opt.param_groups:
+                    g["lr"] = lr
+            model.train()
+            total = 0.0
+            steps = 0
+            for chunk in batches():
+                x = torch.from_numpy(np.stack([im for im, _ in chunk])).float().unsqueeze(1).to(device)
+                lab = torch.from_numpy(np.stack([lb for _, lb in chunk])).to(device)
+                opt.zero_grad(set_to_none=True)
+                with torch.autocast("cuda", dtype=torch.bfloat16, enabled=use_amp):
+                    logits = model(x)
+                logits = logits.float()
+                loss = logits.new_zeros(())
+                for b in range(len(chunk)):
+                    tgt, valid = targets(lab[b])
+                    loss = loss + dice_focal(logits[b], tgt, valid)
+                loss = loss / len(chunk)
+                loss.backward()
+                opt.step()
+                total += float(loss.detach())
+                steps += 1
+                del x, lab, logits, loss
+            if args.hours > 0 and epoch == 1:
+                per_epoch = time.monotonic() - fold_start
+                fold_epochs = int(max(2, min(args.epochs, fold_budget // max(per_epoch, 1e-3))))
+                print(
+                    f"Fold {fold + 1}: one epoch takes {per_epoch:.0f}s; "
+                    f"fitting {fold_epochs} epochs into {fold_budget / 60:.0f} min.",
+                    flush=True,
+                )
+                total_steps = folds_n * fold_epochs
+            done = fold * fold_epochs + epoch
             width = 24
-            fill = int(width * done / total_steps)
+            fill = int(width * min(done, total_steps) / total_steps)
             print(
                 f"[{'#' * fill}{'.' * (width - fill)}] {done}/{total_steps}  "
-                f"fold {fold + 1}/{folds_n}  epoch {epoch}/{args.epochs}  "
+                f"fold {fold + 1}/{folds_n}  epoch {epoch}/{fold_epochs}  "
                 f"learning bone and edema  loss={total / max(steps, 1):.4f}",
                 flush=True,
             )
@@ -503,7 +599,7 @@ def main():
             loaded = load_case(base, case["id"])
             if not loaded:
                 continue
-            pred = predict_volume(model, loaded["image"], device)
+            pred = predict_volume(model, loaded["image"], device, patch)
             bone_d.append(dice(loaded["labels"], pred, 1))
             bme_d.append(dice(loaded["labels"], pred, 2))
             gt_bone = (loaded["labels"] == 1) | (loaded["labels"] == 2)
@@ -533,12 +629,13 @@ def main():
         b_prec, b_rec, b_f1, b_iou = rates(*bone_box)
         e_prec, e_rec, e_f1, e_iou = rates(*edema_box)
         torch.save(
-            {"state": model.state_dict(), "patch": PATCH, "seed": SEED, "model": args.model},
+            {"state": model.state_dict(), "patch": list(patch), "width": args.width, "seed": SEED, "model": args.model},
             out_dir / f"fold_{fold}.pt",
         )
         fold_rows.append({
             "fold": fold,
             "val": [c["id"] for c in val],
+            "epochs_run": epoch,
             "bone_dice": float(np.mean(bone_d)),
             "bme_dice": float(np.mean(bme_d)),
             "lesion_sensitivity": float(np.mean(sens)),
@@ -559,9 +656,16 @@ def main():
         "model": args.model,
         "device": device,
         "folds": folds_n,
-        "epochs": args.epochs,
+        "epochs": max(r["epochs_run"] for r in fold_rows),
         "seed": SEED,
-        "patch": list(PATCH),
+        "patch": list(patch),
+        "width": args.width,
+        "batch": args.batch,
+        "patches_per_case": args.patches_per_case,
+        "resample": args.resample,
+        "augment": args.augment,
+        "hours_budget": args.hours,
+        "hours_taken": round((time.monotonic() - started) / 3600, 2),
         "n_cases": len(cases),
         "n_bme": n_bme,
         "n_negative": n_neg,
@@ -585,7 +689,7 @@ def main():
         "trained_at": datetime.now(timezone.utc).isoformat(),
         "note": (
             f"{len(cases)} volumes ({n_bme} with edema, {n_neg} without), "
-            f"{folds_n} patient-level folds, patch {PATCH[0]}×{PATCH[1]}×{PATCH[2]}. "
+            f"{folds_n} patient-level folds, patch {patch[0]}×{patch[1]}×{patch[2]}, width {args.width}. "
             "Bone and edema are trained together. Edema outside the predicted bone is removed. "
             "Dice, lesion sensitivity, and false positives per case are mean ± std across folds."
         ),
@@ -594,7 +698,7 @@ def main():
     from metrics_log import from_summary
     log_path = from_summary(
         base, task="3d", model=args.model, device=device,
-        out_dir=f"data/{out_name}", folds=folds_n, epochs=args.epochs,
+        out_dir=f"data/{out_name}", folds=folds_n, epochs=metrics["epochs"],
         n_cases=len(cases), summary=metrics["summary"],
         n_bme=n_bme, n_negative=n_neg, fp_key="fp_per_case", fp_unit="per_case",
         presence_correct=metrics["presence_correct"], presence_n=metrics["presence_n"],

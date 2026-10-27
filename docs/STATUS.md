@@ -70,9 +70,18 @@ Phases are defined in [PRD.md](PRD.md) §8.
 
 In order. Each step's output is the next step's input.
 
-0. **Team annotation split and merge (2026-10-07).** Bone painting is split by case:
-   Aditi 6-26, 46-47 · Paripoorna 1-5, 54-59 · Reegan 27-45, 60-61 · Elvin 48-53 (the
-   split lives in `TEAM` in `ml/scripts/team_annotations.py`). Elvin's laptop is the hub.
+0. **Team annotation split and merge (2026-10-27).** Split by case number, same range for
+   `BME-` and `NBME-`: Paripoorna 1-15 · Elvin 16-30 · Aditi 31-45 · Reegan 46-61 (`TEAM` in
+   `ml/scripts/team_annotations.py`). Everyone exports with `pnpm zipbme:<name>`; the hub drops
+   all the zips in the repo root and runs `pnpm data:import:team` (newest zip per person, dry run,
+   asks, never overwrites painted work). Focus annotation on the **axial** stack: the 3D model is
+   trained on axial clinical stacks (3-4 mm between slices), so other planes are interpolated.
+   **H200 (2026-10-27):** `pnpm h200` is the menu (status, push, train3d, train2d, log, cancel,
+   get3d, get2d, env); it uses the only H200 password in `.env` or asks which. `train3d` runs
+   `ml/slurm/train_3d.sbatch` (width 32, 128x128x16 patches cut fresh each epoch, flips,
+   bf16, cosine LR, epochs fitted to 3.3 h) into `data/results3d-h200`; `get3d` downloads it and
+   asks before replacing `data/results3d`. Old split (2026-10-07) was
+   Aditi 6-26, 46-47 · Paripoorna 1-5, 54-59 · Reegan 27-45, 60-61 · Elvin 48-53. Elvin's laptop is the hub.
    Every laptop runs `team_annotations.py assign . --apply` once, to fill `assigned_to` in
    the worklist. A teammate runs `export . --who <name>`, which zips only their cases with bone
    painted into `data/exports/` (or `pnpm zipbme:<name>`). The hub runs `import . <zip>` (dry run, then `--apply`).
@@ -359,6 +368,7 @@ Carried from [PRD.md](PRD.md) §10, updated with what the data answered.
 | Problem | Impact | Action |
 |---|---|---|
 | **2D case-level AUC jumped 0.658 → 0.961 when the dataset was rebuilt** | A number that good on this task, from 18 positive patients, is more likely a dataset shortcut than a modelling win | Two leaks measured on 2026-09-04. **(a)** `BME-2D-005` and `BME-2D-008` carry a **red ellipse drawn around the lesion**, burned into the pixels — 2/25 BME files, 0/69 non-BME. **(b)** A burned-in yellow A/P orientation overlay appears in **19/69 non-BME (28%)** but **1/25 BME (4%)**, and the two folders are framed and cropped differently — different exporters. Neither alone explains 0.96, but together they make it indefensible. **Before quoting anything: retrain on a centre crop excluding the borders, and drop or repair the two ellipse images.** |
+| Two non-BME cases (`NBME-005`, `NBME-058`) were light-marrow T1/PD, not fat-suppressed | Edema not visible on them; they looked opposite to every other case | Fixed 2026-10-27: `pnpm data:nonbme:fix-fs` swaps in the same case's fat-suppressed axial series and resamples existing annotations onto it (backup in `data/_backup_fs_*`). Teammates: `fs_fix.zip` in repo root, then `pnpm data:nonbme:fix-fs:install`. A grainy dark-marrow group (gradient echo: NBME-002/004/006/007/008/012/019/051) was left as is — flag to the guide. `Non BME/new/new/8` is empty, so source folder N maps to NBME-(N-1) from 9 on. |
 | 18 BME patients is the whole 2D positive pool | 3–4 positives per validation fold; the per-fold spread is wider than most effects | Always report mean ± std with n stated. Never quote one fold. |
 | **3D set is 55 BME-positive cases, no negatives** | A segmenter trained only on positives has never seen a knee without edema; FP rate on normal scans is unmeasured | Get non-BME scans into the Slicer export, or keep the old NBME cases' volumes |
 | **Same patient imported twice in the 3D set** | BME-032/033 and BME-052/054 are one patient each; a patient-level split can put one copy in train and the other in validation | Merge each pair's markings into one case ([SLICER_EXPORT_AUDIT.md](SLICER_EXPORT_AUDIT.md) §1) |
