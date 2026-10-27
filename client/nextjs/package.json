@@ -10,7 +10,8 @@
     "deploy:cf": "wrangler pages deploy .open-next/.deploy",
     "deploy:vercel": "vercel",
     "start": "next start -H 0.0.0.0",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test": "node test_kaggle_route.mjs"
   },
   "dependencies": {
     "@bme/db": "workspace:*",

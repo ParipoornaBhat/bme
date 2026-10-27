@@ -1,8 +1,9 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Loader2, Play, Square } from "lucide-react";
+import { Cloud, Cpu, Loader2, Play, Square } from "lucide-react";
 import { MODELS_3D, model3dInfo, type Model3DId } from "~/lib/models3d";
+import Train3DKaggle from "./Train3DKaggle";
 
 type Torch = {
   cudaAvailable: boolean; deviceName: string | null; vramGB: number | null; reason: string | null;
@@ -44,6 +45,9 @@ export default function Train3D({
   const [epochs, setEpochs] = useState(40);
   const [folds, setFolds] = useState(5);
   const [busy, setBusy] = useState(false);
+  const [computeMode, setComputeMode] = useState<"local" | "kaggle">("local");
+  const [localRunning, setLocalRunning] = useState(false);
+  const [kaggleRunning, setKaggleRunning] = useState(false);
   const onRunningRef = useRef(onRunning);
   onRunningRef.current = onRunning;
   const picked = model3dInfo(model);
@@ -60,8 +64,12 @@ export default function Train3D({
     if (!r.ok) return;
     const j = await r.json() as State;
     setState(j);
-    onRunningRef.current(Boolean(j.running || j.runningModel));
+    setLocalRunning(Boolean(j.running || j.runningModel));
   }, [model]);
+
+  useEffect(() => {
+    onRunningRef.current(localRunning || kaggleRunning);
+  }, [localRunning, kaggleRunning]);
 
   useEffect(() => { load(); }, [load]);
   useEffect(() => {
@@ -112,6 +120,25 @@ export default function Train3D({
       </div>
 
       <div className="rounded-lg border border-border bg-card p-4">
+        <div className="mb-4 flex flex-wrap items-center gap-2 border-b border-border pb-3">
+          <span className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">Compute environment:</span>
+          {([["local", "Local machine", Cpu], ["kaggle", "Kaggle cloud GPU", Cloud]] as const).map(([id, label, Icon]) => (
+            <button key={id} type="button" onClick={() => setComputeMode(id)}
+              className={`inline-flex items-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-medium transition ${
+                computeMode === id
+                  ? "bg-primary text-primary-foreground shadow-sm"
+                  : "border border-border bg-background text-muted-foreground hover:text-foreground"
+              }`}>
+              <Icon className="h-3.5 w-3.5" />
+              {label}
+              {id === "kaggle" && kaggleRunning && <span className="ml-0.5 h-2 w-2 animate-pulse rounded-full bg-emerald-400" />}
+            </button>
+          ))}
+        </div>
+        {computeMode === "kaggle" ? (
+          <Train3DKaggle n={n} onRunning={setKaggleRunning} />
+        ) : (
+        <>
         <div className="flex flex-wrap items-end gap-4">
           <div>
             <div className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">Saved 3D cases</div>
@@ -190,9 +217,11 @@ export default function Train3D({
             Save at least two 3D annotations first. The 2D training tabs are unchanged.
           </p>
         )}
+        </>
+        )}
       </div>
 
-      {(state?.running || state?.log) && (
+      {computeMode === "local" && (state?.running || state?.log) && (
         <div className="rounded-lg border border-border bg-card p-4">
           <div className="mb-2 inline-flex items-center gap-2 text-xs font-semibold uppercase tracking-wider text-muted-foreground">
             {state?.running && <Loader2 className="h-3.5 w-3.5 animate-spin" />}

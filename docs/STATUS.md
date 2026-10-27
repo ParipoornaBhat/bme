@@ -129,6 +129,21 @@ In order. Each step's output is the next step's input.
    edema, 1065 without, 8 edema slices dropped** (was 1510 / 508 / 46). Fresh hand-out zips:
    `hub_mri_20261008-1219.zip`, `hub_annotations_20261008-1219.zip` (same data as the 10:26
    pair, but only the 12:19 annotations zip works on its own).
+   **H200 runs, 2026-10-08** (5-fold patient-level CV, seed 1337, 61 cases; no locked test
+   set exists yet, so these are validation numbers). Server copy refreshed and verified by
+   md5 (3,413 files); nibabel/scipy/pynrrd added to `~/bme/env`; new
+   `ml/slurm/train_3d.sbatch`. The QOS allows **one job per user at a time**.
+   2D job 6328, 1614 slices, 56 min: bone Dice **0.912 ± 0.004**, lesion Dice
+   **0.523 ± 0.055**, lesion sensitivity **0.861 ± 0.031**, 259 false-positive slices
+   in total. Lower than the 7 Oct 818-slice run (0.554 ± 0.062 lesion Dice) on a
+   different, larger validation set.
+   3D job 6330, 21 min: bone Dice **0.545 ± 0.068**, edema Dice **0.183 ± 0.038**, lesion
+   sensitivity 0.736 ± 0.070, **~1,900 ± 1,050 false-positive components per case**.
+   Presence 61/61 is meaningless: every case has edema (0 negatives). Known cause to
+   fix first: `train_3d.py` samples its 8 patches per case **once at load** and reuses
+   them every epoch (its log says "per epoch"), so most of each scan is never trained on.
+   Metrics copied to `data/results2dseg3d/metrics_h200_6328.json` and
+   `data/results3d/metrics_h200_6330.json`; weights stay on the server.
    **`seg2nifti.validate()` cannot detect bme outside bone:** it hole-fills bone|bme,
    which always contains bme, so that check never fires.
    The hub laptop's `ml/.venv` now has CUDA torch (`2.14.0+cu130`, RTX 3050 4 GB, verified
@@ -369,6 +384,7 @@ Carried from [PRD.md](PRD.md) §10, updated with what the data answered.
 |---|---|---|
 | **2D case-level AUC jumped 0.658 → 0.961 when the dataset was rebuilt** | A number that good on this task, from 18 positive patients, is more likely a dataset shortcut than a modelling win | Two leaks measured on 2026-09-04. **(a)** `BME-2D-005` and `BME-2D-008` carry a **red ellipse drawn around the lesion**, burned into the pixels — 2/25 BME files, 0/69 non-BME. **(b)** A burned-in yellow A/P orientation overlay appears in **19/69 non-BME (28%)** but **1/25 BME (4%)**, and the two folders are framed and cropped differently — different exporters. Neither alone explains 0.96, but together they make it indefensible. **Before quoting anything: retrain on a centre crop excluding the borders, and drop or repair the two ellipse images.** |
 | Two non-BME cases (`NBME-005`, `NBME-058`) were light-marrow T1/PD, not fat-suppressed | Edema not visible on them; they looked opposite to every other case | Fixed 2026-10-27: `pnpm data:nonbme:fix-fs` swaps in the same case's fat-suppressed axial series and resamples existing annotations onto it (backup in `data/_backup_fs_*`). Teammates: `fs_fix.zip` in repo root, then `pnpm data:nonbme:fix-fs:install`. A grainy dark-marrow group (gradient echo: NBME-002/004/006/007/008/012/019/051) was left as is — flag to the guide. `Non BME/new/new/8` is empty, so source folder N maps to NBME-(N-1) from 9 on. |
+| **`nf` merged into this branch (uncommitted at time of writing); flag overlaps resolved in favour of this branch** | `train_3d.py` now has both flag sets. Where names collide, this branch wins: `--amp` is bfloat16 autocast (nf's was fp16), `--augment` is the in-plane flip + gamma set (nf's flip/intensity/noise are `--aug-flip/--aug-intensity/--aug-noise`), `--resample`, `--batch` and `--out NAME` keep their meaning, with `--resample-patches-each-epoch`, `--batch-size` and `--out-dir` as nf spellings. The nf experiment guard now lets `--out NAME` through unless NAME is `results3d` or `results3d-attn`. Training page: Local/Kaggle toggle, Kaggle panel in `Train3DKaggle.tsx`. nf's `--amp` skipped-step counter now only counts non-finite losses. GPU bf16 path not run yet (CPU smoke only). | Run `ml/tests/test_train_3d_speedups.py` and the two `ml/scripts/test_train_3d_*.py` before trusting a long H200 run. Two stray nf files (`tatus`, `test_uni.txt`) were left out; `tatus` is a terminal capture that names imaging files, so ask its author before it enters history. |
 | 18 BME patients is the whole 2D positive pool | 3–4 positives per validation fold; the per-fold spread is wider than most effects | Always report mean ± std with n stated. Never quote one fold. |
 | **3D set is 55 BME-positive cases, no negatives** | A segmenter trained only on positives has never seen a knee without edema; FP rate on normal scans is unmeasured | Get non-BME scans into the Slicer export, or keep the old NBME cases' volumes |
 | **Same patient imported twice in the 3D set** | BME-032/033 and BME-052/054 are one patient each; a patient-level split can put one copy in train and the other in validation | Merge each pair's markings into one case ([SLICER_EXPORT_AUDIT.md](SLICER_EXPORT_AUDIT.md) §1) |

@@ -33,7 +33,7 @@ from pathlib import Path
 try:
     import nrrd
 except ImportError:
-    sys.exit("pynrrd missing.  pip install pynrrd")
+    nrrd = None
 
 try:
     import numpy as np
@@ -75,6 +75,8 @@ def read_segmentation(path: Path):
     A .seg.nrrd is either a 3D labelmap with per-segment metadata, or 4D when
     segments overlap (one binary layer each).
     """
+    if nrrd is None:
+        raise ImportError("pynrrd is required to read .seg.nrrd files. Install with: pip install pynrrd")
     data, header = nrrd.read(str(path))
     segments = {}
     for key, value in header.items():
