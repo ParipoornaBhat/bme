@@ -21,11 +21,15 @@
 
 set -euo pipefail
 source "$HOME/bme/env/bin/activate"
+# The login profile exports a python3() shell function that runs /usr/bin/python3
+# (no torch). Call the env interpreter by path so the function cannot win.
+unset -f python python3 2>/dev/null || true
+PY="$HOME/bme/env/bin/python3"
 cd "$HOME/bme"
 nvidia-smi -L
 if [ ! -f data/seg2d3d/index.csv ]; then
   echo "Building axial slices on this server from the saved annotations."
-  python3 ml/scripts/seg2nifti.py . --force
-  python3 ml/scripts/make_2d_seg.py . --force
+  "$PY" ml/scripts/seg2nifti.py . --force
+  "$PY" ml/scripts/make_2d_seg.py . --force
 fi
-python3 ml/scripts/train_2d_seg.py . --data seg2d3d --out results2dseg3d --model unet --device cuda "$@"
+"$PY" ml/scripts/train_2d_seg.py . --data seg2d3d --out results2dseg3d --model unet --device cuda "$@"

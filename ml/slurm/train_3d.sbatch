@@ -24,10 +24,14 @@
 
 set -euo pipefail
 source "$HOME/bme/env/bin/activate"
+# The login profile exports a python3() shell function that runs /usr/bin/python3
+# (no torch). Call the env interpreter by path so the function cannot win.
+unset -f python python3 2>/dev/null || true
+PY="$HOME/bme/env/bin/python3"
 cd "$HOME/bme"
 nvidia-smi -L
 export BME_GPU_FRACTION=0.95
-python3 ml/scripts/train_3d.py . --model unet --device cuda --out results3d-h200 \
+"$PY" ml/scripts/train_3d.py . --model unet --device cuda --out results3d-h200 \
   --folds 5 --epochs 400 --hours 3.3 \
   --width 32 --patch 128,128,16 --patches-per-case 24 --batch 4 \
   --resample --augment --amp --cosine "$@"
