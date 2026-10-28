@@ -605,6 +605,8 @@ def mean_std(vals: list[float]) -> dict | None:
     return {"mean": float(a.mean()), "std": std}
 
 
+DEFAULT_ARCH = {"model": "unet", "width": 16, "patch": list(PATCH)}
+
 SUMMARY_KEYS = (
     "bone_dice", "bme_dice", "lesion_sensitivity", "fp_per_case",
     "bone_precision", "bone_recall", "bone_f1", "bone_iou",
@@ -634,6 +636,7 @@ def compute_dataset_fingerprint(
     fold_mode: str = "patient_grouped",
     patient_count: int = 0,
     sampling_mix: dict | None = None,
+    arch: dict | None = None,
 ) -> tuple[str, dict]:
     val_cases_per_fold = {
         str(f): sorted([c["id"] for c in groups[f]])
@@ -653,6 +656,8 @@ def compute_dataset_fingerprint(
         "independent_fold_seeds": independent_fold_seeds,
         "data_flags": data_flags,
     }
+    if arch and arch != DEFAULT_ARCH:
+        payload["arch"] = arch
     raw = json.dumps(payload, sort_keys=True)
     fingerprint = hashlib.sha256(raw.encode("utf-8")).hexdigest()
     return fingerprint, payload
@@ -1052,6 +1057,7 @@ def main():
         fold_mode=fold_mode,
         patient_count=patient_count,
         sampling_mix=sampling_mix_dict,
+        arch={"model": args.model, "width": args.width, "patch": list(patch)},
     )
     print(f"Dataset fingerprint: {current_fingerprint[:16]}... ({len(cases)} cases, {folds_n} folds, mode: {fold_mode})", flush=True)
 
@@ -1623,9 +1629,13 @@ def main():
         print(f"-> {out_dir / 'metrics.json'}", flush=True)
         try:
             from metrics_log import from_summary
+            try:
+                log_out_dir = out_dir.resolve().relative_to(base.resolve()).as_posix()
+            except ValueError:
+                log_out_dir = out_dir.name
             log_path = from_summary(
                 base, task="3d", model=args.model, device=device,
-                out_dir=out_dir.as_posix(), folds=folds_n, epochs=metrics["epochs"],
+                out_dir=log_out_dir, folds=folds_n, epochs=metrics["epochs"],
                 n_cases=len(cases), summary=metrics["summary"],
                 n_bme=n_bme, n_negative=n_neg, fp_key="fp_per_case", fp_unit="per_case",
                 presence_correct=metrics["presence_correct"], presence_n=metrics["presence_n"],
