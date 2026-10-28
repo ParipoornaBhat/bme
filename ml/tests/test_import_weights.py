@@ -23,7 +23,7 @@ import zipfile
 from pathlib import Path
 
 repo_root = Path(__file__).resolve().parent.parent.parent
-python_exe = repo_root / "ml" / ".venv" / "Scripts" / "python.exe"
+python_exe = Path(sys.executable)
 verifier_script = repo_root / "ml" / "scripts" / "verify_and_import_weights.py"
 
 sys.path.insert(0, str(repo_root / "ml" / "scripts"))

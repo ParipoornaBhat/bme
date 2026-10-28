@@ -50,6 +50,7 @@
     "train": "node scripts/train-menu.js",
     "train:2d": "node scripts/train-model.js 2d",
     "train:3d": "node scripts/train-model.js 3d",
+    "test:ml": "node scripts/test-ml.js",
     "train:2d:remote": "node scripts/h200-menu.js train2d",
     "train:3d:remote": "node scripts/h200-menu.js train3d",
     "remote:2d:remote": "node scripts/h200-menu.js train2d",
