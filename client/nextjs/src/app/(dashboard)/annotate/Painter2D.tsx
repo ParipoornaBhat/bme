@@ -69,7 +69,7 @@ import {
 import { canPaint } from "~/lib/paint-rules";
 import FlagDialog from "./FlagDialog";
 import { pencilCursor } from "~/lib/cursors";
-import { usePaintTools, usePencilDottedSetting } from "~/lib/usePaintTools";
+import { usePaintTools, usePencilDottedSetting, type DrawTool } from "~/lib/usePaintTools";
 import { edgePanStep, useAutoPanSetting, useSpaceHeld } from "~/lib/view-pan";
 
 export type Case2DSlice = {
@@ -109,8 +109,10 @@ export default function Painter2D({
   const [selected, setSelected] = useState<Case2DSlice | null>(null);
   const [filter, setFilter] = useState<"all" | "bme" | "non_bme" | "annotated" | "unannotated" | "flagged">("all");
   const [query, setQuery] = useState("");
-  const { tool, erasing: isErasing, drawing, pickTool, toggleEraser, drawWithLabel } =
-    usePaintTools(isCollaborator ? "pan" : "brush");
+  const {
+    tool, erasing: isErasing, drawing, pickTool, toggleEraser, drawWithLabel,
+    drawDefault, eraseDefault, setDrawDefault, setEraseDefault,
+  } = usePaintTools(isCollaborator ? "pan" : "pencil");
   const { spaceHeld, spaceHeldRef } = useSpaceHeld();
   const { autoPan, setAutoPan } = useAutoPanSetting();
   const { pencilDotted, setPencilDotted } = usePencilDottedSetting();
@@ -2385,6 +2387,34 @@ export default function Painter2D({
                       className="rounded border-border accent-primary h-3.5 w-3.5"
                     />
                     <span>Auto-pan</span>
+                  </label>
+                  <label
+                    className="flex items-center gap-1 text-xs text-muted-foreground select-none ml-1"
+                    title="Tool chosen when you pick a label or turn the eraser off"
+                  >
+                    <span>Draw with</span>
+                    <select
+                      value={drawDefault}
+                      onChange={(e) => setDrawDefault(e.target.value as DrawTool)}
+                      className="rounded border border-border bg-background px-1 py-0.5 text-xs text-foreground cursor-pointer"
+                    >
+                      <option value="pencil">Pencil</option>
+                      <option value="brush">Brush</option>
+                    </select>
+                  </label>
+                  <label
+                    className="flex items-center gap-1 text-xs text-muted-foreground select-none ml-1"
+                    title="Tool chosen when you turn the eraser on"
+                  >
+                    <span>Erase with</span>
+                    <select
+                      value={eraseDefault}
+                      onChange={(e) => setEraseDefault(e.target.value as DrawTool)}
+                      className="rounded border border-border bg-background px-1 py-0.5 text-xs text-foreground cursor-pointer"
+                    >
+                      <option value="pencil">Pencil</option>
+                      <option value="brush">Brush</option>
+                    </select>
                   </label>
                   <div className="mx-1 h-5 w-px bg-border" />
                   <OverlayControls
