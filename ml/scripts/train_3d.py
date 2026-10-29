@@ -370,25 +370,40 @@ def load_case(base: Path, case_id: str) -> dict | None:
 class UNet3D(nn.Module):
     """Joint bone and lesion. Two channels, lesion clipped to bone at inference."""
 
-    def __init__(self):
+    def __init__(self, base_channels: int = 16, double_conv: bool = False):
         super().__init__()
+        self.base_channels = base_channels
+        self.double_conv = double_conv
 
         def block(i, o):
+            if double_conv:
+                return nn.Sequential(
+                    nn.Conv3d(i, o, 3, padding=1, bias=False),
+                    nn.InstanceNorm3d(o),
+                    nn.ReLU(inplace=True),
+                    nn.Conv3d(o, o, 3, padding=1, bias=False),
+                    nn.InstanceNorm3d(o),
+                    nn.ReLU(inplace=True),
+                )
             return nn.Sequential(
                 nn.Conv3d(i, o, 3, padding=1, bias=False),
                 nn.InstanceNorm3d(o),
                 nn.ReLU(inplace=True),
             )
 
-        self.e1 = block(1, 16)
-        self.e2 = block(16, 32)
-        self.e3 = block(32, 64)
+        c1 = base_channels
+        c2 = base_channels * 2
+        c3 = base_channels * 4
+
+        self.e1 = block(1, c1)
+        self.e2 = block(c1, c2)
+        self.e3 = block(c2, c3)
         self.pool = nn.MaxPool3d(2)
-        self.up2 = nn.ConvTranspose3d(64, 32, 2, stride=2)
-        self.d2 = block(64, 32)
-        self.up1 = nn.ConvTranspose3d(32, 16, 2, stride=2)
-        self.d1 = block(32, 16)
-        self.out = nn.Conv3d(16, 2, 1)
+        self.up2 = nn.ConvTranspose3d(c3, c2, 2, stride=2)
+        self.d2 = block(c3, c2)
+        self.up1 = nn.ConvTranspose3d(c2, c1, 2, stride=2)
+        self.d1 = block(c2, c1)
+        self.out = nn.Conv3d(c1, 2, 1)
 
     def forward(self, x):
         a = self.e1(x)
@@ -397,6 +412,7 @@ class UNet3D(nn.Module):
         y = self.d2(torch.cat([self.up2(c), b], 1))
         y = self.d1(torch.cat([self.up1(y), a], 1))
         return self.out(y)
+
 
 
 def targets(labels: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
@@ -474,6 +490,25 @@ def release():
         torch.cuda.empty_cache()
 
 
+def postprocess_prediction(
+    pred: np.ndarray,
+    min_bme_voxels: int = 50,
+) -> np.ndarray:
+    """Filter out isolated noise speckles of predicted BME smaller than min_bme_voxels."""
+    if min_bme_voxels <= 0 or not (pred == 2).any():
+        return pred
+    out = pred.copy()
+    lab, num = cc_label(out == 2)
+    if num > 0:
+        counts = np.bincount(lab.ravel())
+        small_ids = np.where((counts < min_bme_voxels) & (counts > 0))[0]
+        if len(small_ids) > 0:
+            small_mask = np.isin(lab, small_ids)
+            # Demote small false positive speckles to bone (1)
+            out[small_mask] = 1
+    return out
+
+
 @torch.no_grad()
 def predict_volume(
     model: nn.Module,
@@ -482,6 +517,7 @@ def predict_volume(
     val_batch_size: int = 1,
     use_amp: bool = False,
     channels_last: bool = False,
+    min_bme_voxels: int = 50,
 ) -> np.ndarray:
     """Sliding-window inference. Supports val_batch_size >= 1 for faster evaluation."""
     model.eval()
@@ -537,7 +573,10 @@ def predict_volume(
     out = np.zeros(shape, dtype=np.uint8)
     out[votes_bone * 2 >= hits] = 1
     out[(votes_bme * 2 >= hits) & (out == 1)] = 2
+    if min_bme_voxels > 0:
+        out = postprocess_prediction(out, min_bme_voxels=min_bme_voxels)
     return out
+
 
 
 def mean_std(vals: list[float]) -> dict | None:
@@ -677,9 +716,13 @@ def merge_metrics_files(out_dir: Path, folds_n: int = 5) -> dict | None:
         },
         "presence_correct": sum(r.get("presence_correct", 0) for r in fold_rows),
         "presence_n": sum(r.get("presence_n", 0) for r in fold_rows),
+        "min_bme_voxels": first.get("min_bme_voxels", 50),
+        "base_channels": first.get("base_channels", 16),
+        "double_conv": first.get("double_conv", False),
         "amp_skipped_steps_total": total_skipped,
         "amp_skipped_pct_mean": round(mean_skipped_pct, 4),
         "per_fold": fold_rows,
+
         "merged_at": datetime.now(timezone.utc).isoformat(),
         "note": (
             f"{n_cases} volumes ({n_bme} with edema, {n_neg} without), "
@@ -742,7 +785,16 @@ def main():
                     help="Patch sampling proportions: lesion=A,bone=B,random=C (fractions summing to 1.0)")
     # Experimental options (OFF by default, changes experiment):
     ap.add_argument("--batch-size", type=int, default=1, help="[EXPERIMENT CHANGE] Training patch batch size (default: 1)")
+    ap.add_argument("--min-bme-voxels", type=int, default=50,
+                    help="Minimum connected component volume in voxels for BME lesions (default: 50)")
+    ap.add_argument("--base-channels", type=int, default=16,
+                    help="Base channel width for UNet3D (default: 16; use 32 for higher capacity)")
+    ap.add_argument("--double-conv", action="store_true",
+                    help="Use dual conv layers per resolution block in UNet3D")
+    ap.add_argument("--eval-only", action="store_true",
+                    help="Run validation evaluation on existing fold checkpoints without training")
     args = ap.parse_args()
+
 
     random.seed(SEED)
     np.random.seed(SEED)
@@ -996,8 +1048,9 @@ def main():
 
         final_ckpt = out_dir / f"fold_{fold}.pt"
         final_metric = out_dir / f"metrics_fold_{fold}.json"
-        should_check_skip = args.skip_completed and (final_ckpt.exists() or final_metric.exists())
+        should_check_skip = (not args.eval_only) and args.skip_completed and (final_ckpt.exists() or final_metric.exists())
         if should_check_skip and final_ckpt.exists():
+
             try:
                 ckpt = torch.load(final_ckpt, map_location="cpu", weights_only=False)
                 ckpt_seed = ckpt.get("seed")
@@ -1071,21 +1124,44 @@ def main():
             except Exception as e:
                 print(f"fold {fold}: could not verify existing checkpoint ({e}), training fresh.", flush=True)
 
-        train = [c for g in groups if g is not val for c in g]
-        if args.show_ids:
-            print(f"fold {fold}: train {[c['id'] for c in train]}  val {[c['id'] for c in val]}", flush=True)
+        if args.eval_only:
+            if not final_ckpt.exists():
+                print(f"fold {fold}: checkpoint {final_ckpt.name} not found, skipping eval.", flush=True)
+                continue
+            ckpt = torch.load(final_ckpt, map_location=device, weights_only=False)
+            ckpt_bc = ckpt.get("base_channels", args.base_channels)
+            ckpt_dc = ckpt.get("double_conv", args.double_conv)
+            model = UNet3D(base_channels=ckpt_bc, double_conv=ckpt_dc).to(device)
+            if args.channels_last_3d:
+                model = model.to(memory_format=torch.channels_last_3d)
+            model.load_state_dict(ckpt["state"])
+            total = 0.0
+            steps = 0
+            amp_skipped_total = 0
+            total_steps_fold = 0
+            train = []
+            start_epoch = args.epochs + 1
+            opt = None
+            scaler = None
+            print(f"fold {fold}: loaded {final_ckpt.name} for eval-only validation (min_bme_voxels={args.min_bme_voxels})", flush=True)
         else:
-            print(f"fold {fold}: train {len(train)} cases  val {len(val)} cases", flush=True)
+            train = [c for g in groups if g is not val for c in g]
+            if args.show_ids:
+                print(f"fold {fold}: train {[c['id'] for c in train]}  val {[c['id'] for c in val]}", flush=True)
+            else:
+                print(f"fold {fold}: train {len(train)} cases  val {len(val)} cases", flush=True)
 
-        model = UNet3D().to(device)
-        if args.channels_last_3d:
-            model = model.to(memory_format=torch.channels_last_3d)
-        opt = torch.optim.Adam(model.parameters(), lr=1e-3)
-        scaler = torch.cuda.amp.GradScaler() if use_amp else None
-        start_epoch = 1
+            model = UNet3D(base_channels=args.base_channels, double_conv=args.double_conv).to(device)
+            if args.channels_last_3d:
+                model = model.to(memory_format=torch.channels_last_3d)
+
+            opt = torch.optim.Adam(model.parameters(), lr=1e-3)
+            scaler = torch.cuda.amp.GradScaler() if use_amp else None
+            start_epoch = 1
 
         latest_ckpt = out_dir / f"fold_{fold}_latest.pt"
-        if args.resume and latest_ckpt.exists():
+
+        if (not args.eval_only) and args.resume and latest_ckpt.exists():
             try:
                 ckpt = torch.load(latest_ckpt, map_location=device, weights_only=False)
                 ckpt_data_cfg = ckpt.get("data_config")
@@ -1296,6 +1372,7 @@ def main():
                 val_batch_size=args.val_batch_size,
                 use_amp=use_amp,
                 channels_last=args.channels_last_3d,
+                min_bme_voxels=args.min_bme_voxels,
             )
             bone_d.append(dice(loaded["labels"], pred, 1))
             bme_d.append(dice(loaded["labels"], pred, 2))
@@ -1319,41 +1396,45 @@ def main():
         if args.profile:
             print(f"fold {fold} validation time: {t_val_total:.1f}s ({len(val)} cases, val_batch_size={args.val_batch_size})", flush=True)
 
-        t_save_f0 = time.time()
-        torch.save(
-            {
-                "state": model.state_dict(),
-                "patch": PATCH,
-                "seed": SEED,
-                "data_config": data_config,
+        if not args.eval_only:
+            t_save_f0 = time.time()
+            torch.save(
+                {
+                    "state": model.state_dict(),
+                    "patch": PATCH,
+                    "seed": SEED,
+                    "data_config": data_config,
+                    "fold_mode": fold_mode,
+                    "patient_count": patient_count,
+                    "sampling_mix": sampling_mix_dict,
+                    "fingerprint": current_fingerprint,
+                    "val_cases": sorted([c["id"] for c in val]),
+                    "base_channels": getattr(model, "base_channels", 16),
+                    "double_conv": getattr(model, "double_conv", False),
+                    "min_bme_voxels": args.min_bme_voxels,
+                },
+                final_ckpt,
+            )
+            t_save_accum += (time.time() - t_save_f0)
+            if latest_ckpt.exists():
+                try:
+                    latest_ckpt.unlink()
+                except Exception:
+                    pass
+
+            status_payload = {
+                "fold": fold,
+                "status": "completed",
+                "epoch_reached": args.epochs,
+                "target_epochs": args.epochs,
                 "fold_mode": fold_mode,
                 "patient_count": patient_count,
                 "sampling_mix": sampling_mix_dict,
                 "fingerprint": current_fingerprint,
                 "val_cases": sorted([c["id"] for c in val]),
-            },
-            final_ckpt,
-        )
-        t_save_accum += (time.time() - t_save_f0)
-        if latest_ckpt.exists():
-            try:
-                latest_ckpt.unlink()
-            except Exception:
-                pass
-
-        status_payload = {
-            "fold": fold,
-            "status": "completed",
-            "epoch_reached": args.epochs,
-            "target_epochs": args.epochs,
-            "fold_mode": fold_mode,
-            "patient_count": patient_count,
-            "sampling_mix": sampling_mix_dict,
-            "fingerprint": current_fingerprint,
-            "val_cases": sorted([c["id"] for c in val]),
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-        }
-        (out_dir / f"status_fold_{fold}.json").write_text(json.dumps(status_payload, indent=2), encoding="utf-8")
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+            }
+            (out_dir / f"status_fold_{fold}.json").write_text(json.dumps(status_payload, indent=2), encoding="utf-8")
 
         amp_pct = (amp_skipped_total / max(total_steps_fold, 1)) * 100 if use_amp else 0.0
         if use_amp:
@@ -1376,6 +1457,8 @@ def main():
             "fp_per_case": float(np.mean(fps)),
             "presence_correct": present_hit,
             "presence_n": present_n,
+            "min_bme_voxels": args.min_bme_voxels,
+
             "amp_skipped_steps": amp_skipped_total,
             "amp_skipped_pct": round(amp_pct, 4),
             "data_config": data_config,
@@ -1445,9 +1528,13 @@ def main():
             },
             "presence_correct": sum(r["presence_correct"] for r in fold_rows),
             "presence_n": sum(r["presence_n"] for r in fold_rows),
+            "min_bme_voxels": args.min_bme_voxels,
+            "base_channels": getattr(model, "base_channels", args.base_channels),
+            "double_conv": getattr(model, "double_conv", args.double_conv),
             "amp_skipped_steps_total": total_skipped,
             "amp_skipped_pct_mean": round(mean_skipped_pct, 4),
             "per_fold": fold_rows,
+
             "timing": {
                 "volume_load_s": round(t_load_total, 2),
                 "patch_sampling_s": round(t_sampling_total, 2),
