@@ -29,6 +29,8 @@ from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
 DEFAULT_FORBIDDEN_PATTERNS = [
     r"BME-\d+",
     r"BME_\d+",
+    r"NBME-\d+",
+    r"NBME_\d+",
 ]
 
 ALLOWED_CONTAINER_DIRS = {"data", "nifti", "annotations"}
@@ -40,7 +42,7 @@ RE_PRIMARY_NII = re.compile(r"^(case_\d+)_primary\.nii\.gz$")
 RE_LABELS_NII = re.compile(r"^(case_\d+)_labels\.nii\.gz$")
 RE_CASE_ID = re.compile(r"^case_\d+$")
 RE_PATIENT_ID = re.compile(r"^patient_\d+$")
-RE_CLASS = re.compile(r"^bme$")
+RE_CLASS = re.compile(r"^(bme|non_bme)$")
 
 NIFTI_TEXT_FIELDS = ["data_type", "db_name", "descrip", "aux_file", "intent_name"]
 
@@ -156,6 +158,8 @@ def check_worklist(folder_path: Path) -> Dict[str, int]:
     }
 
     worklist_file = folder_path / "worklist.csv"
+    if not worklist_file.exists() or not worklist_file.is_file():
+        worklist_file = folder_path / "data" / "worklist.csv"
     if not worklist_file.exists() or not worklist_file.is_file():
         return counts
 

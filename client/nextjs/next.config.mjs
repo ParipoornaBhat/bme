@@ -211,6 +211,7 @@ function attachWsProxyIfNeeded(phase) {
 
 /** @type {import('next').NextConfig} */
 const nextConfig = {
+  outputFileTracingRoot: path.resolve(here, "..", ".."),
   // @bme/db ships raw TypeScript and imports with explicit ".js" extensions
   // (NodeNext style). Next's bundler resolves those literally and fails with
   // "Can't resolve './client.js'". Transpiling the workspace package and

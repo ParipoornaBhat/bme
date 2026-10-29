@@ -11,6 +11,7 @@ const ALLOWED_ACTIONS = [
   "preflight",
   "approve",
   "upload",
+  "update-dataset",
   "run",
   "onetap",
   "status",
@@ -131,6 +132,32 @@ function getActiveLock(stagingDir: string): LockInfo | null {
   return null;
 }
 
+function getSourceStats(r: string) {
+  const dir = path.join(r, "data", "annotations");
+  const wl = path.join(r, "data", "worklist.csv");
+  const cls = new Map<string, string>();
+  if (fs.existsSync(wl)) {
+    const lines = fs.readFileSync(wl, "utf8").split(/\r?\n/);
+    const head = (lines[0] ?? "").split(",");
+    const idCol = head.indexOf("case_id");
+    const classCol = head.indexOf("class");
+    for (const line of lines.slice(1)) {
+      if (!line.trim()) continue;
+      const c = line.split(",");
+      if (idCol >= 0) cls.set(c[idCol], classCol >= 0 ? c[classCol] : "");
+    }
+  }
+  if (!fs.existsSync(dir)) return { totalCases: 0, bme: 0, nonBme: 0 };
+  const cases = fs.readdirSync(dir)
+    .filter((id) => fs.existsSync(path.join(dir, id, `${id}.seg.nrrd`)))
+    .map((id) => ({ id, cls: cls.get(id) || "" }));
+  return {
+    totalCases: cases.length,
+    bme: cases.filter((c) => c.cls === "bme").length,
+    nonBme: cases.filter((c) => c.cls === "non_bme").length,
+  };
+}
+
 export async function GET(req: NextRequest) {
   if (!(await verifyAdminAuth(req))) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
@@ -204,6 +231,9 @@ export async function GET(req: NextRequest) {
     }
   }
 
+  const r = root();
+  const sourceStats = getSourceStats(r);
+
   return NextResponse.json({
     running: lock !== null,
     action: lock?.action ?? null,
@@ -214,6 +244,7 @@ export async function GET(req: NextRequest) {
     approval,
     runState,
     runMetrics,
+    sourceStats,
     buildStamp: BUILD_STAMP,
   });
 }
@@ -348,6 +379,20 @@ export async function POST(req: NextRequest) {
     }
   } else if (action === "upload") {
     cliArgs.push("upload", "--confirm-upload");
+    if (typeof body.exportDir === "string" && body.exportDir.trim()) {
+      cliArgs.push("--export-dir", body.exportDir.trim());
+    }
+    if (typeof body.mappingFile === "string" && body.mappingFile.trim()) {
+      cliArgs.push("--mapping-file", body.mappingFile.trim());
+    }
+    if (typeof body.datasetSlug === "string" && body.datasetSlug.trim()) {
+      cliArgs.push("--dataset-slug", body.datasetSlug.trim());
+    }
+  } else if (action === "update-dataset") {
+    cliArgs.push("update-dataset");
+    if (body.force === true) {
+      cliArgs.push("--force");
+    }
     if (typeof body.exportDir === "string" && body.exportDir.trim()) {
       cliArgs.push("--export-dir", body.exportDir.trim());
     }

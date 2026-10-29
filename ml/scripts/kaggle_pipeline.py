@@ -482,7 +482,7 @@ def run_upload(
             folder=str(upload_staging),
             version_notes=f"Approved hash: {approved_hash[:12]}",
             dir_mode="zip",
-            quiet=True,
+            quiet=False,
         )
         action = "updated_version"
     else:
@@ -490,7 +490,7 @@ def run_upload(
             folder=str(upload_staging),
             public=False,
             dir_mode="zip",
-            quiet=True,
+            quiet=False,
         )
         action = "created_new"
 
@@ -950,7 +950,8 @@ def run_export_with_fingerprint(src_dir: Path, export_dir: Path, mapping_file: P
     if fingerprint_file.exists() and export_dir.exists() and any(export_dir.iterdir()):
         try:
             fp_data = json.loads(fingerprint_file.read_text(encoding="utf-8"))
-            if fp_data.get("fingerprint") == curr_fp:
+            saved_fp = fp_data.get("fingerprint") if isinstance(fp_data, dict) else fp_data
+            if saved_fp == curr_fp:
                 skip_export = True
         except Exception:
             skip_export = False
@@ -986,11 +987,9 @@ def run_export_with_fingerprint(src_dir: Path, export_dir: Path, mapping_file: P
             need_full_export = False
             print("[OK] Existing export folder passed verification.")
         else:
-            raise RuntimeError(
-                f"[ERROR] Destination export directory '{export_dir.name}' exists but contains an invalid export (export_for_colab.py failed):\n"
-                f"{p_ver_test.stderr or p_ver_test.stdout}\n"
-                f"Please manually delete or empty '{export_dir}' before retrying."
-            )
+            print(f"[INFO] Existing export directory '{export_dir.name}' is outdated or incomplete. Automatically clearing to regenerate...")
+            shutil.rmtree(export_dir, ignore_errors=True)
+            need_full_export = True
 
     if need_full_export:
         print("[EXPORT] 1/4: Exporting de-identified dataset (export_for_colab.py)...")
@@ -1009,7 +1008,6 @@ def run_export_with_fingerprint(src_dir: Path, export_dir: Path, mapping_file: P
     data_wl = export_dir / "data" / "worklist.csv"
     root_wl = export_dir / "worklist.csv"
     if data_wl.exists() and not root_wl.exists():
-        import shutil
         shutil.copy2(data_wl, root_wl)
 
     # 2. Verify
@@ -1129,6 +1127,9 @@ def run_onetap(
             fresh_hash, _, _, _ = compute_export_hash_and_stats(export_dir, mapping_file.name)
             if app_data.get("export_combined_sha256") == fresh_hash:
                 approved = True
+            elif confirm_approve:
+                print(f"[ONETAP] Export hash updated. Re-approving dataset automatically since confirmation provided.")
+                approved = False
             else:
                 raise RuntimeError(
                     f"[ERROR] Hash mismatch: export folder hash does not match approved hash. Re-run approval."
@@ -1169,6 +1170,85 @@ def run_onetap(
         api=api,
     )
 
+
+def run_update_dataset(
+    src_dir: Path,
+    export_dir: Optional[Path] = None,
+    mapping_file: Optional[Path] = None,
+    dataset_slug: str = "bme-3d-dataset",
+    api: Optional[Any] = None,
+    force_export: bool = False,
+) -> Dict[str, Any]:
+    """One-click automated dataset update:
+    1. Re-exports de-identified dataset from data/annotations (with fresh labels & mapping).
+    2. Runs full integrity checks (--verify, --compare-training-inputs, check_deid_folder.py).
+    3. Records approval hash and case/file metrics in dataset_approval.json.
+    4. Uploads updated version to Kaggle dataset.
+    """
+    check_no_in_repo_kaggle_credentials(src_dir)
+    staging_dir = get_staging_dir(src_dir)
+
+    if export_dir is None:
+        export_dir = Path(os.getenv("BME_EXPORT_DIR", src_dir.parent / "bme_colab_export")).resolve()
+    else:
+        export_dir = Path(export_dir).resolve()
+
+    if mapping_file is None:
+        mapping_file = Path(os.getenv("BME_MAPPING_FILE", src_dir.parent / "bme_recovery" / "export_mapping.json")).resolve()
+    else:
+        mapping_file = Path(mapping_file).resolve()
+
+    validate_path_outside_repo_and_data(export_dir, src_dir)
+    validate_path_outside_repo_and_data(mapping_file, src_dir)
+
+    if force_export:
+        fp_file = staging_dir / "source_fingerprint.json"
+        if fp_file.exists():
+            try:
+                fp_file.unlink()
+            except Exception:
+                pass
+
+    print("\n" + "=" * 60)
+    print("ONE-CLICK DATASET UPDATE: STARTING")
+    print("=" * 60)
+
+    # 1. Export with fingerprint (clears outdated export if any mismatch)
+    print("\n[STEP 1/3] Exporting and validating dataset...")
+    run_export_with_fingerprint(src_dir, export_dir, mapping_file)
+
+    # 2. Record approval hash
+    print("\n[STEP 2/3] Recording dataset approval...")
+    approval_rec = run_approve_dataset(
+        src_dir=src_dir,
+        export_dir=export_dir,
+        mapping_file=mapping_file,
+        confirm_approve=True,
+        dataset_slug=dataset_slug,
+    )
+
+    # 3. Upload to Kaggle
+    print("\n[STEP 3/3] Uploading updated dataset to Kaggle...")
+    upload_res = run_upload(
+        src_dir=src_dir,
+        export_dir=export_dir,
+        mapping_file=mapping_file,
+        confirm_upload=True,
+        dataset_slug=dataset_slug,
+        api=api,
+    )
+
+    print("\n" + "=" * 60)
+    print("ONE-CLICK DATASET UPDATE: COMPLETED SUCCESSFULLY")
+    print(f"  Cases: {approval_rec.get('case_count')} | Files: {approval_rec.get('file_count')}")
+    print(f"  Hash: {approval_rec.get('export_combined_sha256')}")
+    print(f"  Status: {upload_res.get('status')}")
+    print("=" * 60)
+    return {
+        "status": "SUCCESS",
+        "approval": approval_rec,
+        "upload": upload_res,
+    }
 
 
 def run_status(kernel_slug: str, src_dir: Path, api: Optional[Any] = None) -> Dict[str, Any]:
@@ -1608,6 +1688,13 @@ def build_parser() -> argparse.ArgumentParser:
     p_im.add_argument("--staging-dir", type=str, default=os.getenv("KAGGLE_STAGING_DIR", "../bme_kaggle_staging"))
     p_im.add_argument("--dest", type=str, default="data/results3d")
 
+    # update-dataset (one-click)
+    p_upd = subparsers.add_parser("update-dataset", parents=[common_parser], help="One-click dataset update: export, verify, approve, and upload to Kaggle")
+    p_upd.add_argument("--export-dir", type=str, default=os.getenv("BME_EXPORT_DIR", "../bme_colab_export"))
+    p_upd.add_argument("--mapping-file", type=str, default=os.getenv("BME_MAPPING_FILE", "../bme_recovery/export_mapping.json"))
+    p_upd.add_argument("--dataset-slug", type=str, default=os.getenv("KAGGLE_DATASET_SLUG", "bme-3d-dataset"))
+    p_upd.add_argument("--force", action="store_true", help="Force fresh re-export from annotations")
+
     return ap
 
 
@@ -1677,6 +1764,14 @@ def main():
                 staging_dir=Path(args.staging_dir),
                 dest_dir=Path(args.dest),
                 src_dir=src_dir,
+            )
+        elif args.subcommand == "update-dataset":
+            run_update_dataset(
+                src_dir=src_dir,
+                export_dir=Path(args.export_dir) if args.export_dir else None,
+                mapping_file=Path(args.mapping_file) if args.mapping_file else None,
+                dataset_slug=args.dataset_slug,
+                force_export=args.force,
             )
         else:
             raise ValueError(f"Unknown subcommand: {args.subcommand}")

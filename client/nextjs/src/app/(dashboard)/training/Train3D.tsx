@@ -15,6 +15,7 @@ import {
   AlertTriangle,
   Activity,
   X,
+  Database,
 } from "lucide-react";
 import { BUILD_STAMP } from "../../api/training-3d/kaggle/buildStamp";
 
@@ -73,10 +74,15 @@ interface KaggleState {
   approval?: KaggleApproval | null;
   runState?: KaggleRunState | null;
   runMetrics?: any;
+  sourceStats?: {
+    totalCases: number;
+    bme: number;
+    nonBme: number;
+  };
   buildStamp?: string;
 }
 
-type KaggleStepId = "doctor" | "preflight" | "approve" | "upload" | "run" | "status" | "fetch-results" | "onetap";
+type KaggleStepId = "doctor" | "preflight" | "approve" | "upload" | "update-dataset" | "run" | "status" | "fetch-results" | "onetap";
 
 export interface Train3DProps {
   torch?: TorchInfo | { cudaAvailable: boolean; deviceName: string | null; vramGB: number | null; reason?: string | null } | null;
@@ -373,6 +379,42 @@ export default function Train3D({
 
               return (
                 <div className="rounded-xl border-2 border-primary/30 bg-gradient-to-b from-card to-primary/5 p-4 sm:p-5 shadow-sm space-y-4">
+                  {/* 1-Click Dataset Sync Card */}
+                  <div className="rounded-lg border border-border bg-card/90 p-3 sm:p-4 space-y-2 shadow-xs">
+                    <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                      <div>
+                        <div className="flex items-center gap-2 flex-wrap">
+                          <Database className="h-4 w-4 text-primary" />
+                          <span className="text-xs sm:text-sm font-bold text-foreground">3D Dataset (76 Cases)</span>
+                          <span className="rounded-full bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border border-emerald-500/20 px-2.5 py-0.5 text-[11px] font-semibold">
+                            {kaggleState?.sourceStats?.totalCases ?? n} Cases ({kaggleState?.sourceStats?.bme ?? 61} BME, {kaggleState?.sourceStats?.nonBme ?? 15} Non-BME)
+                          </span>
+                          {kaggleState?.approval ? (
+                            <span className="rounded-full bg-primary/10 text-primary border border-primary/20 px-2 py-0.5 text-[10px] font-mono">
+                              Kaggle Approved: {kaggleState.approval.case_count} cases ({kaggleState.approval.file_count} files)
+                            </span>
+                          ) : null}
+                        </div>
+                        <p className="text-[11px] text-muted-foreground mt-1">
+                          Single click to automatically export annotations, verify de-identification, and update the Kaggle dataset bundle.
+                        </p>
+                      </div>
+
+                      <button
+                        onClick={() => executeKaggleAction("update-dataset", { force: true })}
+                        disabled={kaggleBusy || Boolean(kaggleState?.running)}
+                        className="inline-flex items-center gap-2 rounded-lg bg-emerald-600 px-4 py-2.5 text-xs font-bold text-white shadow hover:bg-emerald-700 transition disabled:opacity-40 shrink-0"
+                      >
+                        {kaggleBusy && kaggleState?.action === "update-dataset" ? (
+                          <Loader2 className="h-4 w-4 animate-spin" />
+                        ) : (
+                          <RefreshCw className="h-4 w-4" />
+                        )}
+                        Update Dataset (1-Click)
+                      </button>
+                    </div>
+                  </div>
+
                   <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
                     <div>
                       <h3 className="text-sm sm:text-base font-bold text-foreground flex items-center gap-2">

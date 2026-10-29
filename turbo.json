@@ -10,7 +10,7 @@
       "persistent": true
     },
     "start": {
-      "dependsOn": ["^build"],
+      "dependsOn": ["build"],
       "persistent": true
     },
     "typecheck": {

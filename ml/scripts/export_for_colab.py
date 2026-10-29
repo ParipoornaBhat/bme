@@ -222,6 +222,23 @@ def load_source_patient_map(base_dir: Path) -> dict[str, str]:
     return patient_map
 
 
+def load_source_class_map(base_dir: Path) -> dict[str, str]:
+    """Load case class mapping from worklist.csv if available."""
+    worklist_file = base_dir / "data" / "worklist.csv"
+    class_map = {}
+    if worklist_file.exists():
+        try:
+            with worklist_file.open(newline="", encoding="utf-8") as f:
+                for row in csv.DictReader(f):
+                    cid = row.get("case_id")
+                    cls = row.get("class")
+                    if cid and cls:
+                        class_map[cid] = cls.strip().lower()
+        except Exception:
+            pass
+    return class_map
+
+
 def load_and_validate_existing_mapping(mapping_file: Path, patient_map: dict[str, str]) -> list[dict]:
     """Load existing mapping file and validate for internal consistency and conflicts."""
     if not mapping_file.exists():
@@ -407,6 +424,7 @@ def run_export(src_dir: Path, dst_dir: Path, manifest: list[dict], mapping_file:
     exported_count = 0
     worklist_rows = []
     failure_counts: dict[str, int] = {}
+    class_map = load_source_class_map(src_dir)
 
     for entry in manifest:
         cid = entry["original_case_id"]
@@ -447,10 +465,11 @@ def run_export(src_dir: Path, dst_dir: Path, manifest: list[dict], mapping_file:
             nib.save(sanitized_img, str(out_vol))
             nib.save(sanitized_lab, str(out_lab))
 
+            case_cls = class_map.get(cid, "non_bme" if cid.startswith("NBME") else "bme")
             worklist_rows.append({
                 "case_id": rand_id,
                 "patient_id": entry["patient_group"],
-                "class": "bme",
+                "class": case_cls,
             })
             exported_count += 1
         except Exception as e:
@@ -487,11 +506,11 @@ def run_export(src_dir: Path, dst_dir: Path, manifest: list[dict], mapping_file:
             )
 
     # Write sanitized worklist
-    wl_path = dst_dir / "data" / "worklist.csv"
-    with wl_path.open("w", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(f, fieldnames=["case_id", "patient_id", "class"])
-        writer.writeheader()
-        writer.writerows(worklist_rows)
+    for wl_path in [dst_dir / "data" / "worklist.csv", dst_dir / "worklist.csv"]:
+        with wl_path.open("w", newline="", encoding="utf-8") as f:
+            writer = csv.DictWriter(f, fieldnames=["case_id", "patient_id", "class"])
+            writer.writeheader()
+            writer.writerows(worklist_rows)
 
     # Save mapping file atomically strictly outside repository
     mapping_payload = {
@@ -680,6 +699,7 @@ def run_verify(src_dir: Path, dst_dir: Path, mapping_file: Path) -> bool:
 
     manifest = mapping_data.get("cases", [])
     patient_map = load_source_patient_map(src_dir)
+    class_map = load_source_class_map(src_dir)
 
     print(f"Verifying {len(manifest)} cases...")
 
@@ -748,7 +768,7 @@ def run_verify(src_dir: Path, dst_dir: Path, mapping_file: Path) -> bool:
                 record_failure("scan_affine_mismatch")
                 case_failed = True
 
-            # Task 2 Label Volume: same shape and affine as source scan, dtype uint8, values in {0,1,2}, >=1 edema
+            # Task 2 Label Volume: same shape and affine as source scan, dtype uint8, values in {0,1,2}
             if dst_lab.shape != src_img.shape:
                 record_failure("label_shape_mismatch")
                 case_failed = True
@@ -766,9 +786,19 @@ def run_verify(src_dir: Path, dst_dir: Path, mapping_file: Path) -> bool:
                 record_failure("label_invalid_values")
                 case_failed = True
 
-            if not (dst_lab_data == 2).any():
-                record_failure("label_missing_edema")
+            if not (dst_lab_data == 1).any():
+                record_failure("label_missing_bone_marrow")
                 case_failed = True
+
+            orig_cls = class_map.get(cid, "non_bme" if cid.startswith("NBME") else "bme")
+            if orig_cls == "bme":
+                if not (dst_lab_data == 2).any():
+                    record_failure("label_missing_edema")
+                    case_failed = True
+            else:
+                if (dst_lab_data == 2).any():
+                    record_failure("non_bme_has_edema")
+                    case_failed = True
 
             # Header fields (data_type, db_name, descrip, aux_file, intent_name) and extensions
             for img_obj in [dst_img, dst_lab]:

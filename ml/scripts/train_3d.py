@@ -316,6 +316,10 @@ def load_case(base: Path, case_id: str) -> dict | None:
     if not labs:
         labs = [p for p in base.rglob(f"{case_id}*_labels.nii*") if p.is_file()]
 
+    seg = case_ann / f"{case_id}.seg.nrrd"
+    if labs and seg.exists() and seg.stat().st_mtime > labs[0].stat().st_mtime:
+        labs = []
+
     if labs and vol.exists():
         img = nib.load(str(vol))
         lab_img = nib.load(str(labs[0]))
