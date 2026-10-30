@@ -30,12 +30,12 @@ from pathlib import Path
 import torch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from train_3d import UNet3D  # noqa: E402
+from train_3d import UNet3D, build_model  # noqa: E402
 
 MAX_ZIP_BYTES = 10 * 1024 * 1024          # 10 MB compressed zip
-MAX_UNCOMPRESSED_BYTES = 10 * 1024 * 1024 # 10 MB total uncompressed
+MAX_UNCOMPRESSED_BYTES = 15 * 1024 * 1024 # 15 MB total uncompressed
 MAX_FILES = 10                            # Max 10 files (headroom for 5-8 folds + metrics)
-MAX_PT_BYTES = 2 * 1024 * 1024           # 2 MB per checkpoint (measured real: ~627 KB)
+MAX_PT_BYTES = 5 * 1024 * 1024           # 5 MB per checkpoint (headroom for C-Net + Attention U-Net)
 MAX_METRICS_BYTES = 200 * 1024           # 200 KB for metrics.json (measured real: ~3-10 KB)
 MAX_RATIO = 20.0                         # Max compression ratio to block decompression bombs
 ALLOWED_FILE_PATTERN = re.compile(r"^(fold_\d+\.pt|metrics\.json)$")
@@ -47,7 +47,11 @@ def verify_pt_file(path: Path) -> tuple[bool, str]:
         if not isinstance(blob, dict) or "state" not in blob:
             return False, "Checkpoint missing 'state' dict"
         state = blob["state"]
-        expected_state = UNet3D().state_dict()
+        arch = blob.get("model_arch", "unet3d")
+        bc = blob.get("base_channels", 16)
+        dc = blob.get("double_conv", False)
+        expected_model = build_model(arch=arch, base_channels=bc, double_conv=dc)
+        expected_state = expected_model.state_dict()
         
         # Check keys match exactly
         if set(state.keys()) != set(expected_state.keys()):

@@ -149,14 +149,20 @@ export async function POST(req: NextRequest) {
   const epochs = Math.min(Math.max(Number(body.epochs ?? 40), 1), 200);
   const folds = Math.min(Math.max(Number(body.folds ?? 5), 2), info.cases.length);
   const device = ["auto", "cuda", "cpu"].includes(body.device) ? body.device : "auto";
+  const modelArch = body.modelArch === "unet3d" ? "unet3d" : "cnet_attention_unet";
 
   fs.mkdirSync(DIR(), { recursive: true });
   const log = fs.openSync(LOG(), "w");
   const r = root();
   const child = spawn(
     python(),
-    ["-u", path.join(r, "ml", "scripts", "train_3d.py"), r,
-      "--epochs", String(epochs), "--folds", String(folds), "--device", device],
+    [
+      "-u", path.join(r, "ml", "scripts", "train_3d.py"), r,
+      "--epochs", String(epochs),
+      "--folds", String(folds),
+      "--device", device,
+      "--model-arch", modelArch,
+    ],
     {
       cwd: r,
       detached: true,
@@ -173,8 +179,8 @@ export async function POST(req: NextRequest) {
   );
   child.unref();
   if (child.pid) fs.writeFileSync(PID(), String(child.pid));
-  fs.writeFileSync(JOB(), JSON.stringify({ startedAt: Date.now(), folds, epochs, device }, null, 2));
-  return NextResponse.json({ ok: true, pid: child.pid, epochs, folds, cases: info.cases.length });
+  fs.writeFileSync(JOB(), JSON.stringify({ startedAt: Date.now(), folds, epochs, device, modelArch }, null, 2));
+  return NextResponse.json({ ok: true, pid: child.pid, epochs, folds, cases: info.cases.length, modelArch });
 }
 
 export async function DELETE() {

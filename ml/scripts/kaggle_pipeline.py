@@ -547,6 +547,7 @@ def run_launch_kernel(
     dataset_slug: str,
     api: Any,
     username: str,
+    model_arch: str = "cnet_attention_unet",
 ) -> str:
     """Build kernel with CONFIG_MODE and push to Kaggle GPU."""
     mode_map = {
@@ -575,6 +576,8 @@ def run_launch_kernel(
                 for line in cell.get("source", []):
                     if line.strip().startswith("CONFIG_MODE ="):
                         new_src.append(f'CONFIG_MODE = "{config_mode}"  # Configured by launch\n')
+                    elif line.strip().startswith("MODEL_ARCH ="):
+                        new_src.append(f'MODEL_ARCH = "{model_arch}"  # Configured by launch\n')
                     else:
                         new_src.append(line)
                 cell["source"] = new_src
@@ -618,6 +621,7 @@ def run_pipeline(
     dataset_slug: str = "bme-3d-dataset",
     kernel_slug: str = "bme-3d-unet-training",
     api: Optional[Any] = None,
+    model_arch: str = "cnet_attention_unet",
 ) -> Dict[str, Any]:
     """Execute end-to-end cloud training run: launch -> watch -> download -> verified import."""
     check_no_in_repo_kaggle_credentials(src_dir)
@@ -746,8 +750,8 @@ def run_pipeline(
         state_file.write_text(json.dumps(run_state, indent=2), encoding="utf-8")
 
         # Push kernel
-        run_launch_kernel(src_dir, mode, kernel_slug, dataset_slug, api, username)
-        print(f"[OK] Kernel launched on Kaggle GPU: {full_kernel_slug} (Mode: {mode})")
+        run_launch_kernel(src_dir, mode, kernel_slug, dataset_slug, api, username, model_arch=model_arch)
+        print(f"[OK] Kernel launched on Kaggle GPU: {full_kernel_slug} (Mode: {mode}, Arch: {model_arch})")
     else:
         run_id = run_state["run_id"]
         mode = run_state.get("mode", mode)
@@ -800,10 +804,33 @@ def run_pipeline(
                 state_file.write_text(json.dumps(run_state, indent=2), encoding="utf-8")
                 break
             elif status_raw in ("error", "failed", "cancel_acknowledged", "cancel_requested") or any(k in status_raw for k in ("error", "failed", "cancel")):
+                error_detail = failure_msg
+                if not error_detail:
+                    try:
+                        err_log_dir = staging_dir / "error_log" / run_id
+                        err_log_dir.mkdir(parents=True, exist_ok=True)
+                        api.kernels_output(full_kernel_slug, path=str(err_log_dir))
+                        for log_f in err_log_dir.glob("*.log"):
+                            raw = log_f.read_text(encoding="utf-8", errors="replace")
+                            try:
+                                entries = json.loads(raw)
+                                err_lines = [
+                                    item.get("data", "")
+                                    for item in entries
+                                    if item.get("stream_name") == "stderr" or "error" in item.get("data", "").lower() or "exception" in item.get("data", "").lower()
+                                ]
+                                if err_lines:
+                                    error_detail = "".join(err_lines[-15:]).strip()
+                            except Exception:
+                                error_detail = raw[-500:].strip()
+                    except Exception:
+                        pass
+
+                final_msg = error_detail or failure_msg or f"Kernel ended with {status_raw}"
                 run_state["phase"] = "FAILED"
-                run_state["status_message"] = failure_msg or f"Kernel ended with {status_raw}"
+                run_state["status_message"] = final_msg
                 state_file.write_text(json.dumps(run_state, indent=2), encoding="utf-8")
-                raise RuntimeError(f"[ERROR] Kaggle training {status_raw}: {failure_msg}")
+                raise RuntimeError(f"[ERROR] Kaggle training {status_raw}:\n{final_msg}")
 
             time.sleep(15)
 
@@ -1067,6 +1094,7 @@ def run_onetap(
     dataset_slug: str = "bme-3d-dataset",
     kernel_slug: str = "bme-3d-unet-training",
     api: Optional[Any] = None,
+    model_arch: str = "cnet_attention_unet",
 ) -> Dict[str, Any]:
     """Execute end-to-end one-tap automated training pipeline with built-in safety gates."""
     check_no_in_repo_kaggle_credentials(src_dir)
@@ -1097,6 +1125,7 @@ def run_onetap(
             dataset_slug=dataset_slug,
             kernel_slug=kernel_slug,
             api=api,
+            model_arch=model_arch,
         )
 
     # STEP 1: Doctor checks
@@ -1168,6 +1197,7 @@ def run_onetap(
         dataset_slug=dataset_slug,
         kernel_slug=kernel_slug,
         api=api,
+        model_arch=model_arch,
     )
 
 
@@ -1660,6 +1690,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_run.add_argument("--export-dir", type=str, default=os.getenv("BME_EXPORT_DIR", "../bme_colab_export"))
     p_run.add_argument("--dataset-slug", type=str, default=os.getenv("KAGGLE_DATASET_SLUG", "bme-3d-dataset"))
     p_run.add_argument("--kernel-slug", type=str, default=os.getenv("KAGGLE_KERNEL_SLUG", "bme-3d-unet-training"))
+    p_run.add_argument("--model-arch", choices=["unet3d", "cnet_attention_unet"], default="cnet_attention_unet",
+                       help="Model architecture to train on GPU (default: cnet_attention_unet)")
 
     # onetap
     p_one = subparsers.add_parser("onetap", parents=[common_parser], help="Execute full one-tap automated training pipeline")
@@ -1672,6 +1704,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_one.add_argument("--mapping-file", type=str, default=os.getenv("BME_MAPPING_FILE", "../bme_recovery/export_mapping.json"))
     p_one.add_argument("--dataset-slug", type=str, default=os.getenv("KAGGLE_DATASET_SLUG", "bme-3d-dataset"))
     p_one.add_argument("--kernel-slug", type=str, default=os.getenv("KAGGLE_KERNEL_SLUG", "bme-3d-unet-training"))
+    p_one.add_argument("--model-arch", choices=["unet3d", "cnet_attention_unet"], default="cnet_attention_unet",
+                       help="Model architecture to train on GPU (default: cnet_attention_unet)")
 
     # status
     p_st = subparsers.add_parser("status", parents=[common_parser], help="Query kernel execution status on Kaggle")
@@ -1736,6 +1770,7 @@ def main():
                 export_dir=Path(args.export_dir) if args.export_dir else None,
                 dataset_slug=args.dataset_slug,
                 kernel_slug=args.kernel_slug,
+                model_arch=getattr(args, "model_arch", "cnet_attention_unet"),
             )
         elif args.subcommand == "onetap":
             run_onetap(
@@ -1748,6 +1783,7 @@ def main():
                 mapping_file=Path(args.mapping_file) if args.mapping_file else None,
                 dataset_slug=args.dataset_slug,
                 kernel_slug=args.kernel_slug,
+                model_arch=getattr(args, "model_arch", "cnet_attention_unet"),
             )
         elif args.subcommand == "status":
             res = run_status(args.kernel_slug, src_dir=src_dir)

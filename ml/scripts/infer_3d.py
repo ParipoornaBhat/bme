@@ -20,7 +20,7 @@ import torch
 from scipy.ndimage import label as cc_label
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from train_3d import UNet3D, guard_device, normalize, predict_volume  # noqa: E402
+from train_3d import UNet3D, build_model, guard_device, normalize, predict_volume  # noqa: E402
 
 
 def read_nrrd(path: Path):
@@ -55,12 +55,25 @@ def main():
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
     guard_device(device)
-    model = UNet3D().to(device)
     masks = []
     for ck in ckpts:
         blob = torch.load(ck, map_location=device, weights_only=False)
+        arch = blob.get("model_arch", "unet3d")
+        bc = blob.get("base_channels", 16)
+        dc = blob.get("double_conv", False)
+        min_vox = blob.get("min_bme_voxels", 50)
+        cnet_thresh = blob.get("cnet_threshold", 0.40)
+        model = build_model(arch=arch, base_channels=bc, double_conv=dc).to(device)
         model.load_state_dict(blob["state"])
-        masks.append(predict_volume(model, norm, device))
+        masks.append(
+            predict_volume(
+                model,
+                norm,
+                device,
+                min_bme_voxels=min_vox,
+                cnet_threshold=cnet_thresh,
+            )
+        )
     # Majority across folds, then drop edema that is not inside bone in that vote.
     bone_votes = sum((m > 0).astype(np.uint8) for m in masks)
     bme_votes = sum((m == 2).astype(np.uint8) for m in masks)

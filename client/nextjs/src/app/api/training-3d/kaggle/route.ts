@@ -422,6 +422,9 @@ export async function POST(req: NextRequest) {
     if (typeof body.kernelSlug === "string" && body.kernelSlug.trim()) {
       cliArgs.push("--kernel-slug", body.kernelSlug.trim());
     }
+    if (typeof body.modelArch === "string" && body.modelArch.trim()) {
+      cliArgs.push("--model-arch", body.modelArch.trim());
+    }
   } else if (action === "onetap") {
     cliArgs.push("onetap");
     if (body.confirmApprove === true) {
@@ -448,6 +451,9 @@ export async function POST(req: NextRequest) {
     }
     if (typeof body.kernelSlug === "string" && body.kernelSlug.trim()) {
       cliArgs.push("--kernel-slug", body.kernelSlug.trim());
+    }
+    if (typeof body.modelArch === "string" && body.modelArch.trim()) {
+      cliArgs.push("--model-arch", body.modelArch.trim());
     }
   } else if (action === "status") {
     cliArgs.push("status", "--json");

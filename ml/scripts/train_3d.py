@@ -372,6 +372,7 @@ class UNet3D(nn.Module):
 
     def __init__(self, base_channels: int = 16, double_conv: bool = False):
         super().__init__()
+        self.model_arch = "unet3d"
         self.base_channels = base_channels
         self.double_conv = double_conv
 
@@ -405,13 +406,155 @@ class UNet3D(nn.Module):
         self.d1 = block(c2, c1)
         self.out = nn.Conv3d(c1, 2, 1)
 
-    def forward(self, x):
+    def forward(self, x, return_cnet: bool = False):
         a = self.e1(x)
         b = self.e2(self.pool(a))
         c = self.e3(self.pool(b))
         y = self.d2(torch.cat([self.up2(c), b], 1))
         y = self.d1(torch.cat([self.up1(y), a], 1))
-        return self.out(y)
+        out = self.out(y)
+        if return_cnet:
+            return out, None
+        return out
+
+
+class AttentionGate3D(nn.Module):
+    """3D Attention Gate (Oktay et al., 2018).
+    Weights encoder skip features by attention coefficients derived from coarser gating features.
+    """
+
+    def __init__(self, f_g: int, f_l: int, f_int: int):
+        super().__init__()
+        self.w_g = nn.Sequential(
+            nn.Conv3d(f_g, f_int, kernel_size=1, stride=1, padding=0, bias=False),
+            nn.InstanceNorm3d(f_int),
+        )
+        self.w_x = nn.Sequential(
+            nn.Conv3d(f_l, f_int, kernel_size=1, stride=1, padding=0, bias=False),
+            nn.InstanceNorm3d(f_int),
+        )
+        self.psi = nn.Sequential(
+            nn.Conv3d(f_int, 1, kernel_size=1, stride=1, padding=0, bias=True),
+            nn.InstanceNorm3d(1),
+            nn.Sigmoid(),
+        )
+        self.relu = nn.ReLU(inplace=True)
+
+    def forward(self, g: torch.Tensor, x: torch.Tensor) -> torch.Tensor:
+        w_g = self.w_g(g)
+        w_x = self.w_x(x)
+        if w_g.shape[2:] != w_x.shape[2:]:
+            w_g = nn.functional.interpolate(w_g, size=w_x.shape[2:], mode="trilinear", align_corners=True)
+        psi = self.relu(w_g + w_x)
+        alpha = self.psi(psi)
+        return x * alpha
+
+
+class CNetHead3D(nn.Module):
+    """Candidate/Classification Network (C-Net) Gatekeeper.
+    Predicts patient/patch-level edema presence logit from global bottleneck features.
+    """
+
+    def __init__(self, in_channels: int):
+        super().__init__()
+        self.pool = nn.AdaptiveAvgPool3d(1)
+        self.fc = nn.Sequential(
+            nn.Linear(in_channels, 64),
+            nn.ReLU(inplace=True),
+            nn.Dropout(0.2),
+            nn.Linear(64, 1),
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        b = x.size(0)
+        pooled = self.pool(x).view(b, -1)
+        return self.fc(pooled).squeeze(-1)
+
+
+class CNetAttentionUNet3D(nn.Module):
+    """Cascaded C-Net Gatekeeper + 3D Attention U-Net.
+
+    1. C-Net head at bottleneck gates edema presence (blocks false positives on negative controls).
+    2. Attention gates on skip connections filter background noise and highlight bone marrow edema.
+    """
+
+    def __init__(self, base_channels: int = 16, double_conv: bool = True):
+        super().__init__()
+        self.model_arch = "cnet_attention_unet"
+        self.base_channels = base_channels
+        self.double_conv = double_conv
+
+        def block(i, o):
+            if double_conv:
+                return nn.Sequential(
+                    nn.Conv3d(i, o, 3, padding=1, bias=False),
+                    nn.InstanceNorm3d(o),
+                    nn.ReLU(inplace=True),
+                    nn.Conv3d(o, o, 3, padding=1, bias=False),
+                    nn.InstanceNorm3d(o),
+                    nn.ReLU(inplace=True),
+                )
+            return nn.Sequential(
+                nn.Conv3d(i, o, 3, padding=1, bias=False),
+                nn.InstanceNorm3d(o),
+                nn.ReLU(inplace=True),
+            )
+
+        c1 = base_channels
+        c2 = base_channels * 2
+        c3 = base_channels * 4
+
+        # Encoder
+        self.e1 = block(1, c1)
+        self.e2 = block(c1, c2)
+        self.e3 = block(c2, c3)
+        self.pool = nn.MaxPool3d(2)
+
+        # C-Net presence classifier head at bottleneck
+        self.cnet = CNetHead3D(c3)
+
+        # Attention Gates on skip connections
+        self.ag2 = AttentionGate3D(f_g=c2, f_l=c2, f_int=c1)
+        self.ag1 = AttentionGate3D(f_g=c1, f_l=c1, f_int=max(2, c1 // 2))
+
+        # Decoder with transposed convolutions
+        self.up2 = nn.ConvTranspose3d(c3, c2, 2, stride=2)
+        self.d2 = block(c3, c2)
+        self.up1 = nn.ConvTranspose3d(c2, c1, 2, stride=2)
+        self.d1 = block(c2, c1)
+
+        # Output segmentation head (channel 0: bone, channel 1: edema)
+        self.out = nn.Conv3d(c1, 2, 1)
+
+    def forward(self, x: torch.Tensor, return_cnet: bool = False):
+        a = self.e1(x)
+        b = self.e2(self.pool(a))
+        c = self.e3(self.pool(b))
+
+        cnet_logit = self.cnet(c)
+
+        up2_out = self.up2(c)
+        gated_b = self.ag2(g=up2_out, x=b)
+        y = self.d2(torch.cat([up2_out, gated_b], 1))
+
+        up1_out = self.up1(y)
+        gated_a = self.ag1(g=up1_out, x=a)
+        y = self.d1(torch.cat([up1_out, gated_a], 1))
+
+        seg = self.out(y)
+        if return_cnet:
+            return seg, cnet_logit
+        return seg
+
+
+def build_model(
+    arch: str = "unet3d",
+    base_channels: int = 16,
+    double_conv: bool = False,
+) -> nn.Module:
+    if arch == "cnet_attention_unet":
+        return CNetAttentionUNet3D(base_channels=base_channels, double_conv=double_conv)
+    return UNet3D(base_channels=base_channels, double_conv=double_conv)
 
 
 
@@ -423,8 +566,14 @@ def targets(labels: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
     return torch.stack([bone, bme], 0), valid
 
 
-def dice_focal(logits: torch.Tensor, target: torch.Tensor, valid: torch.Tensor, gamma: float = 2.0) -> torch.Tensor:
-    """Dice + focal. Uncertain voxels are weighted out. Edema is a small fraction of the patch."""
+def dice_focal(
+    logits: torch.Tensor,
+    target: torch.Tensor,
+    valid: torch.Tensor,
+    gamma: float = 2.0,
+    bme_weight: float = 2.5,
+) -> torch.Tensor:
+    """Dice + focal. Uncertain voxels are weighted out. Edema is weighted by bme_weight (default: 2.5) to counteract class imbalance."""
     prob = torch.sigmoid(logits)
     loss = logits.new_zeros(())
     denom_v = valid.sum().clamp(min=1)
@@ -437,7 +586,8 @@ def dice_focal(logits: torch.Tensor, target: torch.Tensor, valid: torch.Tensor, 
         bce = nn.functional.binary_cross_entropy(p.clamp(1e-4, 1 - 1e-4), t, reduction="none")
         pt = torch.where(t > 0.5, p, 1 - p)
         focal = ((1 - pt).pow(gamma) * bce * valid).sum() / denom_v
-        loss = loss + dice + focal
+        w = 1.0 if c == 0 else bme_weight
+        loss = loss + w * (dice + focal)
     return loss
 
 
@@ -518,8 +668,10 @@ def predict_volume(
     use_amp: bool = False,
     channels_last: bool = False,
     min_bme_voxels: int = 50,
+    cnet_threshold: float = 0.40,
+    bme_threshold: float = 0.35,
 ) -> np.ndarray:
-    """Sliding-window inference. Supports val_batch_size >= 1 for faster evaluation."""
+    """Sliding-window inference. Supports val_batch_size >= 1 for faster evaluation and C-Net presence gating."""
     model.eval()
     shape = image.shape
     padded = pad_volume(image)
@@ -527,6 +679,8 @@ def predict_volume(
     votes_bme = np.zeros(padded.shape, dtype=np.uint16)
     hits = np.zeros(padded.shape, dtype=np.uint16)
     origins = window_origins(padded.shape)
+    has_cnet = hasattr(model, "cnet")
+    cnet_probs: list[float] = []
 
     if val_batch_size <= 1:
         for origin in origins:
@@ -534,13 +688,25 @@ def predict_volume(
             x = torch.from_numpy(patch).float().unsqueeze(0).unsqueeze(0).to(device)
             if channels_last:
                 x = x.to(memory_format=torch.channels_last_3d)
-            if use_amp and device == "cuda":
-                with torch.amp.autocast(device_type="cuda"):
-                    prob = torch.sigmoid(model(x)[0])
+            if has_cnet:
+                if use_amp and device == "cuda":
+                    with torch.amp.autocast(device_type="cuda"):
+                        raw_seg, cnet_logit = model(x, return_cnet=True)
+                        prob = torch.sigmoid(raw_seg[0])
+                        cnet_p = float(torch.sigmoid(cnet_logit).cpu().item())
+                else:
+                    raw_seg, cnet_logit = model(x, return_cnet=True)
+                    prob = torch.sigmoid(raw_seg[0])
+                    cnet_p = float(torch.sigmoid(cnet_logit).cpu().item())
+                cnet_probs.append(cnet_p)
             else:
-                prob = torch.sigmoid(model(x)[0])
+                if use_amp and device == "cuda":
+                    with torch.amp.autocast(device_type="cuda"):
+                        prob = torch.sigmoid(model(x)[0])
+                else:
+                    prob = torch.sigmoid(model(x)[0])
             bone = (prob[0] >= 0.5).cpu().numpy()
-            bme = ((prob[1] >= 0.5).cpu().numpy() & bone)
+            bme = ((prob[1] >= bme_threshold).cpu().numpy() & bone)
             del x, prob
             sl = tuple(slice(o, o + p) for o, p in zip(origin, PATCH))
             votes_bone[sl] += bone
@@ -553,19 +719,35 @@ def predict_volume(
             x = torch.from_numpy(batch_arr).float().unsqueeze(1).to(device)
             if channels_last:
                 x = x.to(memory_format=torch.channels_last_3d)
-            if use_amp and device == "cuda":
-                with torch.amp.autocast(device_type="cuda"):
-                    probs = torch.sigmoid(model(x)).cpu().numpy()
+            if has_cnet:
+                if use_amp and device == "cuda":
+                    with torch.amp.autocast(device_type="cuda"):
+                        raw_seg, cnet_logit = model(x, return_cnet=True)
+                        probs = torch.sigmoid(raw_seg).cpu().numpy()
+                        cnet_ps = torch.sigmoid(cnet_logit).cpu().numpy()
+                else:
+                    raw_seg, cnet_logit = model(x, return_cnet=True)
+                    probs = torch.sigmoid(raw_seg).cpu().numpy()
+                    cnet_ps = torch.sigmoid(cnet_logit).cpu().numpy()
+                cnet_probs.extend(cnet_ps.tolist() if hasattr(cnet_ps, "tolist") else [float(cnet_ps)])
             else:
-                probs = torch.sigmoid(model(x)).cpu().numpy()
+                if use_amp and device == "cuda":
+                    with torch.amp.autocast(device_type="cuda"):
+                        probs = torch.sigmoid(model(x)).cpu().numpy()
+                else:
+                    probs = torch.sigmoid(model(x)).cpu().numpy()
             for j, o in enumerate(batch_orig):
                 bone = probs[j, 0] >= 0.5
-                bme = (probs[j, 1] >= 0.5) & bone
+                bme = (probs[j, 1] >= bme_threshold) & bone
                 sl = tuple(slice(o[k], o[k] + PATCH[k]) for k in range(3))
                 votes_bone[sl] += bone
                 votes_bme[sl] += bme
                 hits[sl] += 1
             del x, probs
+
+    # C-Net gatekeeper: if maximum presence probability across scan is below threshold, block BME entirely
+    if has_cnet and cnet_probs and (max(cnet_probs) < cnet_threshold):
+        votes_bme.fill(0)
 
     votes_bone = votes_bone[: shape[0], : shape[1], : shape[2]]
     votes_bme = votes_bme[: shape[0], : shape[1], : shape[2]]
@@ -793,6 +975,16 @@ def main():
                     help="Use dual conv layers per resolution block in UNet3D")
     ap.add_argument("--eval-only", action="store_true",
                     help="Run validation evaluation on existing fold checkpoints without training")
+    ap.add_argument("--model-arch", type=str, default="unet3d", choices=["unet3d", "cnet_attention_unet"],
+                    help="Model architecture: 'unet3d' (standard) or 'cnet_attention_unet' (C-Net gatekeeper + 3D Attention U-Net)")
+    ap.add_argument("--cnet-weight", type=float, default=0.5,
+                    help="Loss weight for C-Net binary presence classification (default: 0.5)")
+    ap.add_argument("--cnet-threshold", type=float, default=0.40,
+                    help="Presence threshold for C-Net gatekeeper (default: 0.40)")
+    ap.add_argument("--bme-loss-weight", type=float, default=2.5,
+                    help="Loss weight for BME edema class to address class imbalance (default: 2.5)")
+    ap.add_argument("--bme-threshold", type=float, default=0.35,
+                    help="Probability threshold for BME edema segmentation (default: 0.35)")
     args = ap.parse_args()
 
 
@@ -1091,6 +1283,9 @@ def main():
                 current_val = sorted([c["id"] for c in val])
                 if ckpt_val_cases is not None and sorted(ckpt_val_cases) != current_val:
                     mismatches.append(f"val_cases (saved {ckpt_val_cases} != current {current_val})")
+                ckpt_arch = ckpt.get("model_arch")
+                if ckpt_arch is not None and ckpt_arch != args.model_arch:
+                    mismatches.append(f"model_arch (saved {ckpt_arch} != current {args.model_arch})")
 
                 if mismatches:
                     raise ValueError(
@@ -1129,9 +1324,10 @@ def main():
                 print(f"fold {fold}: checkpoint {final_ckpt.name} not found, skipping eval.", flush=True)
                 continue
             ckpt = torch.load(final_ckpt, map_location=device, weights_only=False)
+            ckpt_arch = ckpt.get("model_arch", args.model_arch)
             ckpt_bc = ckpt.get("base_channels", args.base_channels)
             ckpt_dc = ckpt.get("double_conv", args.double_conv)
-            model = UNet3D(base_channels=ckpt_bc, double_conv=ckpt_dc).to(device)
+            model = build_model(arch=ckpt_arch, base_channels=ckpt_bc, double_conv=ckpt_dc).to(device)
             if args.channels_last_3d:
                 model = model.to(memory_format=torch.channels_last_3d)
             model.load_state_dict(ckpt["state"])
@@ -1143,15 +1339,15 @@ def main():
             start_epoch = args.epochs + 1
             opt = None
             scaler = None
-            print(f"fold {fold}: loaded {final_ckpt.name} for eval-only validation (min_bme_voxels={args.min_bme_voxels})", flush=True)
+            print(f"fold {fold}: loaded {final_ckpt.name} for eval-only validation (arch={ckpt_arch}, min_bme_voxels={args.min_bme_voxels})", flush=True)
         else:
             train = [c for g in groups if g is not val for c in g]
             if args.show_ids:
                 print(f"fold {fold}: train {[c['id'] for c in train]}  val {[c['id'] for c in val]}", flush=True)
             else:
-                print(f"fold {fold}: train {len(train)} cases  val {len(val)} cases", flush=True)
+                print(f"fold {fold}: train {len(train)} cases  val {len(val)} cases (arch={args.model_arch})", flush=True)
 
-            model = UNet3D(base_channels=args.base_channels, double_conv=args.double_conv).to(device)
+            model = build_model(arch=args.model_arch, base_channels=args.base_channels, double_conv=args.double_conv).to(device)
             if args.channels_last_3d:
                 model = model.to(memory_format=torch.channels_last_3d)
 
@@ -1168,6 +1364,11 @@ def main():
                 ckpt_fp = ckpt.get("fingerprint")
                 ckpt_val_cases = ckpt.get("val_cases")
                 ckpt_fold_mode = ckpt.get("fold_mode")
+                ckpt_arch = ckpt.get("model_arch")
+                if ckpt_arch is not None and ckpt_arch != args.model_arch:
+                    raise ValueError(
+                        f"Cannot resume fold {fold}: checkpoint {latest_ckpt.name} model_arch {ckpt_arch} != current {args.model_arch}."
+                    )
                 if ckpt_fold_mode is not None and ckpt_fold_mode != fold_mode:
                     raise ValueError(
                         f"Cannot resume fold {fold}: checkpoint {latest_ckpt.name} fold_mode {ckpt_fold_mode} != current {fold_mode}."
@@ -1267,27 +1468,56 @@ def main():
                     t_tr0 = time.time()
                     opt.zero_grad(set_to_none=True)
                     total_steps_fold += 1
-                    if use_amp:
-                        with torch.amp.autocast(device_type="cuda"):
-                            logits = model(x)[0]
-                        # Compute loss in full FP32 precision
-                        loss = dice_focal(logits.float(), tgt, valid)
-                        if not torch.isfinite(loss):
-                            amp_skipped_epoch += 1
-                            amp_skipped_total += 1
-                            continue
-                        scale_before = scaler.get_scale()
-                        scaler.scale(loss).backward()
-                        scaler.step(opt)
-                        scaler.update()
-                        scale_after = scaler.get_scale()
-                        if scale_after < scale_before:
-                            amp_skipped_epoch += 1
-                            amp_skipped_total += 1
+                    has_cnet = hasattr(model, "cnet")
+                    if has_cnet:
+                        has_bme = ((tgt[1] * valid).sum() > 0).float().unsqueeze(0)
+                        if use_amp:
+                            with torch.amp.autocast(device_type="cuda"):
+                                logits, cnet_logit = model(x, return_cnet=True)
+                            loss_seg = dice_focal(logits[0].float(), tgt, valid, bme_weight=args.bme_loss_weight)
+                            loss_cnet = nn.functional.binary_cross_entropy_with_logits(cnet_logit.view(-1).float(), has_bme.view(-1).float())
+                            loss = loss_seg + args.cnet_weight * loss_cnet
+                            if not torch.isfinite(loss):
+                                amp_skipped_epoch += 1
+                                amp_skipped_total += 1
+                                continue
+                            scale_before = scaler.get_scale()
+                            scaler.scale(loss).backward()
+                            scaler.step(opt)
+                            scaler.update()
+                            scale_after = scaler.get_scale()
+                            if scale_after < scale_before:
+                                amp_skipped_epoch += 1
+                                amp_skipped_total += 1
+                        else:
+                            logits, cnet_logit = model(x, return_cnet=True)
+                            loss_seg = dice_focal(logits[0], tgt, valid, bme_weight=args.bme_loss_weight)
+                            loss_cnet = nn.functional.binary_cross_entropy_with_logits(cnet_logit.view(-1), has_bme.view(-1))
+                            loss = loss_seg + args.cnet_weight * loss_cnet
+                            loss.backward()
+                            opt.step()
                     else:
-                        loss = dice_focal(model(x)[0], tgt, valid)
-                        loss.backward()
-                        opt.step()
+                        if use_amp:
+                            with torch.amp.autocast(device_type="cuda"):
+                                logits = model(x)[0]
+                            # Compute loss in full FP32 precision
+                            loss = dice_focal(logits.float(), tgt, valid, bme_weight=args.bme_loss_weight)
+                            if not torch.isfinite(loss):
+                                amp_skipped_epoch += 1
+                                amp_skipped_total += 1
+                                continue
+                            scale_before = scaler.get_scale()
+                            scaler.scale(loss).backward()
+                            scaler.step(opt)
+                            scaler.update()
+                            scale_after = scaler.get_scale()
+                            if scale_after < scale_before:
+                                amp_skipped_epoch += 1
+                                amp_skipped_total += 1
+                        else:
+                            loss = dice_focal(model(x)[0], tgt, valid, bme_weight=args.bme_loss_weight)
+                            loss.backward()
+                            opt.step()
                     total += float(loss.detach())
                     steps += 1
                     t_tr_delta = time.time() - t_tr0
@@ -1311,6 +1541,11 @@ def main():
                         "sampling_mix": sampling_mix_dict,
                         "fingerprint": current_fingerprint,
                         "val_cases": sorted([c["id"] for c in val]),
+                        "model_arch": getattr(model, "model_arch", args.model_arch),
+                        "base_channels": getattr(model, "base_channels", args.base_channels),
+                        "double_conv": getattr(model, "double_conv", args.double_conv),
+                        "cnet_threshold": args.cnet_threshold,
+                        "cnet_weight": args.cnet_weight,
                     },
                     latest_ckpt,
                 )
@@ -1373,6 +1608,8 @@ def main():
                 use_amp=use_amp,
                 channels_last=args.channels_last_3d,
                 min_bme_voxels=args.min_bme_voxels,
+                cnet_threshold=args.cnet_threshold,
+                bme_threshold=args.bme_threshold,
             )
             bone_d.append(dice(loaded["labels"], pred, 1))
             bme_d.append(dice(loaded["labels"], pred, 2))
@@ -1412,6 +1649,9 @@ def main():
                     "base_channels": getattr(model, "base_channels", 16),
                     "double_conv": getattr(model, "double_conv", False),
                     "min_bme_voxels": args.min_bme_voxels,
+                    "model_arch": getattr(model, "model_arch", args.model_arch),
+                    "cnet_threshold": args.cnet_threshold,
+                    "cnet_weight": args.cnet_weight,
                 },
                 final_ckpt,
             )
@@ -1458,6 +1698,8 @@ def main():
             "presence_correct": present_hit,
             "presence_n": present_n,
             "min_bme_voxels": args.min_bme_voxels,
+            "model_arch": getattr(model, "model_arch", args.model_arch),
+            "cnet_threshold": args.cnet_threshold if hasattr(model, "cnet") else None,
 
             "amp_skipped_steps": amp_skipped_total,
             "amp_skipped_pct": round(amp_pct, 4),
@@ -1529,6 +1771,8 @@ def main():
             "presence_correct": sum(r["presence_correct"] for r in fold_rows),
             "presence_n": sum(r["presence_n"] for r in fold_rows),
             "min_bme_voxels": args.min_bme_voxels,
+            "model_arch": getattr(model, "model_arch", args.model_arch),
+            "cnet_threshold": args.cnet_threshold if hasattr(model, "cnet") else None,
             "base_channels": getattr(model, "base_channels", args.base_channels),
             "double_conv": getattr(model, "double_conv", args.double_conv),
             "amp_skipped_steps_total": total_skipped,
