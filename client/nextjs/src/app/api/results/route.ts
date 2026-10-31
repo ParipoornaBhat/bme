@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import fs from "node:fs";
 import path from "node:path";
 import { selectedMetrics } from "~/lib/selectedModel";
+import { MODELS_3D } from "~/lib/models3d";
 
 /**
  * Serves model results to the dashboard.
@@ -84,13 +85,31 @@ export async function GET() {
       selectionExplicit: sel.explicit,
       reviewCount: Array.isArray(review2d) ? review2d.length : 0,
     },
-    threeD: {
-      available: Boolean(readJson("data/results3d/metrics.json")),
-      trained: fs.existsSync(path.join(projectRoot(), "data", "results3d"))
-        && fs.readdirSync(path.join(projectRoot(), "data", "results3d")).some((f) => /^fold_\d+\.pt$/.test(f)),
-      metrics: readJson("data/results3d/metrics.json"),
-      annotations: countAnnotations(),
-      worklist: worklistSummary(),
-    },
+    threeD: (() => {
+      const models = MODELS_3D.map((spec) => {
+        const dir = path.join(projectRoot(), "data", spec.out);
+        const folds = fs.existsSync(dir)
+          ? fs.readdirSync(dir).filter((f) => /^fold_\d+\.pt$/.test(f)).length
+          : 0;
+        const metrics = readJson(`data/${spec.out}/metrics.json`);
+        return {
+          id: spec.id,
+          label: spec.label,
+          out: spec.out,
+          trained: folds > 0,
+          folds,
+          metrics,
+        };
+      });
+      const unet = models.find((m) => m.id === "unet");
+      return {
+        available: models.some((m) => m.metrics),
+        trained: models.some((m) => m.trained),
+        metrics: unet?.metrics ?? null,
+        models,
+        annotations: countAnnotations(),
+        worklist: worklistSummary(),
+      };
+    })(),
   });
 }

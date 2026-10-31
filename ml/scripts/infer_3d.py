@@ -42,24 +42,39 @@ def pack(vol: np.ndarray) -> str:
     return base64.b64encode(np.asfortranarray(vol).ravel(order="F").tobytes()).decode("ascii")
 
 
+WEIGHTS = {
+    "results3d": "unet",
+    "results3d-attn": "attention-unet",
+}
+
+
 def main():
     if len(sys.argv) < 4:
         raise SystemExit(__doc__)
     base, src, dest = Path(sys.argv[1]), Path(sys.argv[2]), Path(sys.argv[3])
-    ckpts = sorted((base / "data" / "results3d").glob("fold_*.pt"))
+    out_name = sys.argv[4] if len(sys.argv) > 4 else "results3d"
+    if out_name not in WEIGHTS:
+        raise SystemExit(f"unknown weights folder {out_name!r}. choices: {', '.join(WEIGHTS)}")
+    ckpts = sorted((base / "data" / out_name).glob("fold_*.pt"))
     if not ckpts:
-        raise SystemExit("No 3D weights yet. Train the 3D model on the Training page first.")
+        raise SystemExit(f"No weights in data/{out_name}. Train that model on the Training page first.")
 
     raw, spacing, affine = read_nrrd(src)
     norm = normalize(raw)
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
     guard_device(device)
+    model_name = WEIGHTS.get(out_name, "unet")
     masks = []
     for ck in ckpts:
         blob = torch.load(ck, map_location=device, weights_only=False)
-        arch = blob.get("model_arch", "unet3d")
-        bc = blob.get("base_channels", 16)
+        arch = blob.get("model_arch") or blob.get("model") or WEIGHTS.get(out_name, "unet3d")
+        if arch in ("attention-unet", "attention_unet"):
+            arch = "cnet_dual_unet"
+        elif arch == "unet":
+            arch = "unet3d"
+        model_name = arch
+        bc = blob.get("base_channels") or blob.get("width") or 16
         dc = blob.get("double_conv", False)
         min_vox = blob.get("min_bme_voxels", 50)
         cnet_thresh = blob.get("cnet_threshold", 0.40)
@@ -94,6 +109,8 @@ def main():
     image_u8 = np.clip(np.rint(norm * 255), 0, 255).astype(np.uint8)
     out = {
         "ok": True,
+        "model": model_name,
+        "weights": out_name,
         "device": device,
         "folds": len(ckpts),
         "edema_present": bme_n > 0,

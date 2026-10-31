@@ -4,6 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
+import { MODELS_3D, model3d, model3dInfo } from "~/lib/models3d";
 
 /**
  * Test one uploaded NRRD with the trained 3D weights.
@@ -26,9 +27,9 @@ function python() {
   return fs.existsSync(local) ? local : process.platform === "win32" ? "python" : "python3";
 }
 
-export async function GET() {
-  const dir = path.join(root(), "data", "results3d");
-  const weights = fs.existsSync(dir)
+function readModel(out: string) {
+  const dir = path.join(root(), "data", out);
+  const folds = fs.existsSync(dir)
     ? fs.readdirSync(dir).filter((f) => /^fold_\d+\.pt$/.test(f)).length
     : 0;
   let metrics: unknown = null;
@@ -36,7 +37,23 @@ export async function GET() {
   if (fs.existsSync(mf)) {
     try { metrics = JSON.parse(fs.readFileSync(mf, "utf8")); } catch { metrics = null; }
   }
-  return NextResponse.json({ trained: weights > 0, folds: weights, metrics });
+  return { trained: folds > 0, folds, metrics };
+}
+
+export async function GET() {
+  const models = MODELS_3D.map((spec) => ({
+    id: spec.id,
+    label: spec.label,
+    out: spec.out,
+    ...readModel(spec.out),
+  }));
+  const unet = models[0];
+  return NextResponse.json({
+    trained: models.some((m) => m.trained),
+    folds: unet?.folds ?? 0,
+    metrics: unet?.metrics ?? null,
+    models,
+  });
 }
 
 export async function POST(req: NextRequest) {
@@ -53,11 +70,13 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "That is a segmentation. Upload the scan NRRD." }, { status: 400 });
   }
 
-  const dir = path.join(root(), "data", "results3d");
+  const model = model3d(String(form.get("model") ?? "unet"));
+  const spec = model3dInfo(model);
+  const dir = path.join(root(), "data", spec.out);
   const weights = fs.existsSync(dir) && fs.readdirSync(dir).some((f) => /^fold_\d+\.pt$/.test(f));
   if (!weights) {
     return NextResponse.json(
-      { error: "No 3D weights yet. Train the 3D model on the Training page first." },
+      { error: `No weights for ${spec.label}. Train it on the Training page, or with pnpm train:3d.` },
       { status: 400 },
     );
   }
@@ -68,7 +87,7 @@ export async function POST(req: NextRequest) {
   try {
     await exec(
       python(),
-      [path.join(root(), "ml", "scripts", "infer_3d.py"), root(), tmp, out],
+      [path.join(root(), "ml", "scripts", "infer_3d.py"), root(), tmp, out, spec.out],
       { cwd: root(), timeout: 180_000, maxBuffer: 32 * 1024 * 1024 },
     );
     const parsed = JSON.parse(fs.readFileSync(out, "utf8"));

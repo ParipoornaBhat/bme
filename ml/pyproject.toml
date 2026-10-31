@@ -25,6 +25,8 @@ dependencies = [
     "fastapi>=0.110",
     "uvicorn[standard]>=0.29",
     "python-multipart>=0.0.9",
+    # kaggle pipeline: process liveness checks
+    "psutil>=5.9",
 ]
 
 [project.optional-dependencies]

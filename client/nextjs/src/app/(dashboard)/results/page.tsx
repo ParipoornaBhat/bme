@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import { Activity, Boxes, CheckCircle2, Eye, Layers, Loader2, RefreshCw } from "lucide-react";
 import TestImage from "./TestImage";
 import Test3D from "./Test3D";
+import { MODELS_3D, type Model3DId } from "~/lib/models3d";
 
 /**
  * Model results, split into two independent pipelines.
@@ -39,18 +40,28 @@ type Payload = {
   threeD: {
     available: boolean;
     trained: boolean;
-    metrics: null | {
-      model: string; device: string; folds: number; epochs: number;
-      n_cases: number; n_bme: number; n_negative: number;
-      presence_correct: number; presence_n: number; note: string;
-      summary: Record<string, { mean: number; std: number } | null>;
-    };
+    metrics: null | Metrics3D;
+    models: {
+      id: Model3DId;
+      label: string;
+      out: string;
+      trained: boolean;
+      folds: number;
+      metrics: null | Metrics3D;
+    }[];
     annotations: { total: number; cases: string[] };
     worklist: null | {
       totalCases: number;
       byPerson: Record<string, { total: number; isotropic: number; bme: number }>;
     };
   };
+};
+
+type Metrics3D = {
+  model: string; device: string; folds: number; epochs: number;
+  n_cases: number; n_bme: number; n_negative: number;
+  presence_correct: number; presence_n: number; note: string;
+  summary: Record<string, { mean: number; std: number } | null>;
 };
 
 type CamEntry = { case_id: string; true: number; pred: number; prob: number; fold: number; thumb: string };
@@ -89,6 +100,7 @@ function MetricRow({ label, m, muted }: { label: string; m: Metric; muted?: bool
 
 export default function ResultsPage() {
   const [tab, setTab] = useState<"2d" | "3d">("2d");
+  const [model3d, setModel3d] = useState<Model3DId>("unet");
   const [data, setData] = useState<Payload | null>(null);
   const [loading, setLoading] = useState(true);
   const [cam, setCam] = useState<CamPayload | null>(null);
@@ -105,6 +117,8 @@ export default function ResultsPage() {
       if (savedTab === "2d" || savedTab === "3d") {
         setTab(savedTab);
       }
+      const savedModel = localStorage.getItem("bme_results_3d_model");
+      if (savedModel === "unet" || savedModel === "attention-unet") setModel3d(savedModel);
     } catch { /* ignore */ }
   }, []);
 
@@ -481,44 +495,79 @@ export default function ResultsPage() {
             </div>
           </div>
 
-          {data?.threeD.metrics && (
-            <div className="rounded-lg border border-border bg-card p-4">
-              <div className="mb-3 text-xs font-semibold uppercase tracking-wider text-muted-foreground">
-                3D U-Net — {data.threeD.metrics.n_cases} volumes,{" "}
-                {data.threeD.metrics.n_bme} with edema, {data.threeD.metrics.n_negative} without
-                {" · "}{data.threeD.metrics.folds} folds, {data.threeD.metrics.epochs} epochs
-              </div>
-              <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
-                {(["bone_dice", "bme_dice", "lesion_sensitivity", "fp_per_case"] as const).map((k) => {
-                  const s = data.threeD.metrics!.summary[k];
-                  const text = !s
-                    ? "—"
-                    : k === "fp_per_case"
-                      ? `${s.mean.toFixed(1)} ± ${s.std.toFixed(1)}`
-                      : `${s.mean.toFixed(3)} ± ${s.std.toFixed(3)}`;
-                  return (
-                    <div key={k} className="rounded-lg border border-border p-3">
-                      <div className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
-                        {k.replace(/_/g, " ")}
-                      </div>
-                      <div className="mt-1 text-xl font-semibold tabular-nums">{text}</div>
-                    </div>
-                  );
-                })}
-              </div>
-              <p className="mt-3 text-sm">
-                Edema present or absent matched on {data.threeD.metrics.presence_correct} of{" "}
-                {data.threeD.metrics.presence_n} held-out volumes.
-              </p>
-              <p className="mt-1 text-xs text-muted-foreground">
-                Mean ± std across patient-level folds. Bone Dice and edema Dice are overlap with the
-                saved outlines. Lesion sensitivity is whether each painted patch was touched at all.
-                False positives per case counts predicted patches that do not overlap a painted one.
-              </p>
-            </div>
-          )}
+          <div className="flex flex-wrap gap-2">
+            {MODELS_3D.map((spec) => {
+              const row = data?.threeD.models?.find((m) => m.id === spec.id);
+              return (
+                <button key={spec.id} type="button"
+                  onClick={() => {
+                    setModel3d(spec.id);
+                    try { localStorage.setItem("bme_results_3d_model", spec.id); } catch { /* ignore */ }
+                  }}
+                  className={`rounded-md border px-3 py-2 text-left ${
+                    model3d === spec.id ? "border-primary text-foreground" : "border-border text-muted-foreground"
+                  }`}>
+                  <span className="block text-sm font-medium">{spec.label}</span>
+                  <span className="block text-[11px]">
+                    {row?.trained ? `${row.folds} folds` : "not trained"} · data/{spec.out}
+                  </span>
+                </button>
+              );
+            })}
+          </div>
 
-          <Test3D ready={Boolean(data?.threeD.trained)} />
+          {(() => {
+            const row = data?.threeD.models?.find((m) => m.id === model3d);
+            const metrics = row?.metrics;
+            const label = MODELS_3D.find((m) => m.id === model3d)?.label ?? "3D model";
+            if (!data) return null;
+            if (!metrics) {
+              return (
+                <div className="rounded-lg border border-border bg-card p-4 text-sm text-muted-foreground">
+                  No metrics for {label} yet. Train it from the Training page or with <code className="rounded bg-muted px-1">pnpm train:3d</code>.
+                  Both write <code className="rounded bg-muted px-1">data/{row?.out ?? "results3d"}/metrics.json</code>.
+                </div>
+              );
+            }
+            return (
+              <div className="rounded-lg border border-border bg-card p-4">
+                <div className="mb-3 text-xs font-semibold uppercase tracking-wider text-muted-foreground">
+                  {label} — {metrics.n_cases} volumes,{" "}
+                  {metrics.n_bme} with edema, {metrics.n_negative} without
+                  {" · "}{metrics.folds} folds, {metrics.epochs} epochs
+                </div>
+                <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+                  {(["bone_dice", "bme_dice", "lesion_sensitivity", "fp_per_case"] as const).map((k) => {
+                    const s = metrics.summary[k];
+                    const text = !s
+                      ? "—"
+                      : k === "fp_per_case"
+                        ? `${s.mean.toFixed(1)} ± ${s.std.toFixed(1)}`
+                        : `${s.mean.toFixed(3)} ± ${s.std.toFixed(3)}`;
+                    return (
+                      <div key={k} className="rounded-lg border border-border p-3">
+                        <div className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+                          {k.replace(/_/g, " ")}
+                        </div>
+                        <div className="mt-1 text-xl font-semibold tabular-nums">{text}</div>
+                      </div>
+                    );
+                  })}
+                </div>
+                <p className="mt-3 text-sm">
+                  Edema present or absent matched on {metrics.presence_correct} of{" "}
+                  {metrics.presence_n} held-out volumes.
+                </p>
+                <p className="mt-1 text-xs text-muted-foreground">
+                  Mean ± std across patient-level folds. The same file the command-line run writes.
+                  Bone Dice and edema Dice are overlap with the saved outlines. Lesion sensitivity is whether each painted patch was touched at all.
+                  False positives per case counts predicted patches that do not overlap a painted one.
+                </p>
+              </div>
+            );
+          })()}
+
+          <Test3D model={model3d} ready={Boolean(data?.threeD.models?.find((m) => m.id === model3d)?.trained)} />
 
           {data?.threeD.worklist && (
             <div className="rounded-lg border border-border bg-card p-4">

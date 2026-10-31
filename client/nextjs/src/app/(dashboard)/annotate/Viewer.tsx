@@ -68,7 +68,7 @@ import { canPaint } from "~/lib/paint-rules";
 import { wheelZoomFactor } from "~/lib/wheel-zoom";
 import { pencilCursor } from "~/lib/cursors";
 import { Pinch } from "~/lib/pinch";
-import { usePaintTools, usePencilDottedSetting } from "~/lib/usePaintTools";
+import { usePaintTools, usePencilDottedSetting, type DrawTool } from "~/lib/usePaintTools";
 import { edgePanStep, useAutoPanSetting, useSpaceHeld } from "~/lib/view-pan";
 import { isInTorch, type TorchState } from "~/lib/torch";
 import {
@@ -384,8 +384,10 @@ export default function Viewer({
   const [seriesId, setSeriesId] = useState("");
   const [seg, setSeg] = useState<number>(1);
   const [brush, setBrush] = useState(6);
-  const { tool, erasing, drawing, pickTool, toggleEraser, drawWithLabel } =
-    usePaintTools(isCollaborator ? "pan" : "brush");
+  const {
+    tool, erasing, drawing, pickTool, toggleEraser, drawWithLabel,
+    drawDefault, eraseDefault, setDrawDefault, setEraseDefault,
+  } = usePaintTools(isCollaborator ? "pan" : "pencil");
   const { spaceHeld, spaceHeldRef } = useSpaceHeld();
   const { autoPan, setAutoPan } = useAutoPanSetting();
   const { pencilDotted, setPencilDotted } = usePencilDottedSetting();
@@ -440,7 +442,7 @@ export default function Viewer({
         if (!isNaN(n) && n >= 8 && n <= 240) setTorchSize(n);
       }
       const savedTool = localStorage.getItem("bme_viewer_tool");
-      if (!isCollaborator && (savedTool === "brush" || savedTool === "pencil" || savedTool === "pan")) pickTool(savedTool);
+      if (!isCollaborator && savedTool === "pan") pickTool(savedTool);
       const savedBrush = Number(localStorage.getItem("bme_viewer_brush"));
       if (savedBrush >= 1 && savedBrush <= 20) setBrush(savedBrush);
       const savedSeg = Number(localStorage.getItem("bme_viewer_seg"));
@@ -2145,6 +2147,19 @@ export default function Viewer({
       <span>{label}</span>
     </label>
   );
+  const railSelect = (label: string, value: DrawTool, onChange: (t: DrawTool) => void, title?: string) => (
+    <label className="flex select-none items-center justify-between gap-2 text-muted-foreground" title={title}>
+      <span>{label}</span>
+      <select
+        value={value}
+        onChange={(e) => onChange(e.target.value as DrawTool)}
+        className="cursor-pointer rounded border border-border bg-background px-1 py-0.5 text-foreground"
+      >
+        <option value="pencil">Pencil</option>
+        <option value="brush">Brush</option>
+      </select>
+    </label>
+  );
   const railDivider = <div className="my-1 h-px w-6 shrink-0 bg-border" />;
   const stepTorch = (d: number) => setTorchSize((t) => {
     const next = Math.min(240, Math.max(8, t + d));
@@ -2185,6 +2200,8 @@ export default function Viewer({
           {railCheck("Protect lesion", protectLesion, changeProtectLesion)}
           {railCheck("Auto-pan", autoPan, setAutoPan, "While drawing in a zoomed view, slide the image when the pointer nears an edge")}
           {railCheck("Dotted pencil trace", pencilDotted, setPencilDotted, "While tracing, show only a dotted outline instead of a solid edge over a tinted fill preview")}
+          {railSelect("Draw with", drawDefault, setDrawDefault, "Tool chosen when you pick a label or turn the eraser off")}
+          {railSelect("Erase with", eraseDefault, setEraseDefault, "Tool chosen when you turn the eraser on")}
           {railCheck("Auto Save", autoSave, changeAutoSave, "Save the mask shortly after each edit")}
         </div>
       )}

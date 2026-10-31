@@ -18,6 +18,8 @@ import csv
 import gc
 import hashlib
 import json
+import os
+import math
 import random
 import sys
 import time
@@ -141,29 +143,30 @@ def normalize(raw: np.ndarray, denoise: bool = True) -> np.ndarray:
     return out
 
 
-def pad_volume(vol: np.ndarray) -> np.ndarray:
-    pads = [(0, max(0, PATCH[i] - vol.shape[i])) for i in range(3)]
+def pad_volume(vol: np.ndarray, patch=PATCH) -> np.ndarray:
+    pads = [(0, max(0, patch[i] - vol.shape[i])) for i in range(3)]
     if any(b for _, b in pads):
         return np.pad(vol, pads)
     return vol
 
 
-def window_origins(shape: tuple[int, int, int]) -> list[tuple[int, int, int]]:
+def window_origins(shape: tuple[int, int, int], patch=PATCH) -> list[tuple[int, int, int]]:
+    stride = tuple(max(1, p // 2) for p in patch)
     ranges = []
     for ax in range(3):
-        last = max(0, shape[ax] - PATCH[ax])
+        last = max(0, shape[ax] - patch[ax])
         if last == 0:
             ranges.append([0])
             continue
-        starts = list(range(0, last + 1, STRIDE[ax]))
+        starts = list(range(0, last + 1, stride[ax]))
         if starts[-1] != last:
             starts.append(last)
         ranges.append(starts)
     return [(x, y, z) for x in ranges[0] for y in ranges[1] for z in ranges[2]]
 
 
-def crop(vol: np.ndarray, origin: tuple[int, int, int]) -> np.ndarray:
-    sl = tuple(slice(o, o + p) for o, p in zip(origin, PATCH))
+def crop(vol: np.ndarray, origin: tuple[int, int, int], patch=PATCH) -> np.ndarray:
+    sl = tuple(slice(o, o + p) for o, p in zip(origin, patch))
     return vol[sl]
 
 
@@ -193,6 +196,8 @@ def sample_origin(
     labels: np.ndarray,
     rng: np.random.Generator,
     sampling_mix: dict[str, float] | None = None,
+    patch=PATCH,
+    lesion_pts: np.ndarray | None = None,
 ) -> tuple[int, int, int]:
     if sampling_mix is None:
         sampling_mix = {"lesion": 0.7, "bone": 0.0, "random": 0.3}
@@ -200,44 +205,34 @@ def sample_origin(
     p_lesion = sampling_mix.get("lesion", 0.7)
     p_bone = sampling_mix.get("bone", 0.0)
 
-    # Fast path for standard default: guaranteed bit-identical to legacy behavior
+    def centred(pts):
+        point = pts[int(rng.integers(len(pts)))]
+        return tuple(
+            int(np.clip(point[ax] - patch[ax] // 2, 0, max(0, shape[ax] - patch[ax])))
+            for ax in range(3)
+        )
+
+    def anywhere():
+        return tuple(
+            0 if shape[ax] <= patch[ax] else int(rng.integers(0, shape[ax] - patch[ax] + 1))
+            for ax in range(3)
+        )
+
+    pts = lesion_pts if lesion_pts is not None else (np.argwhere(labels == 2) if (labels == 2).any() else None)
+    has_lesion = pts is not None and len(pts) > 0
+
+    # Default mix (no bone sampling): same draws, in the same order, as before the mix existed.
     if p_bone == 0.0:
-        if (labels == 2).any() and rng.random() < p_lesion:
-            pts = np.argwhere(labels == 2)
-            point = pts[int(rng.integers(len(pts)))]
-            return tuple(
-                int(np.clip(point[ax] - PATCH[ax] // 2, 0, max(0, shape[ax] - PATCH[ax])))
-                for ax in range(3)
-            )
-        return tuple(
-            0 if shape[ax] <= PATCH[ax] else int(rng.integers(0, shape[ax] - PATCH[ax] + 1))
-            for ax in range(3)
-        )
+        if has_lesion and rng.random() < p_lesion:
+            return centred(pts)
+        return anywhere()
 
-    # General path when bone sampling is active (p_bone > 0.0)
     u = rng.random()
-    has_lesion = (labels == 2).any()
-    has_bone = ((labels == 1) | (labels == 2)).any()
-
     if u < p_lesion and has_lesion:
-        pts = np.argwhere(labels == 2)
-        point = pts[int(rng.integers(len(pts)))]
-        return tuple(
-            int(np.clip(point[ax] - PATCH[ax] // 2, 0, max(0, shape[ax] - PATCH[ax])))
-            for ax in range(3)
-        )
-    elif u < (p_lesion + p_bone) and has_bone:
-        pts = np.argwhere((labels == 1) | (labels == 2))
-        point = pts[int(rng.integers(len(pts)))]
-        return tuple(
-            int(np.clip(point[ax] - PATCH[ax] // 2, 0, max(0, shape[ax] - PATCH[ax])))
-            for ax in range(3)
-        )
-    else:
-        return tuple(
-            0 if shape[ax] <= PATCH[ax] else int(rng.integers(0, shape[ax] - PATCH[ax] + 1))
-            for ax in range(3)
-        )
+        return centred(pts)
+    if u < (p_lesion + p_bone) and ((labels == 1) | (labels == 2)).any():
+        return centred(np.argwhere((labels == 1) | (labels == 2)))
+    return anywhere()
 
 
 def apply_augmentation(
@@ -277,6 +272,19 @@ def apply_augmentation(
         img = np.clip(img + noise, 0.0, 1.0)
 
     return img, lbl
+
+
+def augment(image: np.ndarray, labels: np.ndarray, rng: np.random.Generator):
+    """In-plane flips and a mild intensity change. No resampling, so labels stay exact."""
+    for ax in (0, 1):
+        if rng.random() < 0.5:
+            image = np.flip(image, ax)
+            labels = np.flip(labels, ax)
+    if rng.random() < 0.8:
+        gamma = np.float32(np.exp(rng.uniform(-0.3, 0.3)))
+        image = np.power(np.clip(image, 0, 1), gamma)
+        image = image * np.float32(rng.uniform(0.9, 1.1)) + np.float32(rng.uniform(-0.05, 0.05))
+    return np.ascontiguousarray(image, dtype=np.float32), np.ascontiguousarray(labels)
 
 
 def volume_path(base: Path, case_id: str) -> Path:
@@ -438,10 +446,13 @@ def load_case(base: Path, case_id: str) -> dict | None:
 class UNet3D(nn.Module):
     """Joint bone and lesion. Two channels, lesion clipped to bone at inference."""
 
-    def __init__(self, base_channels: int = 16, double_conv: bool = False):
+    def __init__(self, base_channels: int = 16, double_conv: bool = False, width: int = None):
         super().__init__()
+        if width is not None:
+            base_channels = width
         self.model_arch = "unet3d"
         self.base_channels = base_channels
+        self.width = base_channels
         self.double_conv = double_conv
 
         def block(i, o):
@@ -726,17 +737,76 @@ class MedNeXt3D(nn.Module):
         return seg
 
 
+class AttentionGate3d(nn.Module):
+    def __init__(self, skip_ch, gate_ch, inter):
+        super().__init__()
+        self.theta = nn.Conv3d(skip_ch, inter, 1, bias=False)
+        self.phi = nn.Conv3d(gate_ch, inter, 1, bias=False)
+        self.psi = nn.Sequential(nn.ReLU(inplace=True), nn.Conv3d(inter, 1, 1), nn.Sigmoid())
+
+    def forward(self, skip, gate):
+        if gate.shape[-3:] != skip.shape[-3:]:
+            gate = nn.functional.interpolate(gate, size=skip.shape[-3:], mode="nearest")
+        return skip * self.psi(self.theta(skip) + self.phi(gate))
+
+
+class AttentionUNet3D(nn.Module):
+    """3D U-Net with attention on the skip links. Same two outputs, same patch size."""
+
+    def __init__(self, width: int = 16):
+        super().__init__()
+        w = width
+
+        def block(i, o):
+            return nn.Sequential(
+                nn.Conv3d(i, o, 3, padding=1, bias=False),
+                nn.InstanceNorm3d(o),
+                nn.ReLU(inplace=True),
+            )
+
+        self.e1 = block(1, w)
+        self.e2 = block(w, 2 * w)
+        self.e3 = block(2 * w, 4 * w)
+        self.pool = nn.MaxPool3d(2)
+        self.up2 = nn.ConvTranspose3d(4 * w, 2 * w, 2, stride=2)
+        self.gate2 = AttentionGate3d(2 * w, 2 * w, w)
+        self.d2 = block(4 * w, 2 * w)
+        self.up1 = nn.ConvTranspose3d(2 * w, w, 2, stride=2)
+        self.gate1 = AttentionGate3d(w, w, max(1, w // 2))
+        self.d1 = block(2 * w, w)
+        self.out = nn.Conv3d(w, 2, 1)
+
+    def forward(self, x, return_cnet: bool = False):
+        a = self.e1(x)
+        b = self.e2(self.pool(a))
+        c = self.e3(self.pool(b))
+        y = self.up2(c)
+        b = self.gate2(b, y)
+        y = self.d2(torch.cat([y, b], 1))
+        y = self.up1(y)
+        a = self.gate1(a, y)
+        y = self.d1(torch.cat([y, a], 1))
+        out = self.out(y)
+        if return_cnet:
+            return out, None
+        return out
+
+
 def build_model(
     arch: str = "mednext",
     base_channels: int = 16,
     double_conv: bool = False,
+    **kwargs,
 ) -> nn.Module:
-    if arch == "mednext":
-        return MedNeXt3D(base_channels=base_channels)
-    if arch in ("cnet_dual_unet", "cnet_attention_unet"):
-        return CNetDualUNet3D(base_channels=base_channels, double_conv=double_conv)
-    return UNet3D(base_channels=base_channels, double_conv=double_conv)
-
+    name = kwargs.get("name", arch)
+    width = kwargs.get("width", base_channels)
+    if name == "mednext":
+        return MedNeXt3D(base_channels=width)
+    if name in ("cnet_dual_unet", "cnet_attention_unet"):
+        return CNetDualUNet3D(base_channels=width, double_conv=double_conv)
+    if name in ("attention-unet", "attn"):
+        return AttentionUNet3D(width=width)
+    return UNet3D(base_channels=width, double_conv=double_conv)
 
 
 def targets(labels: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
@@ -772,6 +842,14 @@ def dice_focal(
     return loss
 
 
+def rates(tp, fp, fn):
+    prec = float(tp / (tp + fp)) if tp + fp else 1.0
+    rec = float(tp / (tp + fn)) if tp + fn else 1.0
+    f1 = float(2 * prec * rec / (prec + rec)) if prec + rec else 0.0
+    iou = float(tp / (tp + fp + fn)) if tp + fp + fn else 1.0
+    return prec, rec, f1, iou
+
+
 def lesion_stats(gt: np.ndarray, pred: np.ndarray) -> tuple[float, float]:
     gt_lab, n_gt = cc_label(gt == 2)
     pr_lab, n_pr = cc_label(pred == 2)
@@ -804,15 +882,17 @@ def dice(gt: np.ndarray, pred: np.ndarray, value: int) -> float:
 
 
 def guard_device(device: str, cudnn_benchmark: bool = False):
-    """Leave VRAM for the Windows desktop. A full GPU allocation can freeze the screen."""
+    """Limit this process. BME_GPU_FRACTION overrides the laptop default of 90%."""
     torch.set_num_threads(1)
     if device != "cuda":
         return
+    frac = min(0.95, max(0.05, float(os.environ.get("BME_GPU_FRACTION", "0.90"))))
     try:
-        torch.cuda.set_per_process_memory_fraction(0.65)
+        torch.cuda.set_per_process_memory_fraction(frac)
     except RuntimeError:
         pass
     torch.backends.cudnn.benchmark = cudnn_benchmark
+    print(f"GPU memory capped at {frac:.0%} for this process.", flush=True)
 
 
 def release():
@@ -845,6 +925,7 @@ def predict_volume(
     model: nn.Module,
     image: np.ndarray,
     device: str,
+    patch_size=PATCH,
     val_batch_size: int = 1,
     use_amp: bool = False,
     channels_last: bool = False,
@@ -852,79 +933,49 @@ def predict_volume(
     cnet_threshold: float = 0.40,
     bme_threshold: float = 0.35,
 ) -> np.ndarray:
-    """Sliding-window inference. Supports val_batch_size >= 1 for faster evaluation and C-Net presence gating."""
+    """Sliding-window inference with patch batching and optional C-Net presence gating. Votes stay uint16 so full scan is not copied as float."""
     model.eval()
+    patch_size = tuple(int(p) for p in patch_size)
     shape = image.shape
-    padded = pad_volume(image)
+    padded = pad_volume(image, patch_size)
     votes_bone = np.zeros(padded.shape, dtype=np.uint16)
     votes_bme = np.zeros(padded.shape, dtype=np.uint16)
     hits = np.zeros(padded.shape, dtype=np.uint16)
-    origins = window_origins(padded.shape)
+    origins = window_origins(padded.shape, patch_size)
     has_cnet = hasattr(model, "cnet")
     cnet_probs: list[float] = []
 
-    if val_batch_size <= 1:
-        for origin in origins:
-            patch = np.ascontiguousarray(crop(padded, origin))
-            x = torch.from_numpy(patch).float().unsqueeze(0).unsqueeze(0).to(device)
-            if channels_last:
-                x = x.to(memory_format=torch.channels_last_3d)
-            if has_cnet:
-                if use_amp and device == "cuda":
-                    with torch.amp.autocast(device_type="cuda"):
-                        raw_seg, cnet_logit = model(x, return_cnet=True)
-                        prob = torch.sigmoid(raw_seg[0])
-                        cnet_p = float(torch.sigmoid(cnet_logit).cpu().item())
-                else:
+    for i in range(0, len(origins), val_batch_size):
+        batch_orig = origins[i : i + val_batch_size]
+        batch_arr = np.stack([crop(padded, o, patch_size) for o in batch_orig])
+        x = torch.from_numpy(batch_arr).float().unsqueeze(1).to(device)
+        if channels_last:
+            x = x.to(memory_format=torch.channels_last_3d)
+        if has_cnet:
+            if use_amp and device == "cuda":
+                with torch.amp.autocast(device_type="cuda"):
                     raw_seg, cnet_logit = model(x, return_cnet=True)
-                    prob = torch.sigmoid(raw_seg[0])
-                    cnet_p = float(torch.sigmoid(cnet_logit).cpu().item())
-                cnet_probs.append(cnet_p)
+                    probs = torch.sigmoid(raw_seg.float()).cpu().numpy()
+                    cnet_ps = torch.sigmoid(cnet_logit.float()).cpu().numpy()
             else:
-                if use_amp and device == "cuda":
-                    with torch.amp.autocast(device_type="cuda"):
-                        prob = torch.sigmoid(model(x)[0])
-                else:
-                    prob = torch.sigmoid(model(x)[0])
-            bone = (prob[0] >= 0.5).cpu().numpy()
-            bme = ((prob[1] >= bme_threshold).cpu().numpy() & bone)
-            del x, prob
-            sl = tuple(slice(o, o + p) for o, p in zip(origin, PATCH))
+                raw_seg, cnet_logit = model(x, return_cnet=True)
+                probs = torch.sigmoid(raw_seg).cpu().numpy()
+                cnet_ps = torch.sigmoid(cnet_logit).cpu().numpy()
+            cnet_probs.extend(cnet_ps.tolist() if hasattr(cnet_ps, "tolist") else [float(cnet_ps)])
+        else:
+            if use_amp and device == "cuda":
+                with torch.amp.autocast(device_type="cuda"):
+                    probs = torch.sigmoid(model(x).float()).cpu().numpy()
+            else:
+                probs = torch.sigmoid(model(x)).cpu().numpy()
+        for j, o in enumerate(batch_orig):
+            bone = probs[j, 0] >= 0.5
+            bme = (probs[j, 1] >= bme_threshold) & bone
+            sl = tuple(slice(o[k], o[k] + patch_size[k]) for k in range(3))
             votes_bone[sl] += bone
             votes_bme[sl] += bme
             hits[sl] += 1
-    else:
-        for i in range(0, len(origins), val_batch_size):
-            batch_orig = origins[i : i + val_batch_size]
-            batch_arr = np.stack([crop(padded, o) for o in batch_orig])
-            x = torch.from_numpy(batch_arr).float().unsqueeze(1).to(device)
-            if channels_last:
-                x = x.to(memory_format=torch.channels_last_3d)
-            if has_cnet:
-                if use_amp and device == "cuda":
-                    with torch.amp.autocast(device_type="cuda"):
-                        raw_seg, cnet_logit = model(x, return_cnet=True)
-                        probs = torch.sigmoid(raw_seg).cpu().numpy()
-                        cnet_ps = torch.sigmoid(cnet_logit).cpu().numpy()
-                else:
-                    raw_seg, cnet_logit = model(x, return_cnet=True)
-                    probs = torch.sigmoid(raw_seg).cpu().numpy()
-                    cnet_ps = torch.sigmoid(cnet_logit).cpu().numpy()
-                cnet_probs.extend(cnet_ps.tolist() if hasattr(cnet_ps, "tolist") else [float(cnet_ps)])
-            else:
-                if use_amp and device == "cuda":
-                    with torch.amp.autocast(device_type="cuda"):
-                        probs = torch.sigmoid(model(x)).cpu().numpy()
-                else:
-                    probs = torch.sigmoid(model(x)).cpu().numpy()
-            for j, o in enumerate(batch_orig):
-                bone = probs[j, 0] >= 0.5
-                bme = (probs[j, 1] >= bme_threshold) & bone
-                sl = tuple(slice(o[k], o[k] + PATCH[k]) for k in range(3))
-                votes_bone[sl] += bone
-                votes_bme[sl] += bme
-                hits[sl] += 1
-            del x, probs
+        del x, probs
 
     # C-Net gatekeeper: if maximum presence probability across scan is below threshold, block BME entirely
     if has_cnet and cnet_probs and (max(cnet_probs) < cnet_threshold):
@@ -950,6 +1001,24 @@ def mean_std(vals: list[float]) -> dict | None:
     return {"mean": float(a.mean()), "std": std}
 
 
+DEFAULT_ARCH = {"model": "unet", "width": 16, "patch": list(PATCH)}
+
+SUMMARY_KEYS = (
+    "bone_dice", "bme_dice", "lesion_sensitivity", "fp_per_case",
+    "bone_precision", "bone_recall", "bone_f1", "bone_iou",
+    "edema_precision", "edema_recall", "edema_f1", "edema_iou",
+)
+
+
+def summarise(rows: list[dict]) -> dict:
+    """mean ± std across folds. A key is left out unless every fold row carries it."""
+    out = {}
+    for k in SUMMARY_KEYS:
+        if rows and all(k in r for r in rows):
+            out[k] = mean_std([r[k] for r in rows])
+    return out
+
+
 def compute_dataset_fingerprint(
     case_ids: list[str],
     groups: list[list[dict]],
@@ -963,6 +1032,7 @@ def compute_dataset_fingerprint(
     fold_mode: str = "patient_grouped",
     patient_count: int = 0,
     sampling_mix: dict | None = None,
+    arch: dict | None = None,
 ) -> tuple[str, dict]:
     val_cases_per_fold = {
         str(f): sorted([c["id"] for c in groups[f]])
@@ -982,6 +1052,8 @@ def compute_dataset_fingerprint(
         "independent_fold_seeds": independent_fold_seeds,
         "data_flags": data_flags,
     }
+    if arch and arch != DEFAULT_ARCH:
+        payload["arch"] = arch
     raw = json.dumps(payload, sort_keys=True)
     fingerprint = hashlib.sha256(raw.encode("utf-8")).hexdigest()
     return fingerprint, payload
@@ -1050,6 +1122,7 @@ def merge_metrics_files(out_dir: Path, folds_n: int = 5) -> dict | None:
     fold_mode = first_mode
     patient_count = first.get("patient_count", 0)
     sampling_mix = first.get("sampling_mix")
+    patch_used = first.get("patch", list(PATCH))
     val_cases_per_fold = {
         str(r.get("fold", idx)): r.get("val_cases", [])
         for idx, r in enumerate(fold_rows)
@@ -1065,18 +1138,13 @@ def merge_metrics_files(out_dir: Path, folds_n: int = 5) -> dict | None:
         "sampling_mix": sampling_mix,
         "epochs": epochs,
         "seed": seed,
-        "patch": list(PATCH),
+        "patch": patch_used,
         "data_config": data_config,
         "fingerprint": fingerprint,
         "n_cases": n_cases,
         "n_bme": n_bme,
         "n_negative": n_neg,
-        "summary": {
-            "bone_dice": mean_std([r["bone_dice"] for r in fold_rows]),
-            "bme_dice": mean_std([r["bme_dice"] for r in fold_rows]),
-            "lesion_sensitivity": mean_std([r["lesion_sensitivity"] for r in fold_rows]),
-            "fp_per_case": mean_std([r["fp_per_case"] for r in fold_rows]),
-        },
+        "summary": summarise(fold_rows),
         "presence_correct": sum(r.get("presence_correct", 0) for r in fold_rows),
         "presence_n": sum(r.get("presence_n", 0) for r in fold_rows),
         "min_bme_voxels": first.get("min_bme_voxels", 50),
@@ -1089,7 +1157,7 @@ def merge_metrics_files(out_dir: Path, folds_n: int = 5) -> dict | None:
         "merged_at": datetime.now(timezone.utc).isoformat(),
         "note": (
             f"{n_cases} volumes ({n_bme} with edema, {n_neg} without), "
-            f"{len(fold_rows)} {fold_mode} folds, patch {PATCH[0]}x{PATCH[1]}x{PATCH[2]}. "
+            f"{len(fold_rows)} {fold_mode} folds, patch {patch_used[0]}x{patch_used[1]}x{patch_used[2]}. "
             "Bone and edema are trained together. Edema outside the predicted bone is removed. "
             "Dice, lesion sensitivity, and false positives per case are mean ± std across folds."
         ),
@@ -1111,9 +1179,27 @@ def main():
     ap.add_argument("base", nargs="?", default=".")
     ap.add_argument("--epochs", type=int, default=40)
     ap.add_argument("--folds", type=int, default=5)
+    ap.add_argument("--model", choices=("unet", "attention-unet"), default="unet")
+    ap.add_argument("--out", default="", help="folder under data/. Default depends on the model.")
     ap.add_argument("--device", choices=("auto", "cuda", "cpu"), default="auto")
-    ap.add_argument("--out-dir", type=str, default=None)
-    ap.add_argument("--amp", action="store_true", help="Automatic Mixed Precision (FP16)")
+    # Defaults reproduce the laptop run. The H200 job (ml/slurm/train_3d.sbatch) raises them.
+    ap.add_argument("--width", type=int, default=16, help="channels in the first layer")
+    ap.add_argument("--patch", default="96,96,12", help="x,y,z, each divisible by 4")
+    ap.add_argument("--patches-per-case", type=int, default=PATCHES_PER_CASE)
+    ap.add_argument("--batch", "--batch-size", dest="batch", type=int, default=1,
+                    help="patches per optimiser step")
+    ap.add_argument("--lr", type=float, default=1e-3)
+    ap.add_argument("--resample", "--resample-patches-each-epoch", dest="resample", action="store_true",
+                    help="keep scans in memory and cut fresh patches every epoch (needs RAM; "
+                         "needs --out or --out-dir that is not the baseline)")
+    ap.add_argument("--augment", action="store_true", help="in-plane flips and intensity jitter")
+    ap.add_argument("--amp", action="store_true", help="bfloat16 autocast on CUDA")
+    ap.add_argument("--cosine", action="store_true", help="cosine learning-rate decay per fold")
+    ap.add_argument("--hours", type=float, default=0.0,
+                    help="training time budget across all folds; epochs are fitted to it (0 = off)")
+    ap.add_argument("--max-cases", type=int, default=0, help="smoke tests only")
+    ap.add_argument("--out-dir", type=str, default=None,
+                    help="full output folder. Data experiments must point outside data/")
     ap.add_argument("--resume", action="store_true", help="Resume from latest checkpoints")
     ap.add_argument("--checkpoint-every-epoch", action="store_true", help="Save latest checkpoint per epoch")
     ap.add_argument("--quick-test", action="store_true", help="Run fast 2-epoch 2-fold test")
@@ -1129,25 +1215,19 @@ def main():
     ap.add_argument("--skip-completed", dest="skip_completed", action="store_true", default=True, help="Skip folds whose completed checkpoint and metrics match config (default: True)")
     ap.add_argument("--no-skip-completed", dest="skip_completed", action="store_false", help="Do not skip completed folds")
     ap.add_argument("--max-runtime-minutes", type=float, default=None, help="Maximum training runtime in minutes before clean checkpoint and exit")
-    # Data Experiment options (OPT-IN, OFF by default, baseline behavior unchanged when off):
-    ap.add_argument("--resample-patches-each-epoch", action="store_true",
-                    help="Resample training patches each epoch in memory (requires --out-dir outside data/)")
-    ap.add_argument("--augment", action="store_true",
-                    help="Enable all 3D data augmentations (flip, intensity, noise) on training patches")
     ap.add_argument("--aug-flip", action="store_true",
-                    help="Enable horizontal left-right flip augmentation (axis 1)")
+                    help="Left-right flip on axis 1 (3D augmentation set, separate from --augment)")
     ap.add_argument("--aug-intensity", action="store_true",
-                    help="Enable intensity scale [0.9, 1.1] and shift [-0.05, 0.05]")
+                    help="Intensity scale [0.9, 1.1] and shift [-0.05, 0.05]")
     ap.add_argument("--aug-noise", action="store_true",
-                    help="Enable additive Gaussian noise (sigma=0.01)")
+                    help="Additive Gaussian noise (sigma=0.01)")
     ap.add_argument("--legacy-case-folds", action="store_true",
                     help="Reproduce legacy case-level fold assignment instead of patient grouping")
     ap.add_argument("--allow-case-level-folds", action="store_true",
                     help="Allow case-level folds if patient_id is missing or blank in worklist.csv")
     ap.add_argument("--sampling-mix", type=str, default="lesion=0.7,bone=0.0,random=0.3",
                     help="Patch sampling proportions: lesion=A,bone=B,random=C (fractions summing to 1.0)")
-    # Experimental options (OFF by default, changes experiment):
-    ap.add_argument("--batch-size", type=int, default=1, help="[EXPERIMENT CHANGE] Training patch batch size (default: 1)")
+    # Architecture & experimental options:
     ap.add_argument("--min-bme-voxels", type=int, default=50,
                     help="Minimum connected component volume in voxels for BME lesions (default: 50)")
     ap.add_argument("--base-channels", type=int, default=16,
@@ -1156,8 +1236,8 @@ def main():
                     help="Use dual conv layers per resolution block in UNet3D")
     ap.add_argument("--eval-only", action="store_true",
                     help="Run validation evaluation on existing fold checkpoints without training")
-    ap.add_argument("--model-arch", type=str, default="mednext", choices=["unet3d", "cnet_dual_unet", "cnet_attention_unet", "mednext"],
-                    help="Model architecture: 'mednext' (State-of-the-Art 3D ConvNeXt), 'cnet_dual_unet' (C-Net + Dual-Channel U-Net), or 'unet3d' (standard)")
+    ap.add_argument("--model-arch", type=str, default="mednext", choices=["unet3d", "cnet_dual_unet", "cnet_attention_unet", "mednext", "attention-unet"],
+                    help="Model architecture: 'mednext', 'cnet_dual_unet', 'cnet_attention_unet', 'attention-unet', or 'unet3d'")
     ap.add_argument("--cnet-weight", type=float, default=0.5,
                     help="Loss weight for C-Net binary presence classification (default: 0.5)")
     ap.add_argument("--cnet-threshold", type=float, default=0.40,
@@ -1167,6 +1247,10 @@ def main():
     ap.add_argument("--bme-threshold", type=float, default=0.35,
                     help="Probability threshold for BME edema segmentation (default: 0.35)")
     args = ap.parse_args()
+    patch = tuple(int(v) for v in args.patch.split(","))
+    if len(patch) != 3 or any(p % 4 for p in patch):
+        raise SystemExit(f"--patch must be three numbers divisible by 4, got {args.patch}")
+    started = time.monotonic()
 
 
     random.seed(SEED)
@@ -1174,6 +1258,7 @@ def main():
     torch.manual_seed(SEED)
 
     base = Path(args.base)
+    out_name = args.out or ("results3d" if args.model == "unet" else "results3d-attn")
 
     try:
         sampling_mix_dict = parse_sampling_mix(args.sampling_mix)
@@ -1181,16 +1266,19 @@ def main():
         raise SystemExit(f"[ERROR] {e}")
 
     is_data_experiment = bool(
-        args.resample_patches_each_epoch or args.augment or
+        args.resample or args.augment or
         args.aug_flip or args.aug_intensity or args.aug_noise or
         (args.sampling_mix != "lesion=0.7,bone=0.0,random=0.3")
     )
-    if is_data_experiment:
-        if not args.out_dir:
+    baseline_names = ("results3d", "results3d-attn")
+    if is_data_experiment and not args.out_dir:
+        if out_name in baseline_names:
             raise SystemExit(
-                "[ERROR] Output isolation violation: data experiment runs must explicitly specify "
-                "--out-dir OUTSIDE data/ (e.g. --out-dir ../results3d_exp or /kaggle/working/results3d_exp)."
+                "[ERROR] Output isolation violation: data experiment runs must not overwrite the baseline. "
+                "Pass --out NAME (not results3d or results3d-attn), or --out-dir OUTSIDE data/ "
+                "(e.g. --out-dir ../results3d_exp or /kaggle/working/results3d_exp)."
             )
+    if is_data_experiment and args.out_dir:
         resolved_out = Path(args.out_dir).resolve()
         resolved_data = (base / "data").resolve()
         if (
@@ -1205,15 +1293,15 @@ def main():
             )
 
     data_config = {
-        "resample_patches_each_epoch": bool(args.resample_patches_each_epoch),
+        "resample_patches_each_epoch": bool(args.resample),
         "augment": bool(args.augment),
-        "aug_flip": bool(args.augment or args.aug_flip),
-        "aug_intensity": bool(args.augment or args.aug_intensity),
-        "aug_noise": bool(args.augment or args.aug_noise),
+        "aug_flip": bool(args.aug_flip),
+        "aug_intensity": bool(args.aug_intensity),
+        "aug_noise": bool(args.aug_noise),
         "sampling_mix": sampling_mix_dict,
     }
 
-    out_dir = Path(args.out_dir) if args.out_dir else base / "data" / "results3d"
+    out_dir = Path(args.out_dir) if args.out_dir else base / "data" / out_name
 
     if args.merge_metrics:
         merge_metrics_files(out_dir, args.folds)
@@ -1248,6 +1336,9 @@ def main():
     if not case_ids:
         raise SystemExit(f"No 3D annotations found under {base}. Paint and save a case on the Annotate page first.")
 
+    if args.max_cases:
+        case_ids = case_ids[: args.max_cases]
+
     if args.quick_test:
         case_ids = case_ids[:min(len(case_ids), 4)]
         args.epochs = min(args.epochs, 2)
@@ -1262,33 +1353,36 @@ def main():
     cases = []
     t_load_start = time.time()
     t_sampling_total = 0.0
-    for cid in case_ids:
+    for n, cid in enumerate(case_ids, start=1):
+        print(f"Reading scan {n}/{len(case_ids)}. Cutting patches, then releasing the scan.", flush=True)
         item = load_case(base, cid)
         if not item:
             continue
-        image = pad_volume(item["image"])
-        labels = pad_volume(item["labels"])
-        t_s0 = time.time()
-        patches, patch_labels = [], []
-        for _ in range(PATCHES_PER_CASE):
-            origin = sample_origin(image.shape, labels, rng_load, sampling_mix_dict)
-            patches.append(np.ascontiguousarray(crop(image, origin)))
-            patch_labels.append(np.ascontiguousarray(crop(labels, origin)))
-        t_sampling_total += (time.time() - t_s0)
-        pid = patients.get(item["id"], "").strip()
-        case_item = {
+        image = pad_volume(item["image"], patch)
+        labels = pad_volume(item["labels"], patch)
+        case = {
             "id": item["id"],
-            "patient_id": pid,
+            "patient_id": patients.get(item["id"], "").strip(),
             "cls": classes.get(item["id"], ""),
             "bme_voxels": item["bme_voxels"],
-            "patches": patches,
-            "patch_labels": patch_labels,
         }
-        if args.resample_patches_each_epoch:
-            case_item["volume_image"] = np.ascontiguousarray(image, dtype=np.float32)
-            case_item["volume_labels"] = np.ascontiguousarray(labels, dtype=np.uint8)
-        cases.append(case_item)
-        del item, image, labels, patches, patch_labels
+        if args.resample:
+            # float16 halves the RAM; patches are cast back to float32 when cut.
+            case["image"] = image.astype(np.float16)
+            case["labels"] = labels
+            case["lesion_pts"] = np.argwhere(labels == 2).astype(np.int32)
+        else:
+            t_s0 = time.time()
+            patches, patch_labels = [], []
+            for _ in range(args.patches_per_case):
+                origin = sample_origin(image.shape, labels, rng_load, sampling_mix_dict, patch)
+                patches.append(np.ascontiguousarray(crop(image, origin, patch)))
+                patch_labels.append(np.ascontiguousarray(crop(labels, origin, patch)))
+            t_sampling_total += (time.time() - t_s0)
+            case["patches"] = patches
+            case["patch_labels"] = patch_labels
+        cases.append(case)
+        del item, image, labels
         release()
     t_load_total = max(0.0, (time.time() - t_load_start) - t_sampling_total)
     if len(cases) < 2:
@@ -1358,8 +1452,10 @@ def main():
         flush=True,
     )
     print(
-        f"Patch {PATCH[0]}×{PATCH[1]}×{PATCH[2]} on the original voxel grid, "
-        f"{PATCHES_PER_CASE} patches per case per epoch. "
+        f"Patch {patch[0]}×{patch[1]}×{patch[2]} on the original voxel grid, "
+        f"{args.patches_per_case} patches per case per epoch"
+        f"{' (fresh every epoch)' if args.resample else ''}, width {args.width}, batch {args.batch}"
+        f"{', augmented' if args.augment else ''}. "
         "Edema outside predicted bone is removed.",
         flush=True,
     )
@@ -1367,23 +1463,21 @@ def main():
     device = resolve_device(args.device)
     guard_device(device, cudnn_benchmark=args.cudnn_benchmark)
     print(f"device {device}", flush=True)
-    if device == "cuda":
-        print(f"GPU memory capped at 65% so the desktop is not starved. cuDNN benchmark: {args.cudnn_benchmark}.", flush=True)
-
     loss_config = {"type": "dice_focal", "bone_weight": 1.0, "edema_weight": 1.0}
     current_fingerprint, fingerprint_payload = compute_dataset_fingerprint(
         case_ids=[c["id"] for c in cases],
         groups=groups,
-        batch_size=1,
-        patches_per_case=PATCHES_PER_CASE,
+        batch_size=args.batch,
+        patches_per_case=args.patches_per_case,
         lesion_sampling_ratio=0.7,
-        learning_rate=1e-3,
+        learning_rate=args.lr,
         loss_config=loss_config,
         independent_fold_seeds=bool(args.independent_fold_seeds),
         data_flags=data_config,
         fold_mode=fold_mode,
         patient_count=patient_count,
         sampling_mix=sampling_mix_dict,
+        arch={"model": args.model, "width": args.width, "patch": list(patch)},
     )
     print(f"Dataset fingerprint: {current_fingerprint[:16]}... ({len(cases)} cases, {folds_n} folds, mode: {fold_mode})", flush=True)
 
@@ -1450,11 +1544,15 @@ def main():
                 mismatches = []
                 if ckpt_seed is not None and ckpt_seed != SEED:
                     mismatches.append(f"seed (saved {ckpt_seed} != current {SEED})")
-                if ckpt_patch is not None and list(ckpt_patch) != list(PATCH):
-                    mismatches.append(f"patch shape (saved {ckpt_patch} != current {list(PATCH)})")
+                if ckpt_patch is not None and list(ckpt_patch) != list(patch):
+                    mismatches.append(f"patch shape (saved {ckpt_patch} != current {list(patch)})")
+                if ckpt.get("width") is not None and ckpt["width"] != args.width:
+                    mismatches.append(f"width (saved {ckpt['width']} != current {args.width})")
+                if ckpt.get("model") is not None and ckpt["model"] != args.model:
+                    mismatches.append(f"model (saved {ckpt['model']} != current {args.model})")
                 if ckpt_data_cfg is not None and ckpt_data_cfg != data_config:
                     mismatches.append(f"data_config (saved {ckpt_data_cfg} != current {data_config})")
-                if m_epochs is not None and m_epochs != args.epochs:
+                if m_epochs is not None and args.hours <= 0 and m_epochs != args.epochs:
                     mismatches.append(f"epochs (saved {m_epochs} != current {args.epochs})")
                 ckpt_fold_mode = ckpt.get("fold_mode")
                 if ckpt_fold_mode is not None and ckpt_fold_mode != fold_mode:
@@ -1528,11 +1626,14 @@ def main():
             else:
                 print(f"fold {fold}: train {len(train)} cases  val {len(val)} cases (arch={args.model_arch})", flush=True)
 
-            model = build_model(arch=args.model_arch, base_channels=args.base_channels, double_conv=args.double_conv).to(device)
+            arch = args.model_arch if hasattr(args, "model_arch") else ("attention-unet" if getattr(args, "model", "") == "attention-unet" else "unet3d")
+            base_channels = getattr(args, "base_channels", getattr(args, "width", 16))
+            double_conv = getattr(args, "double_conv", False)
+            model = build_model(arch=arch, base_channels=base_channels, double_conv=double_conv).to(device)
             if args.channels_last_3d:
                 model = model.to(memory_format=torch.channels_last_3d)
 
-            opt = torch.optim.Adam(model.parameters(), lr=1e-3)
+            opt = torch.optim.Adam(model.parameters(), lr=args.lr)
             scaler = torch.cuda.amp.GradScaler() if use_amp else None
             start_epoch = 1
 
@@ -1569,11 +1670,13 @@ def main():
                     raise ValueError(
                         f"Cannot resume fold {fold}: checkpoint {latest_ckpt.name} validation cases {ckpt_val_cases} != current {current_val}."
                     )
+                if ckpt.get("width") is not None and ckpt["width"] != args.width:
+                    raise ValueError(
+                        f"Cannot resume fold {fold}: checkpoint {latest_ckpt.name} width {ckpt['width']} != current {args.width}."
+                    )
                 model.load_state_dict(ckpt["state"])
                 if "opt" in ckpt:
                     opt.load_state_dict(ckpt["opt"])
-                if scaler and "scaler" in ckpt and ckpt["scaler"] is not None:
-                    scaler.load_state_dict(ckpt["scaler"])
                 start_epoch = int(ckpt.get("epoch", 0)) + 1
                 print(f"fold {fold}: resumed from epoch {start_epoch - 1} ({latest_ckpt.name})", flush=True)
             except ValueError:
@@ -1584,11 +1687,32 @@ def main():
 
         amp_skipped_total = 0
         total_steps_fold = 0
+        total = 0.0
+        steps = 0
 
-        for epoch in range(start_epoch, args.epochs + 1):
+        fold_epochs = args.epochs
+        fold_pos = folds_to_run.index(fold)
+        if args.hours > 0:
+            # Whatever is left of the budget, shared by the folds not yet trained.
+            left = args.hours * 3600 - (time.monotonic() - started)
+            fold_budget = max(60.0, left / (len(folds_to_run) - fold_pos))
+        fold_start = time.monotonic()
+
+        do_flip = bool(args.aug_flip)
+        do_intensity = bool(args.aug_intensity)
+        do_noise = bool(args.aug_noise)
+        has_aug3d = do_flip or do_intensity or do_noise
+
+        epoch = start_epoch - 1
+        while epoch < fold_epochs:
+            epoch += 1
             t_ep_start = time.time()
             t_data_total = 0.0
             t_train_total = 0.0
+            if args.cosine and fold_epochs > 1:
+                lr = 1e-5 + (args.lr - 1e-5) * 0.5 * (1 + math.cos(math.pi * (epoch - 1) / (fold_epochs - 1)))
+                for g in opt.param_groups:
+                    g["lr"] = lr
             model.train()
             total = 0.0
             steps = 0
@@ -1596,72 +1720,62 @@ def main():
             seed_base = (SEED + fold) if args.independent_fold_seeds else SEED
             rng_epoch_data = np.random.default_rng(np.random.SeedSequence([seed_base, fold, epoch]))
 
-            do_flip = bool(args.augment or args.aug_flip)
-            do_intensity = bool(args.augment or args.aug_intensity)
-            do_noise = bool(args.augment or args.aug_noise)
-            has_aug = do_flip or do_intensity or do_noise
-
+            t_d0 = time.time()
             order_cases = train[:]
             random.shuffle(order_cases)
-
+            items = []
             for case in order_cases:
-                t_d0 = time.time()
-                if args.resample_patches_each_epoch:
-                    cur_patches = []
-                    cur_labels = []
-                    vol_img = case["volume_image"]
-                    vol_lbl = case["volume_labels"]
-                    for _ in range(PATCHES_PER_CASE):
-                        origin = sample_origin(vol_img.shape, vol_lbl, rng_epoch_data, sampling_mix_dict)
-                        p_img = np.ascontiguousarray(crop(vol_img, origin))
-                        p_lbl = np.ascontiguousarray(crop(vol_lbl, origin))
-                        if has_aug:
-                            p_img, p_lbl = apply_augmentation(
-                                p_img, p_lbl, rng_epoch_data,
-                                do_flip=do_flip, do_intensity=do_intensity, do_noise=do_noise
-                            )
-                        cur_patches.append(p_img)
-                        cur_labels.append(p_lbl)
-                elif has_aug:
-                    cur_patches = []
-                    cur_labels = []
-                    for p_img, p_lbl in zip(case["patches"], case["patch_labels"]):
-                        a_img, a_lbl = apply_augmentation(
-                            p_img, p_lbl, rng_epoch_data,
-                            do_flip=do_flip, do_intensity=do_intensity, do_noise=do_noise
-                        )
-                        cur_patches.append(a_img)
-                        cur_labels.append(a_lbl)
+                if args.resample:
+                    for _ in range(args.patches_per_case):
+                        origin = sample_origin(case["image"].shape, case["labels"], rng_epoch_data,
+                                               sampling_mix_dict, patch, case["lesion_pts"])
+                        items.append((crop(case["image"], origin, patch).astype(np.float32),
+                                      crop(case["labels"], origin, patch)))
                 else:
-                    cur_patches = case["patches"]
-                    cur_labels = case["patch_labels"]
+                    items.extend(zip(case["patches"], case["patch_labels"]))
+            random.shuffle(items)
+            if has_aug3d:
+                items = [
+                    apply_augmentation(im, lb, rng_epoch_data,
+                                       do_flip=do_flip, do_intensity=do_intensity, do_noise=do_noise)
+                    for im, lb in items
+                ]
+            if args.augment:
+                items = [augment(im, lb, rng_epoch_data) for im, lb in items]
+            t_data_total += (time.time() - t_d0)
+
+            for i in range(0, len(items), args.batch):
+                chunk = items[i: i + args.batch]
+                t_d0 = time.time()
+                x = torch.from_numpy(np.stack([im for im, _ in chunk])).float().unsqueeze(1).to(device)
+                if args.channels_last_3d:
+                    x = x.to(memory_format=torch.channels_last_3d)
+                lab = torch.from_numpy(np.stack([lb for _, lb in chunk])).to(device)
                 t_data_total += (time.time() - t_d0)
 
-                for image, labels in zip(cur_patches, cur_labels):
-                    t_d0 = time.time()
-                    x = torch.from_numpy(image).float().unsqueeze(0).unsqueeze(0).to(device)
-                    if args.channels_last_3d:
-                        x = x.to(memory_format=torch.channels_last_3d)
-                    lab = torch.from_numpy(labels).to(device)
-                    tgt, valid = targets(lab)
-                    t_data_total += (time.time() - t_d0)
+                t_tr0 = time.time()
+                opt.zero_grad(set_to_none=True)
+                total_steps_fold += 1
+                has_cnet = hasattr(model, "cnet")
 
-                    t_tr0 = time.time()
-                    opt.zero_grad(set_to_none=True)
-                    total_steps_fold += 1
-                    has_cnet = hasattr(model, "cnet")
-                    if has_cnet:
-                        has_bme = ((tgt[1] * valid).sum() > 0).float().unsqueeze(0)
-                        if use_amp:
-                            with torch.amp.autocast(device_type="cuda"):
-                                logits, cnet_logit = model(x, return_cnet=True)
-                            loss_seg = dice_focal(logits[0].float(), tgt, valid, bme_weight=args.bme_loss_weight)
-                            loss_cnet = nn.functional.binary_cross_entropy_with_logits(cnet_logit.view(-1).float(), has_bme.view(-1).float())
-                            loss = loss_seg + args.cnet_weight * loss_cnet
-                            if not torch.isfinite(loss):
-                                amp_skipped_epoch += 1
-                                amp_skipped_total += 1
-                                continue
+                if has_cnet:
+                    has_bme = torch.stack([((lb == 2).sum() > 0).float() for lb in lab]).to(device).unsqueeze(1)
+                    if use_amp:
+                        with torch.amp.autocast(device_type="cuda"):
+                            logits, cnet_logit = model(x, return_cnet=True)
+                        logits = logits.float()
+                        loss_seg = logits.new_zeros(())
+                        for b in range(len(chunk)):
+                            tgt, valid = targets(lab[b])
+                            loss_seg = loss_seg + dice_focal(logits[b], tgt, valid, bme_weight=args.bme_loss_weight)
+                        loss_seg = loss_seg / len(chunk)
+                        loss_cnet = nn.functional.binary_cross_entropy_with_logits(cnet_logit.float(), has_bme.float())
+                        loss = loss_seg + args.cnet_weight * loss_cnet
+                        if not torch.isfinite(loss):
+                            amp_skipped_epoch += 1
+                            amp_skipped_total += 1
+                            continue
+                        if scaler:
                             scale_before = scaler.get_scale()
                             scaler.scale(loss).backward()
                             scaler.step(opt)
@@ -1671,22 +1785,35 @@ def main():
                                 amp_skipped_epoch += 1
                                 amp_skipped_total += 1
                         else:
-                            logits, cnet_logit = model(x, return_cnet=True)
-                            loss_seg = dice_focal(logits[0], tgt, valid, bme_weight=args.bme_loss_weight)
-                            loss_cnet = nn.functional.binary_cross_entropy_with_logits(cnet_logit.view(-1), has_bme.view(-1))
-                            loss = loss_seg + args.cnet_weight * loss_cnet
                             loss.backward()
                             opt.step()
                     else:
-                        if use_amp:
-                            with torch.amp.autocast(device_type="cuda"):
-                                logits = model(x)[0]
-                            # Compute loss in full FP32 precision
-                            loss = dice_focal(logits.float(), tgt, valid, bme_weight=args.bme_loss_weight)
-                            if not torch.isfinite(loss):
-                                amp_skipped_epoch += 1
-                                amp_skipped_total += 1
-                                continue
+                        logits, cnet_logit = model(x, return_cnet=True)
+                        logits = logits.float()
+                        loss_seg = logits.new_zeros(())
+                        for b in range(len(chunk)):
+                            tgt, valid = targets(lab[b])
+                            loss_seg = loss_seg + dice_focal(logits[b], tgt, valid, bme_weight=args.bme_loss_weight)
+                        loss_seg = loss_seg / len(chunk)
+                        loss_cnet = nn.functional.binary_cross_entropy_with_logits(cnet_logit, has_bme)
+                        loss = loss_seg + args.cnet_weight * loss_cnet
+                        loss.backward()
+                        opt.step()
+                else:
+                    if use_amp:
+                        with torch.amp.autocast(device_type="cuda"):
+                            logits = model(x)
+                        logits = logits.float()
+                        loss = logits.new_zeros(())
+                        for b in range(len(chunk)):
+                            tgt, valid = targets(lab[b])
+                            loss = loss + dice_focal(logits[b], tgt, valid, bme_weight=args.bme_loss_weight)
+                        loss = loss / len(chunk)
+                        if not torch.isfinite(loss):
+                            amp_skipped_epoch += 1
+                            amp_skipped_total += 1
+                            continue
+                        if scaler:
                             scale_before = scaler.get_scale()
                             scaler.scale(loss).backward()
                             scaler.step(opt)
@@ -1696,15 +1823,46 @@ def main():
                                 amp_skipped_epoch += 1
                                 amp_skipped_total += 1
                         else:
-                            loss = dice_focal(model(x)[0], tgt, valid, bme_weight=args.bme_loss_weight)
                             loss.backward()
                             opt.step()
-                    total += float(loss.detach())
-                    steps += 1
-                    t_tr_delta = time.time() - t_tr0
-                    t_train_total += t_tr_delta
-                    t_train_accum += t_tr_delta
-                    del x, lab, tgt, valid, loss
+                    else:
+                        logits = model(x)
+                        logits = logits.float()
+                        loss = logits.new_zeros(())
+                        for b in range(len(chunk)):
+                            tgt, valid = targets(lab[b])
+                            loss = loss + dice_focal(logits[b], tgt, valid, bme_weight=args.bme_loss_weight)
+                        loss = loss / len(chunk)
+                        loss.backward()
+                        opt.step()
+
+                total += float(loss.detach())
+                steps += 1
+                t_tr_delta = time.time() - t_tr0
+                t_train_total += t_tr_delta
+                t_train_accum += t_tr_delta
+                del x, lab, logits, loss
+            del items
+
+            if args.hours > 0 and epoch == start_epoch:
+                per_epoch = time.monotonic() - fold_start
+                fold_epochs = int(max(2, min(args.epochs, fold_budget // max(per_epoch, 1e-3))))
+                print(
+                    f"fold {fold}: one epoch takes {per_epoch:.0f}s; "
+                    f"fitting {fold_epochs} epochs into {fold_budget / 60:.0f} min.",
+                    flush=True,
+                )
+            if args.hours > 0:
+                run_steps = len(folds_to_run) * fold_epochs
+                done = fold_pos * fold_epochs + epoch
+                bar_w = 24
+                fill = int(bar_w * min(done, run_steps) / run_steps)
+                print(
+                    f"[{'#' * fill}{'.' * (bar_w - fill)}] {done}/{run_steps}  "
+                    f"fold {fold + 1}/{folds_n}  epoch {epoch}/{fold_epochs}  "
+                    f"learning bone and edema  loss={total / max(steps, 1):.4f}",
+                    flush=True,
+                )
 
             t_save_start = time.time()
             if args.checkpoint_every_epoch or args.max_runtime_minutes is not None:
@@ -1713,8 +1871,9 @@ def main():
                         "epoch": epoch,
                         "state": model.state_dict(),
                         "opt": opt.state_dict(),
-                        "scaler": scaler.state_dict() if scaler else None,
-                        "patch": PATCH,
+                        "patch": list(patch),
+                        "width": args.width,
+                        "model": args.model,
                         "seed": SEED,
                         "data_config": data_config,
                         "fold_mode": fold_mode,
@@ -1736,25 +1895,25 @@ def main():
             ep_time = time.time() - t_ep_start
             epoch_times.append(ep_time)
             mean_ep_time = float(np.mean(epoch_times[-10:]))
-            rem_ep = (args.epochs - epoch) + ((folds_n - 1 - fold) * args.epochs)
+            rem_ep = (fold_epochs - epoch) + ((len(folds_to_run) - 1 - fold_pos) * fold_epochs)
             eta_sec = int(rem_ep * mean_ep_time)
             eta_str = f"{eta_sec // 60}m {eta_sec % 60:02d}s" if eta_sec >= 60 else f"{eta_sec}s"
             amp_info = f", amp_skipped={amp_skipped_epoch}" if (use_amp and amp_skipped_epoch > 0) else ""
             if args.profile:
                 print(
-                    f"epoch {epoch}/{args.epochs}  loss={total / max(steps, 1):.4f}  "
+                    f"epoch {epoch}/{fold_epochs}  loss={total / max(steps, 1):.4f}  "
                     f"[{ep_time:.1f}s: data={t_data_total:.2f}s, train={t_train_total:.2f}s, save={t_save_total:.2f}s{amp_info} | ETA: {eta_str}]",
                     flush=True,
                 )
             else:
-                print(f"epoch {epoch}/{args.epochs}  loss={total / max(steps, 1):.4f}  [{ep_time:.1f}s/epoch | ETA: {eta_str}{amp_info}]", flush=True)
+                print(f"epoch {epoch}/{fold_epochs}  loss={total / max(steps, 1):.4f}  [{ep_time:.1f}s/epoch | ETA: {eta_str}{amp_info}]", flush=True)
 
             if args.max_runtime_minutes is not None:
                 elapsed_min = (time.time() - t_pipeline_start) / 60.0
                 if elapsed_min >= args.max_runtime_minutes:
                     print("\n" + "=" * 70, flush=True)
                     print(f"[TIME GUARD] Runtime limit reached: {elapsed_min:.2f}m >= {args.max_runtime_minutes:.2f}m.", flush=True)
-                    print(f"Completed epoch {epoch}/{args.epochs} of fold {fold}.", flush=True)
+                    print(f"Completed epoch {epoch}/{fold_epochs} of fold {fold}.", flush=True)
                     print(f"Resumable checkpoint safely saved to: {latest_ckpt.name}", flush=True)
                     print(f"To resume in next version: run with --resume. Training will resume from epoch {epoch + 1}.", flush=True)
                     print("Exiting cleanly.", flush=True)
@@ -1764,7 +1923,7 @@ def main():
                         "fold": fold,
                         "status": "incomplete",
                         "epoch_reached": epoch,
-                        "target_epochs": args.epochs,
+                        "target_epochs": fold_epochs,
                         "fingerprint": current_fingerprint,
                         "val_cases": sorted([c["id"] for c in val]),
                         "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -1777,6 +1936,8 @@ def main():
 
         t_val_start = time.time()
         bone_d, bme_d, sens, fps, present_hit, present_n = [], [], [], [], 0, 0
+        bone_box = [0, 0, 0]
+        edema_box = [0, 0, 0]
         for val_idx, case in enumerate(val, 1):
             loaded = load_case(base, case["id"])
             if not loaded:
@@ -1785,6 +1946,7 @@ def main():
                 model,
                 loaded["image"],
                 device,
+                patch,
                 val_batch_size=args.val_batch_size,
                 use_amp=use_amp,
                 channels_last=args.channels_last_3d,
@@ -1794,6 +1956,16 @@ def main():
             )
             bone_d.append(dice(loaded["labels"], pred, 1))
             bme_d.append(dice(loaded["labels"], pred, 2))
+            gt_bone = (loaded["labels"] == 1) | (loaded["labels"] == 2)
+            pr_bone = (pred == 1) | (pred == 2)
+            bone_box[0] += int(np.logical_and(gt_bone, pr_bone).sum())
+            bone_box[1] += int(np.logical_and(~gt_bone, pr_bone).sum())
+            bone_box[2] += int(np.logical_and(gt_bone, ~pr_bone).sum())
+            gt_ed = loaded["labels"] == 2
+            pr_ed = pred == 2
+            edema_box[0] += int(np.logical_and(gt_ed, pr_ed).sum())
+            edema_box[1] += int(np.logical_and(~gt_ed, pr_ed).sum())
+            edema_box[2] += int(np.logical_and(gt_ed, ~pr_ed).sum())
             s, fp = lesion_stats(loaded["labels"], pred)
             sens.append(s)
             fps.append(fp)
@@ -1809,6 +1981,8 @@ def main():
             )
             del loaded, pred
             release()
+        b_prec, b_rec, b_f1, b_iou = rates(*bone_box)
+        e_prec, e_rec, e_f1, e_iou = rates(*edema_box)
         t_val_total = time.time() - t_val_start
         t_val_accum += t_val_total
         if args.profile:
@@ -1819,7 +1993,9 @@ def main():
             torch.save(
                 {
                     "state": model.state_dict(),
-                    "patch": PATCH,
+                    "patch": list(patch),
+                    "width": getattr(args, "width", getattr(model, "base_channels", 16)),
+                    "model": getattr(args, "model", getattr(model, "model_arch", "mednext")),
                     "seed": SEED,
                     "data_config": data_config,
                     "fold_mode": fold_mode,
@@ -1829,10 +2005,10 @@ def main():
                     "val_cases": sorted([c["id"] for c in val]),
                     "base_channels": getattr(model, "base_channels", 16),
                     "double_conv": getattr(model, "double_conv", False),
-                    "min_bme_voxels": args.min_bme_voxels,
-                    "model_arch": getattr(model, "model_arch", args.model_arch),
-                    "cnet_threshold": args.cnet_threshold,
-                    "cnet_weight": args.cnet_weight,
+                    "min_bme_voxels": getattr(args, "min_bme_voxels", 50),
+                    "model_arch": getattr(model, "model_arch", getattr(args, "model_arch", "mednext")),
+                    "cnet_threshold": getattr(args, "cnet_threshold", 0.40),
+                    "cnet_weight": getattr(args, "cnet_weight", 0.5),
                 },
                 final_ckpt,
             )
@@ -1846,8 +2022,8 @@ def main():
             status_payload = {
                 "fold": fold,
                 "status": "completed",
-                "epoch_reached": args.epochs,
-                "target_epochs": args.epochs,
+                "epoch_reached": epoch,
+                "target_epochs": fold_epochs,
                 "fold_mode": fold_mode,
                 "patient_count": patient_count,
                 "sampling_mix": sampling_mix_dict,
@@ -1866,6 +2042,7 @@ def main():
         fold_row = {
             "fold": fold,
             "val": [c["id"] for c in val],
+            "epochs_run": epoch,
             "val_cases": sorted([c["id"] for c in val]),
             "fold_mode": fold_mode,
             "patient_count": patient_count,
@@ -1878,16 +2055,26 @@ def main():
             "fp_per_case": float(np.mean(fps)),
             "presence_correct": present_hit,
             "presence_n": present_n,
-            "min_bme_voxels": args.min_bme_voxels,
-            "model_arch": getattr(model, "model_arch", args.model_arch),
+            "min_bme_voxels": getattr(args, "min_bme_voxels", 50),
+            "model_arch": getattr(model, "model_arch", getattr(args, "model_arch", "mednext")),
             "cnet_threshold": args.cnet_threshold if hasattr(model, "cnet") else None,
-
+            "bone_precision": b_prec,
+            "bone_recall": b_rec,
+            "bone_f1": b_f1,
+            "bone_iou": b_iou,
+            "edema_precision": e_prec,
+            "edema_recall": e_rec,
+            "edema_f1": e_f1,
+            "edema_iou": e_iou,
             "amp_skipped_steps": amp_skipped_total,
             "amp_skipped_pct": round(amp_pct, 4),
             "data_config": data_config,
-            "epochs": args.epochs,
+            "epochs": fold_epochs,
             "seed": SEED,
             "device": device,
+            "patch": list(patch),
+            "width": args.width,
+            "model": args.model,
             "n_cases": len(cases),
             "n_bme": n_bme,
             "n_negative": n_neg,
@@ -1928,27 +2115,29 @@ def main():
         total_skipped = sum(r.get("amp_skipped_steps", 0) for r in fold_rows)
         mean_skipped_pct = float(np.mean([r.get("amp_skipped_pct", 0.0) for r in fold_rows]))
         metrics = {
-            "model": "3d-unet",
+            "model": args.model,
             "device": device,
             "folds": folds_n,
             "fold_mode": fold_mode,
             "patient_count": patient_count,
             "val_cases_per_fold": {str(r["fold"]): r["val_cases"] for r in fold_rows},
             "sampling_mix": sampling_mix_dict,
-            "epochs": args.epochs,
+            "epochs": max(r["epochs_run"] for r in fold_rows),
             "seed": SEED,
-            "patch": list(PATCH),
+            "patch": list(patch),
+            "width": args.width,
+            "batch": args.batch,
+            "patches_per_case": args.patches_per_case,
+            "resample": args.resample,
+            "augment": args.augment,
+            "hours_budget": args.hours,
+            "hours_taken": round((time.monotonic() - started) / 3600, 2),
             "data_config": data_config,
             "fingerprint": current_fingerprint,
             "n_cases": len(cases),
             "n_bme": n_bme,
             "n_negative": n_neg,
-            "summary": {
-                "bone_dice": mean_std([r["bone_dice"] for r in fold_rows]),
-                "bme_dice": mean_std([r["bme_dice"] for r in fold_rows]),
-                "lesion_sensitivity": mean_std([r["lesion_sensitivity"] for r in fold_rows]),
-                "fp_per_case": mean_std([r["fp_per_case"] for r in fold_rows]),
-            },
+            "summary": summarise(fold_rows),
             "presence_correct": sum(r["presence_correct"] for r in fold_rows),
             "presence_n": sum(r["presence_n"] for r in fold_rows),
             "min_bme_voxels": args.min_bme_voxels,
@@ -1971,9 +2160,9 @@ def main():
             "trained_at": datetime.now(timezone.utc).isoformat(),
             "note": (
                 f"{len(cases)} volumes ({n_bme} with edema, {n_neg} without), "
-                f"{folds_n} {fold_mode} folds, patch {PATCH[0]}×{PATCH[1]}×{PATCH[2]}. "
+                f"{folds_n} {fold_mode} folds, patch {patch[0]}\u00d7{patch[1]}\u00d7{patch[2]}, width {args.width}. "
                 "Bone and edema are trained together. Edema outside the predicted bone is removed. "
-                "Dice, lesion sensitivity, and false positives per case are mean ± std across folds."
+                "Dice, lesion sensitivity, and false positives per case are mean \u00b1 std across folds."
             ),
         }
         (out_dir / "metrics.json").write_text(json.dumps(metrics, indent=2), encoding="utf-8")
@@ -1985,6 +2174,24 @@ def main():
             print(f"  amp_skipped_steps   : {total_skipped} ({mean_skipped_pct:.2f}%)", flush=True)
             if mean_skipped_pct > 1.0:
                 print("[WARNING] AMP skipped steps exceeded 1% of total steps!", flush=True)
+        print(f"-> {out_dir / 'metrics.json'}", flush=True)
+        try:
+            from metrics_log import from_summary
+            try:
+                log_out_dir = out_dir.resolve().relative_to(base.resolve()).as_posix()
+            except ValueError:
+                log_out_dir = out_dir.name
+            log_path = from_summary(
+                base, task="3d", model=args.model, device=device,
+                out_dir=log_out_dir, folds=folds_n, epochs=metrics["epochs"],
+                n_cases=len(cases), summary=metrics["summary"],
+                n_bme=n_bme, n_negative=n_neg, fp_key="fp_per_case", fp_unit="per_case",
+                presence_correct=metrics["presence_correct"], presence_n=metrics["presence_n"],
+                patch="x".join(str(p) for p in patch),
+            )
+            print(f"-> {log_path}", flush=True)
+        except Exception as e:
+            print(f"metrics log not written ({type(e).__name__}: {e})", flush=True)
     elif args.fold is not None or args.run_folds is not None:
         # Check if all folds are now complete across independent processes
         merge_metrics_files(out_dir, folds_n)

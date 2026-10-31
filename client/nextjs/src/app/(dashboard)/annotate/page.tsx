@@ -345,7 +345,7 @@ export default function AnnotatePage() {
                 )}
                 {casesState === "ready" && cases.length === 0 && (
                   <p className="p-4 text-center text-xs text-muted-foreground">
-                    No 3D cases yet. Add folders under data/newbme and run pnpm data:process.
+                    No 3D cases yet. Add folders under data/newbme and run pnpm data:process:bme.
                   </p>
                 )}
                 {casesState === "ready" && cases.length > 0 && visible.length === 0 && (
@@ -390,7 +390,7 @@ export default function AnnotatePage() {
               </div>
             ) : cases.length === 0 ? (
               <div className="flex h-96 items-center justify-center rounded-lg border border-dashed border-border px-6 text-center text-sm text-muted-foreground">
-                No 3D cases yet. Put one folder per patient in data/newbme, then run pnpm data:process.
+                No 3D cases yet. Put one folder per patient in data/newbme, then run pnpm data:process:bme.
               </div>
             ) : selected ? (
               <Viewer

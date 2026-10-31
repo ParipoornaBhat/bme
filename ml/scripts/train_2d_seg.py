@@ -30,6 +30,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import os
 import random
 import shutil
 import sys
@@ -105,6 +106,80 @@ class UNet(nn.Module):
                 x = F.interpolate(x, size=skip.shape[-2:], mode="nearest")
             x = dec(torch.cat([skip, x], dim=1))
         return self.head(x)
+
+
+class AttentionGate2d(nn.Module):
+    def __init__(self, skip_ch, gate_ch, inter):
+        super().__init__()
+        self.theta = nn.Conv2d(skip_ch, inter, 1, bias=False)
+        self.phi = nn.Conv2d(gate_ch, inter, 1, bias=False)
+        self.psi = nn.Sequential(nn.ReLU(inplace=True), nn.Conv2d(inter, 1, 1), nn.Sigmoid())
+
+    def forward(self, skip, gate):
+        if gate.shape[-2:] != skip.shape[-2:]:
+            gate = F.interpolate(gate, size=skip.shape[-2:], mode="nearest")
+        return skip * self.psi(self.theta(skip) + self.phi(gate))
+
+
+class AttentionUNet(nn.Module):
+    """U-Net with attention on the skip connections. Same two outputs: bone and lesion."""
+
+    def __init__(self, ch=(32, 64, 128, 256), out_ch=2):
+        super().__init__()
+        self.downs = nn.ModuleList()
+        prev = 1
+        for c in ch:
+            self.downs.append(Block(prev, c))
+            prev = c
+        self.pool = nn.MaxPool2d(2)
+        self.bottom = Block(ch[-1], ch[-1] * 2)
+        self.ups = nn.ModuleList()
+        self.gates = nn.ModuleList()
+        self.dec = nn.ModuleList()
+        prev = ch[-1] * 2
+        for c in reversed(ch):
+            self.ups.append(nn.ConvTranspose2d(prev, c, 2, stride=2))
+            self.gates.append(AttentionGate2d(c, c, max(c // 2, 8)))
+            self.dec.append(Block(c * 2, c))
+            prev = c
+        self.head = nn.Conv2d(ch[0], out_ch, 1)
+
+    def forward(self, x):
+        skips = []
+        for d in self.downs:
+            x = d(x)
+            skips.append(x)
+            x = self.pool(x)
+        x = self.bottom(x)
+        for up, gate, dec, skip in zip(self.ups, self.gates, self.dec, reversed(skips)):
+            x = up(x)
+            skip = gate(skip, x)
+            if x.shape[-2:] != skip.shape[-2:]:
+                x = F.interpolate(x, size=skip.shape[-2:], mode="nearest")
+            x = dec(torch.cat([skip, x], dim=1))
+        return self.head(x)
+
+
+def build_model(name: str) -> nn.Module:
+    if name == "unet":
+        return UNet()
+    if name == "attention-unet":
+        return AttentionUNet()
+    raise SystemExit(f"unknown model {name!r}. choices: unet, attention-unet")
+
+
+def cap_gpu(device: str):
+    """Limit this process. BME_GPU_FRACTION overrides the laptop default of 90%."""
+    torch.set_num_threads(1)
+    if device != "cuda":
+        return
+    frac = min(0.95, max(0.05, float(os.environ.get("BME_GPU_FRACTION", "0.90"))))
+    try:
+        torch.cuda.set_per_process_memory_fraction(frac)
+    except RuntimeError:
+        pass
+    torch.backends.cudnn.benchmark = False
+    print(f"GPU memory capped at {frac:.0%} for this process.", flush=True)
 
 
 # ---------------------------------------------------------------- data
@@ -191,6 +266,17 @@ def dice_score(pred, target, eps=1e-6):
     return float((2 * inter + eps) / (pred.sum() + target.sum() + eps))
 
 
+def rates_from(pred, target):
+    tp = float((pred * target).sum())
+    fp = float((pred * (1 - target)).sum())
+    fn = float(((1 - pred) * target).sum())
+    prec = tp / (tp + fp) if tp + fp else 1.0
+    rec = tp / (tp + fn) if tp + fn else 1.0
+    f1 = 2 * prec * rec / (prec + rec) if prec + rec else 0.0
+    iou = tp / (tp + fp + fn) if tp + fp + fn else 1.0
+    return prec, rec, f1, iou
+
+
 def patient_folds(rows, k, seed=SEED):
     by_case = defaultdict(list)
     for r in rows:
@@ -215,6 +301,7 @@ def main():
                     help="where to train. 'auto' uses the GPU when one is "
                          "usable and falls back to CPU; 'cuda' fails loudly "
                          "rather than training slowly by accident")
+    ap.add_argument("--model", choices=("unet", "attention-unet"), default="unet")
     ap.add_argument("--data", default="seg2d",
                     help="dataset folder under data/ (seg2d3d for slices cut from the 3D annotations)")
     ap.add_argument("--out", default="results2dseg",
@@ -234,9 +321,13 @@ def main():
     rows = list(csv.DictReader(open(idx, encoding="utf-8")))
     by_case, folds = patient_folds(rows, args.folds)
     device = resolve_device(args.device)
+    cap_gpu(device)
+    if device == "cuda" and args.batch > 4 and "BME_GPU_FRACTION" not in os.environ:
+        print("batch capped at 4 so a 6 GB GPU keeps the desktop")
+        args.batch = 4
 
     n_cases = len(by_case)
-    print(f"slices {len(rows)}   cases {n_cases}   device {device}")
+    print(f"model {args.model}   slices {len(rows)}   cases {n_cases}   device {device}")
     if n_cases < args.folds:
         sys.exit(f"only {n_cases} annotated case(s); need at least {args.folds} for "
                  f"{args.folds}-fold. Annotate more, or pass --folds {max(2, n_cases)}.")
@@ -258,9 +349,9 @@ def main():
         va = [r for r in rows if r["case_id"] in va_cases]
         if not va or not tr:
             continue
-        print(f"  fold {k}: train={len(tr)} / val={len(va)} slices ({len(va_cases)} cases)")
+        print(f"Fold {k + 1} of {args.folds}: training on {len(tr)} slices, then scoring {len(va)} held-out slices.", flush=True)
 
-        model = UNet().to(device)
+        model = build_model(args.model).to(device)
         opt = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-4)
         sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=args.epochs)
         tl = DataLoader(SegDS(tr, root, True), batch_size=args.batch, shuffle=True)
@@ -277,11 +368,21 @@ def main():
                 opt.step()
                 tot += loss.item() * x.size(0)
             sched.step()
-            if (ep + 1) % 5 == 0 or ep == args.epochs - 1:
-                print(f"      epoch {ep+1}/{args.epochs}  loss={tot/len(tr):.4f}")
+            done = k * args.epochs + ep + 1
+            total = args.folds * args.epochs
+            width = 24
+            fill = int(width * done / total)
+            print(
+                f"[{'#' * fill}{'.' * (width - fill)}] {done}/{total}  "
+                f"fold {k + 1}/{args.folds}  epoch {ep + 1}/{args.epochs}  "
+                f"learning bone and edema  loss={tot / len(tr):.4f}",
+                flush=True,
+            )
 
+        print(f"Scoring the held-out slices for fold {k + 1}.", flush=True)
         model.eval()
         bone_d, les_d, hits, misses, fp = [], [], 0, 0, 0
+        bone_rates, edema_rates = [], []
         with torch.no_grad():
             for x, y in vl:
                 x, y = x.to(device), y.to(device)
@@ -291,14 +392,19 @@ def main():
                 p[:, 1] = p[:, 1] * p[:, 0]
                 for b in range(x.size(0)):
                     bone_d.append(dice_score(p[b, 0], y[b, 0]))
+                    bone_rates.append(rates_from(p[b, 0], y[b, 0]))
                     has_ref = y[b, 1].sum() > 0
                     has_pred = p[b, 1].sum() > 0
                     if has_ref:
                         les_d.append(dice_score(p[b, 1], y[b, 1]))
+                        edema_rates.append(rates_from(p[b, 1], y[b, 1]))
                         hits += int(has_pred)
                         misses += int(not has_pred)
                     elif has_pred:
                         fp += 1
+
+        def mean_rate(rows, i):
+            return float(np.mean([r[i] for r in rows])) if rows else float("nan")
 
         m = {
             "bone_dice": float(np.mean(bone_d)) if bone_d else float("nan"),
@@ -306,6 +412,14 @@ def main():
             "lesion_sensitivity": hits / max(1, hits + misses),
             "false_positive_slices": fp,
             "n_val_slices": len(va),
+            "bone_precision": mean_rate(bone_rates, 0),
+            "bone_recall": mean_rate(bone_rates, 1),
+            "bone_f1": mean_rate(bone_rates, 2),
+            "bone_iou": mean_rate(bone_rates, 3),
+            "edema_precision": mean_rate(edema_rates, 0),
+            "edema_recall": mean_rate(edema_rates, 1),
+            "edema_f1": mean_rate(edema_rates, 2),
+            "edema_iou": mean_rate(edema_rates, 3),
         }
         per_fold.append(m)
         torch.save({
@@ -315,6 +429,7 @@ def main():
             "lesion_dice": None if np.isnan(m["lesion_dice"]) else m["lesion_dice"],
             "bone_dice": None if np.isnan(m["bone_dice"]) else m["bone_dice"],
             "state_dict": {n: v.detach().cpu() for n, v in model.state_dict().items()},
+            "model": args.model,
         }, ckpt_dir / f"fold{k}.pt")
         saved_folds.append({
             "fold": k, "file": f"fold{k}.pt",
@@ -335,13 +450,17 @@ def main():
     out.mkdir(parents=True, exist_ok=True)
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
     metrics = {
-        "run_id": f"{stamp}_unet2d", "finished_at": datetime.now().isoformat(timespec="seconds"),
-        "model": "2D U-Net, bone + lesion channels", "device": device,
+        "run_id": f"{stamp}_{args.model}", "finished_at": datetime.now().isoformat(timespec="seconds"),
+        "model": args.model, "device": device,
         "dataset": args.data,
         "folds": args.folds, "epochs": args.epochs, "seed": SEED,
         "n_slices": len(rows), "n_cases": n_cases,
         "per_fold": per_fold,
-        "summary": {k: agg(k) for k in ("bone_dice", "lesion_dice", "lesion_sensitivity")},
+        "summary": {k: agg(k) for k in (
+            "bone_dice", "lesion_dice", "lesion_sensitivity",
+            "bone_precision", "bone_recall", "bone_f1", "bone_iou",
+            "edema_precision", "edema_recall", "edema_f1", "edema_iou",
+        )},
         "note": ("Lesion Dice is averaged over slices that actually contain a lesion; "
                  "including empty slices would inflate it towards 1. False positives are "
                  "counted on slices with no reference lesion."),
@@ -350,7 +469,7 @@ def main():
                               "n_folds": len(saved_folds), "img_size": IMG_SIZE}
     (ckpt_dir / "manifest.json").write_text(json.dumps({
         "created_at": metrics["finished_at"],
-        "model": "unet2d",
+        "model": args.model,
         "dataset": args.data,
         "channels": CHANNELS,
         "lesion_channel": 1,
@@ -365,10 +484,23 @@ def main():
                  "is not edema. Inference averages the probability maps over all "
                  "folds."),
     }, indent=2), encoding="utf-8")
+    fps = [f["false_positive_slices"] for f in per_fold]
+    metrics["summary"]["fp_slices"] = {
+        "mean": float(np.mean(fps)) if fps else 0.0,
+        "std": float(np.std(fps)) if fps else 0.0,
+    }
     (out / "metrics.json").write_text(json.dumps(metrics, indent=2), encoding="utf-8")
     run_dir = out / "runs" / metrics["run_id"]
     run_dir.mkdir(parents=True, exist_ok=True)
     (run_dir / "metrics.json").write_text(json.dumps(metrics, indent=2), encoding="utf-8")
+
+    from metrics_log import from_summary
+    log_path = from_summary(
+        base, task="2d", model=args.model, device=device,
+        out_dir=f"data/{args.out}", folds=args.folds, epochs=args.epochs,
+        n_cases=n_cases, summary=metrics["summary"], n_slices=len(rows),
+        fp_key="fp_slices", fp_unit="slices",
+    )
 
     print("=" * 60)
     for k in ("bone_dice", "lesion_dice", "lesion_sensitivity"):
@@ -376,6 +508,7 @@ def main():
         if s:
             print(f"  {k:20s} {s['mean']:.3f} +- {s['std']:.3f}")
     print(f"\n-> {out}")
+    print(f"-> {log_path}")
     print("=" * 60)
 
 

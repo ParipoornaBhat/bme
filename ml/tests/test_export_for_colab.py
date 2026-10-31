@@ -40,8 +40,7 @@ import nibabel as nib
 import nrrd
 import numpy as np
 
-# Import hardened recovery module
-sys.path.insert(0, r"C:\Users\HP\bme_recovery")
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 import export_for_colab as exp
 
 

@@ -16,10 +16,16 @@ an edema mask, all from saved checkpoints. **3D** is the segmentation system fro
 is still waiting on annotations.
 
 The web app does the whole loop in the browser: annotate, train, test a slice, inspect
-results, check storage. Training keeps the two 2D tabs. A third tab trains a 3D U-Net
+results, check storage. `pnpm train:2d` and `pnpm train:3d` ask which model (U-Net or
+Attention U-Net), then train on this PC's GPU with VRAM capped at 90%. Each run
+writes its own `metrics.json` and appends a row to `data/training_log.csv`. Training keeps the two 2D tabs. A third tab trains a 3D U-Net
 (bone and edema together, patient-level folds, Dice + focal, sliding-window prediction).
 Results → 3D segmentation accepts one `.nrrd` and shows axial, coronal, and sagittal
-marks, edema present or not, and volume in mm³. Every filename in the dataset is pseudonymous — no patient name
+marks, edema present or not, and volume in mm³. The Training page and that Results
+tab both offer **3D U-Net** (`data/results3d`) and **3D Attention U-Net**
+(`data/results3d-attn`), the same two choices as `pnpm train:3d`. The metrics card
+reads that model's `metrics.json`, so a command-line run and a web run show the
+same numbers. The test upload runs the model that is selected. Every filename in the dataset is pseudonymous — no patient name
 survives anywhere on disk. The critical path is unchanged: annotate more cases, measure
 inter-rater Dice, then train the bone/lesion model properly.
 
@@ -64,9 +70,18 @@ Phases are defined in [PRD.md](PRD.md) §8.
 
 In order. Each step's output is the next step's input.
 
-0. **Team annotation split and merge (2026-10-07).** Bone painting is split by case:
-   Aditi 6-26, 46-47 · Paripoorna 1-5, 54-59 · Reegan 27-45, 60-61 · Elvin 48-53 (the
-   split lives in `TEAM` in `ml/scripts/team_annotations.py`). Elvin's laptop is the hub.
+0. **Team annotation split and merge (2026-10-27).** Split by case number, same range for
+   `BME-` and `NBME-`: Paripoorna 1-15 · Elvin 16-30 · Aditi 31-45 · Reegan 46-61 (`TEAM` in
+   `ml/scripts/team_annotations.py`). Everyone exports with `pnpm zipbme:<name>`; the hub drops
+   all the zips in the repo root and runs `pnpm data:import:team` (newest zip per person, dry run,
+   asks, never overwrites painted work). Focus annotation on the **axial** stack: the 3D model is
+   trained on axial clinical stacks (3-4 mm between slices), so other planes are interpolated.
+   **H200 (2026-10-27):** `pnpm h200` is the menu (status, push, train3d, train2d, log, cancel,
+   get3d, get2d, env); it uses the only H200 password in `.env` or asks which. `train3d` runs
+   `ml/slurm/train_3d.sbatch` (width 32, 128x128x16 patches cut fresh each epoch, flips,
+   bf16, cosine LR, epochs fitted to 3.3 h) into `data/results3d-h200`; `get3d` downloads it and
+   asks before replacing `data/results3d`. Old split (2026-10-07) was
+   Aditi 6-26, 46-47 · Paripoorna 1-5, 54-59 · Reegan 27-45, 60-61 · Elvin 48-53. Elvin's laptop is the hub.
    Every laptop runs `team_annotations.py assign . --apply` once, to fill `assigned_to` in
    the worklist. A teammate runs `export . --who <name>`, which zips only their cases with bone
    painted into `data/exports/` (or `pnpm zipbme:<name>`). The hub runs `import . <zip>` (dry run, then `--apply`).
@@ -77,7 +92,7 @@ In order. Each step's output is the next step's input.
    also looked up in `data/exports/`). A scan with the same voxels is left alone; anything
    else it replaces goes to `data/sync_backup/<stamp>/` first; local files the hub lacks
    stay. Tested on scratch copies (fresh, re-run, diverged); first zips made 10:10.
-   A laptop that already ran `pnpm data:process` takes the annotations alone:
+   A laptop that already ran `pnpm data:process:bme` takes the annotations alone:
    `pnpm data:sync <annotations zip>`. The zip carries a fingerprint of each hub scan;
    a case whose local scan differs or is missing is skipped and listed. Worklist and
    scans are not touched. Tested on a scratch copy (one altered scan, one missing).
@@ -114,6 +129,21 @@ In order. Each step's output is the next step's input.
    edema, 1065 without, 8 edema slices dropped** (was 1510 / 508 / 46). Fresh hand-out zips:
    `hub_mri_20261008-1219.zip`, `hub_annotations_20261008-1219.zip` (same data as the 10:26
    pair, but only the 12:19 annotations zip works on its own).
+   **H200 runs, 2026-10-08** (5-fold patient-level CV, seed 1337, 61 cases; no locked test
+   set exists yet, so these are validation numbers). Server copy refreshed and verified by
+   md5 (3,413 files); nibabel/scipy/pynrrd added to `~/bme/env`; new
+   `ml/slurm/train_3d.sbatch`. The QOS allows **one job per user at a time**.
+   2D job 6328, 1614 slices, 56 min: bone Dice **0.912 ± 0.004**, lesion Dice
+   **0.523 ± 0.055**, lesion sensitivity **0.861 ± 0.031**, 259 false-positive slices
+   in total. Lower than the 7 Oct 818-slice run (0.554 ± 0.062 lesion Dice) on a
+   different, larger validation set.
+   3D job 6330, 21 min: bone Dice **0.545 ± 0.068**, edema Dice **0.183 ± 0.038**, lesion
+   sensitivity 0.736 ± 0.070, **~1,900 ± 1,050 false-positive components per case**.
+   Presence 61/61 is meaningless: every case has edema (0 negatives). Known cause to
+   fix first: `train_3d.py` samples its 8 patches per case **once at load** and reuses
+   them every epoch (its log says "per epoch"), so most of each scan is never trained on.
+   Metrics copied to `data/results2dseg3d/metrics_h200_6328.json` and
+   `data/results3d/metrics_h200_6330.json`; weights stay on the server.
    **`seg2nifti.validate()` cannot detect bme outside bone:** it hole-fills bone|bme,
    which always contains bme, so that check never fires.
    The hub laptop's `ml/.venv` now has CUDA torch (`2.14.0+cu130`, RTX 3050 4 GB, verified
@@ -153,7 +183,7 @@ In order. Each step's output is the next step's input.
    The 61 are the 55 earlier imports minus the five same-patient folders (21, 22a, 7a, 8,
    12a), plus 15a, 23 and nine cases whose scan was rebuilt from DICOM. Teammates, for the
    same IDs: `pnpm data:3d:erase`, copy the folders from `newbme.zip` into `data/newbme/`,
-   then `pnpm data:process`. **Next:** paint bone marrow on BME-001..061 in the 3D tab.
+   then `pnpm data:process:bme`. **Next:** paint bone marrow on BME-001..061 in the 3D tab.
 
 0. **3D annotate tab now matches 2D (2026-09-30).** Hand/pan per view (6 / H), pencil fills
    on release, Auto Save, flag a case for review (stored in `data/annotations3d_flags.json`,
@@ -170,7 +200,7 @@ In order. Each step's output is the next step's input.
    | Command | What it does |
    |---|---|
    | `pnpm data:3d:erase` | Deletes `data/raw`, `data/nifti`, `data/annotations`, and `data/nnunet`. Clears `BME-` / `NBME-` rows from `data/worklist.csv`, `data/deid_map.csv`, and the Postgres `patient` table (studies and series cascade). Does **not** delete `data/newbme` or `Non BME/`. The next import starts at `BME-001`. |
-   | `pnpm data:process` | Imports `data/newbme`. Each item is one `.zip` in that folder, or one subfolder that contains one `.zip`. The zip holds the scan `.nrrd` files and one `Segmentation.seg.nrrd`. Every scan is kept (`BME-001_tra.nii.gz`, `_cor.nii.gz`, `_cor-1.nii.gz`). The edema outline is attached to the scan it was drawn on (`_primary`). Optional `name.json` is `{ "name": "..." }` or `{ "patient": "..." }`; if it is missing, the zip filename is stored instead. The source zip is deleted only after the case is written. Dry run: `python ml/scripts/import_newbme.py .` |
+   | `pnpm data:process:bme` | Imports `data/newbme`. Each item is one `.zip` in that folder, or one subfolder that contains one `.zip`. The zip holds the scan `.nrrd` files and one `Segmentation.seg.nrrd`. Every scan is kept (`BME-001_tra.nii.gz`, `_cor.nii.gz`, `_cor-1.nii.gz`). The edema outline is attached to the scan it was drawn on (`_primary`). Optional `name.json` is `{ "name": "..." }` or `{ "patient": "..." }`; if it is missing, the zip filename is stored instead. The source zip is deleted only after the case is written. Dry run: `python ml/scripts/import_newbme.py .` |
    | `pnpm data:3d:nonbme:process` | Converts every `.zip` in `Non BME/3d` (DICOM) into `Non BME/new/1/`, `new/2/`, … Each folder gets `name.json` (the zip filename) and one compressed `.nrrd` per series, named `tra`, `cor`, `sag`, then `tra-1`, `cor-1` when a direction repeats. Every series is kept. A slice-size mismatch inside one series becomes its own file instead of failing the zip. The zip is deleted only after the nrrd files exist. A non-uniform-spacing line from SimpleITK is a warning; the file is still written. |
    | `pnpm data:nonbme:process` | Imports `Non BME/new/<n>/` and `data/newnonbme` (a folder of scans, or a zip) as `NBME-001` onward. Same series buttons as BME. `name.json` is optional. Flags: `-- --limit 3` imports only 3, `-- --keep` does not delete the source. `pnpm data:nonbme:erase` deletes the imported `NBME-` volumes, annotations, worklist rows, and database rows. It does not touch `Non BME/new` or `data/newnonbme`. |
 
@@ -196,6 +226,7 @@ In order. Each step's output is the next step's input.
    - **Views and opacity:** Label views: Both / Red / Green / None (key V), opacity 0–100%, local to each screen, in 2D painter, 3D multi-planar viewer, and 3D surface render.
    - **Protect lesion:** Pure `canPaint` helper prevents the green bone brush (label 1) from overwriting existing red BME lesions (label 2) across both 2D and 3D brush and pencil fill loops, controlled by a "Protect lesion" toggle (default on, persisted as `bme_protect_lesion`).
    - **Dotted pencil trace (2026-10-06):** "Dotted trace" toggle, shown while the pencil is active in 2D and 3D. On (default), the live trace is a dotted outline with no tinted fill preview; off restores the solid edge over the fill preview. Only changes the preview: release still fills the inside. Persisted as `bme_pencil_dotted`. Typechecked only, not checked in a browser.
+   - **Default tools (2026-10-28):** Drawing a label defaults to the pencil, the eraser to the brush. Turning the eraser on or off, or picking a label, lands on that mode's default; picking brush or pencil by hand overrides it until the next switch. "Draw with" and "Erase with" selects in the 2D toolbar and the 3D Settings panel change each default (persisted as `bme_draw_default_tool` and `bme_erase_default_tool`). Typechecked only, not checked in a browser.
    - **3D Torch:** Torch tool (key `7`) and hold-`T` peek in the 3D viewer (`Viewer.tsx`) with a thin dual-tone radius ring, skipping label blending over raw scan pixels without altering the volume label buffer.
    - **3D focus mode (2026-10-07):** `F` or the toolbar's Focus button opens a layer that covers the whole window (and requests browser fullscreen), with only a 48px tool strip on the left: labels, brush/pencil/hand/torch/eraser, brush or torch size, undo/redo, layout (four-up or A/C/S/3D alone; double-click still works), previous/next case, save, a settings popover (views, opacity, inside bone, protect lesion, auto-pan, dotted trace, auto save, crosshair link, flag, AI suggestions), and exit. Delete, import and collaboration stay in the normal view only. `Esc` leaves focus mode at once, since the browser takes `Esc` in fullscreen. The state lives in the annotate page (`lib/useFocusMode.ts`), so it survives a case switch. The viewer is portalled through a node that is moved to `<body>` in focus mode, so the canvases and 3D context are not remounted. Previous/next asks before dropping unsaved edits when auto save is off; the case list itself still does not. Checked in the browser pane at 1600x900 and 1366x768, window-only, since the pane refuses fullscreen. Real browser fullscreen has not been checked yet.
    - **3D annotate page tidy-up (2026-10-07):** On a wide screen the page now fits the window: no page scroll, only the case list scrolls, and the four-up fills down to the bottom edge (flex layout replaces the measured grid height). The toolbar is one row at 1920 wide (two at 1600). It keeps labels, tools, eraser, size, undo/redo, Flag, AI, Collaborate, Save and Focus. The once-set options (label view, opacity, inside bone, protect lesion, auto-pan, dotted trace, auto save, crosshair lock) moved into a Settings panel shared with focus mode. Import, Clear and Delete saved mask are behind a "..." menu. View headers are larger. The volume table is now one line of cm³ (voxels and mm³ on hover). The 3D build hint no longer sits over the cube. Double-clicking anywhere on a view, image included, toggles it full size; with the brush, the two dots the clicks painted are taken back. Checked in the browser pane at 1920x1080 and 1600x900, including the 2D tab. The Render3D header and footer changes also show on the Results page, which was not looked at.
@@ -353,6 +384,8 @@ Carried from [PRD.md](PRD.md) §10, updated with what the data answered.
 | Problem | Impact | Action |
 |---|---|---|
 | **2D case-level AUC jumped 0.658 → 0.961 when the dataset was rebuilt** | A number that good on this task, from 18 positive patients, is more likely a dataset shortcut than a modelling win | Two leaks measured on 2026-09-04. **(a)** `BME-2D-005` and `BME-2D-008` carry a **red ellipse drawn around the lesion**, burned into the pixels — 2/25 BME files, 0/69 non-BME. **(b)** A burned-in yellow A/P orientation overlay appears in **19/69 non-BME (28%)** but **1/25 BME (4%)**, and the two folders are framed and cropped differently — different exporters. Neither alone explains 0.96, but together they make it indefensible. **Before quoting anything: retrain on a centre crop excluding the borders, and drop or repair the two ellipse images.** |
+| Two non-BME cases (`NBME-005`, `NBME-058`) were light-marrow T1/PD, not fat-suppressed | Edema not visible on them; they looked opposite to every other case | Fixed 2026-10-27: `pnpm data:nonbme:fix-fs` swaps in the same case's fat-suppressed axial series and resamples existing annotations onto it (backup in `data/_backup_fs_*`). Teammates: `fs_fix.zip` in repo root, then `pnpm data:nonbme:fix-fs:install`. A grainy dark-marrow group (gradient echo: NBME-002/004/006/007/008/012/019/051) was left as is — flag to the guide. `Non BME/new/new/8` is empty, so source folder N maps to NBME-(N-1) from 9 on. |
+| **`nf` merged into this branch (uncommitted at time of writing); flag overlaps resolved in favour of this branch** | `train_3d.py` now has both flag sets. Where names collide, this branch wins: `--amp` is bfloat16 autocast (nf's was fp16), `--augment` is the in-plane flip + gamma set (nf's flip/intensity/noise are `--aug-flip/--aug-intensity/--aug-noise`), `--resample`, `--batch` and `--out NAME` keep their meaning, with `--resample-patches-each-epoch`, `--batch-size` and `--out-dir` as nf spellings. The nf experiment guard now lets `--out NAME` through unless NAME is `results3d` or `results3d-attn`. Training page: Local/Kaggle toggle, Kaggle panel in `Train3DKaggle.tsx`. nf's `--amp` skipped-step counter now only counts non-finite losses. GPU bf16 path not run yet (CPU smoke only). | Run `ml/tests/test_train_3d_speedups.py` and the two `ml/scripts/test_train_3d_*.py` before trusting a long H200 run. Two stray nf files (`tatus`, `test_uni.txt`) were left out; `tatus` is a terminal capture that names imaging files, so ask its author before it enters history. |
 | 18 BME patients is the whole 2D positive pool | 3–4 positives per validation fold; the per-fold spread is wider than most effects | Always report mean ± std with n stated. Never quote one fold. |
 | **3D set is 55 BME-positive cases, no negatives** | A segmenter trained only on positives has never seen a knee without edema; FP rate on normal scans is unmeasured | Get non-BME scans into the Slicer export, or keep the old NBME cases' volumes |
 | **Same patient imported twice in the 3D set** | BME-032/033 and BME-052/054 are one patient each; a patient-level split can put one copy in train and the other in validation | Merge each pair's markings into one case ([SLICER_EXPORT_AUDIT.md](SLICER_EXPORT_AUDIT.md) §1) |
@@ -412,7 +445,7 @@ ml/scripts/gradcam.py   heatmaps from the saved checkpoints; never trains
 ml/scripts/inventory.py re-run the dataset inventory
 ml/scripts/deid.py      de-identification
 ml/scripts/convert.py   DICOM -> NIfTI + picks each case's primary series
-ml/scripts/import_newbme.py   data/newbme zips -> BME-nnn (pnpm data:process)
+ml/scripts/import_newbme.py   data/newbme zips -> BME-nnn (pnpm data:process:bme)
 ml/scripts/nonbme_to_nrrd.py  Non BME/3d zips -> Non BME/new (pnpm data:3d:nonbme:process)
 scripts/erase-3d.js     wipe 3D volumes and case numbers (pnpm data:3d:erase)
 ml/scripts/seg2nifti.py .seg.nrrd -> validated training labelmap

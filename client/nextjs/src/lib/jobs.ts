@@ -21,19 +21,21 @@ import path from "node:path";
 
 // "suggestion" is the 3D annotate page's AI suggestion run (lib/suggest-queue.ts):
 // inference only, but on the same GPU, so it locks training out and waits for it.
-export type JobKind = "classifier" | "segmentation" | "segmentation3d" | "suggestion";
+export type JobKind = "classifier" | "segmentation" | "segmentation3d" | "segmentation3dAttn" | "suggestion";
 
 const PID_FILES: Record<JobKind, string[]> = {
   classifier: ["data", "results2d", "train.pid"],
   segmentation: ["data", "results2dseg", "train.pid"],
   segmentation3d: ["data", "results3d", "train.pid"],
+  segmentation3dAttn: ["data", "results3d-attn", "train.pid"],
   suggestion: ["data", "suggest", "run.pid"],
 };
 
 const JOB_NAME: Record<JobKind, string> = {
   classifier: "Detection training",
   segmentation: "2D segmentation training",
-  segmentation3d: "3D segmentation training",
+  segmentation3d: "3D U-Net training",
+  segmentation3dAttn: "3D Attention U-Net training",
   suggestion: "An AI suggestion run",
 };
 

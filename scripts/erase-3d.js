@@ -4,7 +4,7 @@ import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
 
 /**
- * Wipe the current 3D dataset so `pnpm data:process` starts again at BME-001.
+ * Wipe the current 3D dataset so `pnpm data:process:bme` starts again at BME-001.
  *
  * Removes data/raw, data/nifti, data/annotations, and data/nnunet.
  * Empties the 3D rows in data/worklist.csv and data/deid_map.csv.
@@ -96,4 +96,4 @@ if (fs.existsSync(report)) {
   console.log("  newbme_import_report.csv: removed");
 }
 await clearDb();
-console.log("\nNext case from pnpm data:process will be BME-001.");
+console.log("\nNext case from pnpm data:process:bme will be BME-001.");
