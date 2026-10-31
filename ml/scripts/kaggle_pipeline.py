@@ -1690,8 +1690,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_run.add_argument("--export-dir", type=str, default=os.getenv("BME_EXPORT_DIR", "../bme_colab_export"))
     p_run.add_argument("--dataset-slug", type=str, default=os.getenv("KAGGLE_DATASET_SLUG", "bme-3d-dataset"))
     p_run.add_argument("--kernel-slug", type=str, default=os.getenv("KAGGLE_KERNEL_SLUG", "bme-3d-unet-training"))
-    p_run.add_argument("--model-arch", choices=["unet3d", "cnet_attention_unet"], default="cnet_attention_unet",
-                       help="Model architecture to train on GPU (default: cnet_attention_unet)")
+    p_run.add_argument("--model-arch", choices=["unet3d", "cnet_dual_unet", "cnet_attention_unet", "mednext"], default="mednext",
+                       help="Model architecture to train on GPU (default: mednext)")
 
     # onetap
     p_one = subparsers.add_parser("onetap", parents=[common_parser], help="Execute full one-tap automated training pipeline")
@@ -1704,8 +1704,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_one.add_argument("--mapping-file", type=str, default=os.getenv("BME_MAPPING_FILE", "../bme_recovery/export_mapping.json"))
     p_one.add_argument("--dataset-slug", type=str, default=os.getenv("KAGGLE_DATASET_SLUG", "bme-3d-dataset"))
     p_one.add_argument("--kernel-slug", type=str, default=os.getenv("KAGGLE_KERNEL_SLUG", "bme-3d-unet-training"))
-    p_one.add_argument("--model-arch", choices=["unet3d", "cnet_attention_unet"], default="cnet_attention_unet",
-                       help="Model architecture to train on GPU (default: cnet_attention_unet)")
+    p_one.add_argument("--model-arch", choices=["unet3d", "cnet_dual_unet", "cnet_attention_unet", "mednext"], default="mednext",
+                       help="Model architecture to train on GPU (default: mednext)")
 
     # status
     p_st = subparsers.add_parser("status", parents=[common_parser], help="Query kernel execution status on Kaggle")

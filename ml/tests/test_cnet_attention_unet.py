@@ -20,7 +20,10 @@ if str(ML_SCRIPTS) not in sys.path:
 from train_3d import (  # noqa: E402
     AttentionGate3D,
     CNetHead3D,
+    CNetDualUNet3D,
     CNetAttentionUNet3D,
+    MedNeXtBlock3D,
+    MedNeXt3D,
     UNet3D,
     build_model,
     predict_volume,
@@ -47,18 +50,19 @@ def test_cnet_head_3d():
     print("[PASS] test_cnet_head_3d")
 
 
-def test_cnet_attention_unet_forward():
-    model = CNetAttentionUNet3D(base_channels=8, double_conv=False)
-    assert model.model_arch == "cnet_attention_unet"
+def test_cnet_dual_unet_forward():
+    model = CNetDualUNet3D(base_channels=8, double_conv=False)
+    assert model.model_arch == "cnet_dual_unet"
     assert hasattr(model, "cnet")
-    assert hasattr(model, "ag1")
-    assert hasattr(model, "ag2")
+    # Verify attention gates are removed (clean direct skip connections)
+    assert not hasattr(model, "ag1")
+    assert not hasattr(model, "ag2")
 
     # Input patch (batch=1, channel=1, depth=16, height=32, width=32)
     # UNet has 2 downsampling steps (stride 4 total), so dimensions divisible by 4
     x = torch.randn(1, 1, 16, 32, 32)
 
-    # Standard forward
+    # Standard forward: dual channel output (channel 0: bone, channel 1: edema)
     seg = model(x)
     assert seg.shape == (1, 2, 16, 32, 32), f"Expected (1, 2, 16, 32, 32), got {seg.shape}"
 
@@ -66,7 +70,7 @@ def test_cnet_attention_unet_forward():
     seg, cnet_logit = model(x, return_cnet=True)
     assert seg.shape == (1, 2, 16, 32, 32)
     assert cnet_logit.shape == (1,), f"Expected (1,), got {cnet_logit.shape}"
-    print("[PASS] test_cnet_attention_unet_forward")
+    print("[PASS] test_cnet_dual_unet_forward")
 
 
 def test_build_model_factory():
@@ -74,10 +78,14 @@ def test_build_model_factory():
     assert isinstance(m_std, UNet3D)
     assert not hasattr(m_std, "cnet")
 
-    m_cnet = build_model("cnet_attention_unet", base_channels=16, double_conv=True)
-    assert isinstance(m_cnet, CNetAttentionUNet3D)
+    m_cnet = build_model("cnet_dual_unet", base_channels=16, double_conv=True)
+    assert isinstance(m_cnet, CNetDualUNet3D)
     assert hasattr(m_cnet, "cnet")
     assert m_cnet.double_conv is True
+
+    # Check alias compatibility
+    m_cnet_alias = build_model("cnet_attention_unet", base_channels=16, double_conv=True)
+    assert isinstance(m_cnet_alias, CNetDualUNet3D)
     print("[PASS] test_build_model_factory")
 
 
@@ -135,17 +143,46 @@ def test_verify_pt_file_supports_both_architectures():
         torch.save({"state": m_cnet.state_dict(), "model_arch": "cnet_attention_unet"}, str(p_cnet))
         ok_c, msg_c = verify_pt_file(p_cnet)
         assert ok_c, f"CNetAttentionUNet verification failed: {msg_c}"
-        print("[PASS] test_verify_pt_file_supports_both_architectures")
+
+        # 3. MedNeXt 3D checkpoint
+        m_med = MedNeXt3D(base_channels=16)
+        p_med = tmp / "fold_2.pt"
+        torch.save({"state": m_med.state_dict(), "model_arch": "mednext"}, str(p_med))
+        ok_m, msg_m = verify_pt_file(p_med)
+        assert ok_m, f"MedNeXt3D verification failed: {msg_m}"
+        print("[PASS] test_verify_pt_file_supports_all_architectures")
+
+
+def test_mednext_block_and_forward():
+    # 1. MedNeXt Block
+    blk = MedNeXtBlock3D(in_channels=16, out_channels=16, exp_ratio=2, kernel_size=5)
+    x = torch.randn(2, 16, 8, 8, 8)
+    out = blk(x)
+    assert out.shape == x.shape, f"Expected {x.shape}, got {out.shape}"
+    assert not torch.allclose(out, x), "MedNeXt block should transform input"
+
+    # 2. Full MedNeXt3D Forward
+    model = MedNeXt3D(base_channels=8, exp_ratio=2, kernel_size=5)
+    inp = torch.randn(1, 1, 16, 32, 32)
+    seg = model(inp)
+    assert seg.shape == (1, 2, 16, 32, 32), f"Expected (1, 2, 16, 32, 32), got {seg.shape}"
+
+    # Factory build test
+    m_built = build_model("mednext", base_channels=8)
+    assert isinstance(m_built, MedNeXt3D)
+    assert m_built.model_arch == "mednext"
+    print("[PASS] test_mednext_block_and_forward")
 
 
 def main():
     test_attention_gate_3d()
     test_cnet_head_3d()
-    test_cnet_attention_unet_forward()
+    test_cnet_dual_unet_forward()
     test_build_model_factory()
     test_cnet_presence_gating_in_predict_volume()
     test_verify_pt_file_supports_both_architectures()
-    print("\nALL C-NET ATTENTION UNET TESTS PASSED!")
+    test_mednext_block_and_forward()
+    print("\nALL ARCHITECTURE TESTS (MEDNEXT + C-NET + UNET3D) PASSED!")
 
 
 if __name__ == "__main__":

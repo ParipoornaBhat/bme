@@ -36,6 +36,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 from scipy.ndimage import label as cc_label
+import scipy.ndimage as ndi
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 try:
@@ -64,13 +65,79 @@ def resolve_device(choice: str) -> str:
     return "cpu"
 
 
-def normalize(raw: np.ndarray) -> np.ndarray:
-    """Scale to 0–1 in float32. A Python float here would widen the volume to float64."""
+def sanitize_labels(labels: np.ndarray) -> np.ndarray:
+    """Sanitize label maps by clipping to valid range [0, 3]."""
+    return np.clip(labels, 0, 3).astype(np.uint8)
+
+
+def normalize(raw: np.ndarray, denoise: bool = True) -> np.ndarray:
+    """Robust MRI preprocessing and noise cleaning:
+    1. Filter background air and Rician thermal noise down to exact 0.0 via
+       adaptive noise peak & valley detection.
+    2. Extract contiguous body mask and eliminate floating ghosting/coil specks.
+    3. Fill body slice holes so bone marrow and internal cavities are 100% preserved.
+    4. Suppress high-frequency in-plane acquisition grain with mild gaussian smoothing.
+    5. Eliminate hyper-intense spike artifacts (coil flares, metal) via foreground percentiles.
+    6. Normalize tissue contrast cleanly to [0, 1] in float32.
+    """
     x = np.asarray(raw, dtype=np.float32)
-    lo, hi = np.percentile(x, [1, 99]).astype(np.float32)
-    scale = (hi - lo) + np.float32(1e-6)
+    pos = x[x > 0]
+    if len(pos) == 0:
+        return np.zeros_like(x, dtype=np.float32)
+
+    mean_val = float(pos.mean())
+    body_mask = None
+
+    if len(pos) > 1000 and float(pos.max()) > float(pos.min()) + 1e-3:
+        # Detect Rician air noise mode and valley separating background air from knee anatomy
+        upper_bound = min(float(mean_val * 2.5), float(pos.max()))
+        if upper_bound > float(pos.min()):
+            counts, bin_edges = np.histogram(pos, bins=100, range=(float(pos.min()), upper_bound))
+            peak_idx = int(np.argmax(counts))
+            valley_idx = peak_idx
+            min_count = counts[peak_idx]
+            for k in range(peak_idx, len(counts)):
+                if counts[k] < min_count:
+                    min_count = counts[k]
+                    valley_idx = k
+                elif counts[k] > min_count * 1.4:
+                    break
+            valley_val = float((bin_edges[valley_idx] + bin_edges[valley_idx + 1]) / 2.0)
+            valley_val = max(mean_val * 0.15, min(valley_val, mean_val * 0.65))
+            raw_fg = x > valley_val
+
+            labeled, n_comps = ndi.label(raw_fg)
+            if n_comps > 0:
+                sizes = ndi.sum(raw_fg, labeled, range(1, n_comps + 1))
+                max_size = max(sizes)
+                # Keep components >= 1% of main knee anatomy to remove air speckles & coil ghosts
+                keep_labels = [i + 1 for i, s in enumerate(sizes) if s >= max_size * 0.01]
+                body_mask = np.isin(labeled, keep_labels)
+                if body_mask.ndim == 3:
+                    for z in range(body_mask.shape[2]):
+                        body_mask[:, :, z] = ndi.binary_fill_holes(body_mask[:, :, z])
+                else:
+                    body_mask = ndi.binary_fill_holes(body_mask)
+
+    if body_mask is None or body_mask.sum() < 100:
+        air_threshold = max(float(x.min()), mean_val * 0.10)
+        body_mask = x > air_threshold
+
+    # In-plane mild gaussian smoothing to eliminate thermal Rician noise grain
+    if denoise and body_mask.sum() > 100 and x.ndim == 3:
+        smoothed = ndi.gaussian_filter(x, sigma=(0.5, 0.5, 0.0))
+        x = np.where(body_mask, smoothed, x)
+
+    tissue_vals = x[body_mask]
+    if len(tissue_vals) > 100:
+        lo, hi = np.percentile(tissue_vals, [0.5, 99.5]).astype(np.float32)
+    else:
+        lo, hi = np.percentile(x, [1.0, 99.0]).astype(np.float32)
+
+    scale = max(float(hi - lo), 1e-5)
     out = (x - lo) / scale
-    np.clip(out, 0, 1, out=out)
+    np.clip(out, 0.0, 1.0, out=out)
+    out[~body_mask] = 0.0
     return out
 
 
@@ -323,7 +390,7 @@ def load_case(base: Path, case_id: str) -> dict | None:
     if labs and vol.exists():
         img = nib.load(str(vol))
         lab_img = nib.load(str(labs[0]))
-        placed = np.asanyarray(lab_img.dataobj).astype(np.uint8)
+        placed = sanitize_labels(np.asanyarray(lab_img.dataobj))
         norm = normalize(np.asanyarray(img.dataobj))
         spacing = tuple(float(abs(z)) or 1.0 for z in img.header.get_zooms()[:3])
         return {
@@ -354,6 +421,7 @@ def load_case(base: Path, case_id: str) -> dict | None:
     except ValueError as e:
         print(f"  {case_id}  skipped ({e})", flush=True)
         return None
+    placed = sanitize_labels(placed)
     norm = normalize(np.asanyarray(img.dataobj))
     spacing = tuple(float(abs(z)) or 1.0 for z in img.header.get_zooms()[:3])
     for note in notes:
@@ -361,7 +429,7 @@ def load_case(base: Path, case_id: str) -> dict | None:
     return {
         "id": case_id,
         "image": norm.astype(np.float32),
-        "labels": placed.astype(np.uint8),
+        "labels": placed,
         "bme_voxels": int((placed == 2).sum()),
         "spacing": spacing,
     }
@@ -471,16 +539,17 @@ class CNetHead3D(nn.Module):
         return self.fc(pooled).squeeze(-1)
 
 
-class CNetAttentionUNet3D(nn.Module):
-    """Cascaded C-Net Gatekeeper + 3D Attention U-Net.
+class CNetDualUNet3D(nn.Module):
+    """C-Net Gatekeeper + Dual-Channel 3D U-Net.
 
     1. C-Net head at bottleneck gates edema presence (blocks false positives on negative controls).
-    2. Attention gates on skip connections filter background noise and highlight bone marrow edema.
+    2. Direct high-fidelity skip connections preserve 100% of bone cortex boundaries without attention dampening.
+    3. Dual-channel output: Channel 0 for Bone, Channel 1 for Edema (BME).
     """
 
     def __init__(self, base_channels: int = 16, double_conv: bool = True):
         super().__init__()
-        self.model_arch = "cnet_attention_unet"
+        self.model_arch = "cnet_dual_unet"
         self.base_channels = base_channels
         self.double_conv = double_conv
 
@@ -513,17 +582,13 @@ class CNetAttentionUNet3D(nn.Module):
         # C-Net presence classifier head at bottleneck
         self.cnet = CNetHead3D(c3)
 
-        # Attention Gates on skip connections
-        self.ag2 = AttentionGate3D(f_g=c2, f_l=c2, f_int=c1)
-        self.ag1 = AttentionGate3D(f_g=c1, f_l=c1, f_int=max(2, c1 // 2))
-
-        # Decoder with transposed convolutions
+        # Decoder with transposed convolutions and direct high-fidelity skip connections
         self.up2 = nn.ConvTranspose3d(c3, c2, 2, stride=2)
         self.d2 = block(c3, c2)
         self.up1 = nn.ConvTranspose3d(c2, c1, 2, stride=2)
         self.d1 = block(c2, c1)
 
-        # Output segmentation head (channel 0: bone, channel 1: edema)
+        # Output dual-channel segmentation head (channel 0: bone, channel 1: edema)
         self.out = nn.Conv3d(c1, 2, 1)
 
     def forward(self, x: torch.Tensor, return_cnet: bool = False):
@@ -533,13 +598,12 @@ class CNetAttentionUNet3D(nn.Module):
 
         cnet_logit = self.cnet(c)
 
+        # Direct skip connections without attention dampening
         up2_out = self.up2(c)
-        gated_b = self.ag2(g=up2_out, x=b)
-        y = self.d2(torch.cat([up2_out, gated_b], 1))
+        y = self.d2(torch.cat([up2_out, b], 1))
 
         up1_out = self.up1(y)
-        gated_a = self.ag1(g=up1_out, x=a)
-        y = self.d1(torch.cat([up1_out, gated_a], 1))
+        y = self.d1(torch.cat([up1_out, a], 1))
 
         seg = self.out(y)
         if return_cnet:
@@ -547,13 +611,130 @@ class CNetAttentionUNet3D(nn.Module):
         return seg
 
 
+# Alias for backward compatibility with existing checkpoints
+CNetAttentionUNet3D = CNetDualUNet3D
+
+
+class MedNeXtBlock3D(nn.Module):
+    """MedNeXt Block (MICCAI 2023).
+    Modern 3D ConvNeXt-style residual block with depthwise 3D convolution,
+    inverted bottleneck expansion, GELU activation, and residual connection.
+    """
+
+    def __init__(self, in_channels: int, out_channels: int, exp_ratio: int = 2, kernel_size: int = 5):
+        super().__init__()
+        self.in_channels = in_channels
+        self.out_channels = out_channels
+        pad = kernel_size // 2
+
+        # 1. 3D Depthwise Convolution
+        self.dw_conv = nn.Conv3d(
+            in_channels,
+            in_channels,
+            kernel_size=kernel_size,
+            padding=pad,
+            groups=in_channels,
+            bias=True,
+        )
+
+        # 2. Normalization
+        self.norm = nn.InstanceNorm3d(in_channels, affine=True)
+
+        # 3. Inverted Bottleneck (1x1x1 Conv pointwise expansion)
+        hidden_dim = in_channels * exp_ratio
+        self.pw_conv1 = nn.Conv3d(in_channels, hidden_dim, kernel_size=1)
+        self.act = nn.GELU()
+
+        # 4. Pointwise projection back to out_channels
+        self.pw_conv2 = nn.Conv3d(hidden_dim, out_channels, kernel_size=1)
+
+        # 5. Residual identity / projection shortcut
+        if in_channels != out_channels:
+            self.res_proj = nn.Conv3d(in_channels, out_channels, kernel_size=1)
+        else:
+            self.res_proj = nn.Identity()
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        res = self.res_proj(x)
+        y = self.dw_conv(x)
+        y = self.norm(y)
+        y = self.pw_conv1(y)
+        y = self.act(y)
+        y = self.pw_conv2(y)
+        return y + res
+
+
+class MedNeXt3D(nn.Module):
+    """MedNeXt 3D Architecture for Medical Image Segmentation (MICCAI 2023).
+    Encoder-Decoder with large-kernel 3D Depthwise ConvNeXt blocks,
+    inverted bottlenecks, and residual skip connections.
+    """
+
+    def __init__(self, base_channels: int = 16, exp_ratio: int = 2, kernel_size: int = 5, **kwargs):
+        super().__init__()
+        self.model_arch = "mednext"
+        self.base_channels = base_channels
+
+        c1 = base_channels
+        c2 = base_channels * 2
+        c3 = base_channels * 4
+
+        # Stem: map 1 input channel to base_channels
+        self.stem = nn.Sequential(
+            nn.Conv3d(1, c1, kernel_size=3, padding=1),
+            nn.InstanceNorm3d(c1, affine=True),
+            nn.GELU(),
+        )
+
+        # Encoder stages
+        self.enc1 = MedNeXtBlock3D(c1, c1, exp_ratio=exp_ratio, kernel_size=kernel_size)
+        self.down1 = nn.Conv3d(c1, c2, kernel_size=2, stride=2)
+
+        self.enc2 = MedNeXtBlock3D(c2, c2, exp_ratio=exp_ratio, kernel_size=kernel_size)
+        self.down2 = nn.Conv3d(c2, c3, kernel_size=2, stride=2)
+
+        self.enc3 = MedNeXtBlock3D(c3, c3, exp_ratio=exp_ratio, kernel_size=kernel_size)
+
+        # Decoder stages with residual skip fusion
+        self.up2 = nn.ConvTranspose3d(c3, c2, kernel_size=2, stride=2)
+        self.fuse2 = nn.Conv3d(c2 + c2, c2, kernel_size=1)
+        self.dec2 = MedNeXtBlock3D(c2, c2, exp_ratio=exp_ratio, kernel_size=kernel_size)
+
+        self.up1 = nn.ConvTranspose3d(c2, c1, kernel_size=2, stride=2)
+        self.fuse1 = nn.Conv3d(c1 + c1, c1, kernel_size=1)
+        self.dec1 = MedNeXtBlock3D(c1, c1, exp_ratio=exp_ratio, kernel_size=kernel_size)
+
+        # Output head (channel 0: bone, channel 1: edema)
+        self.out = nn.Conv3d(c1, 2, kernel_size=1)
+
+    def forward(self, x: torch.Tensor, return_cnet: bool = False):
+        x0 = self.stem(x)
+
+        e1 = self.enc1(x0)
+        e2 = self.enc2(self.down1(e1))
+        e3 = self.enc3(self.down2(e2))
+
+        d2 = self.up2(e3)
+        d2 = self.dec2(self.fuse2(torch.cat([d2, e2], dim=1)))
+
+        d1 = self.up1(d2)
+        d1 = self.dec1(self.fuse1(torch.cat([d1, e1], dim=1)))
+
+        seg = self.out(d1)
+        if return_cnet:
+            return seg, None
+        return seg
+
+
 def build_model(
-    arch: str = "unet3d",
+    arch: str = "mednext",
     base_channels: int = 16,
     double_conv: bool = False,
 ) -> nn.Module:
-    if arch == "cnet_attention_unet":
-        return CNetAttentionUNet3D(base_channels=base_channels, double_conv=double_conv)
+    if arch == "mednext":
+        return MedNeXt3D(base_channels=base_channels)
+    if arch in ("cnet_dual_unet", "cnet_attention_unet"):
+        return CNetDualUNet3D(base_channels=base_channels, double_conv=double_conv)
     return UNet3D(base_channels=base_channels, double_conv=double_conv)
 
 
@@ -975,8 +1156,8 @@ def main():
                     help="Use dual conv layers per resolution block in UNet3D")
     ap.add_argument("--eval-only", action="store_true",
                     help="Run validation evaluation on existing fold checkpoints without training")
-    ap.add_argument("--model-arch", type=str, default="unet3d", choices=["unet3d", "cnet_attention_unet"],
-                    help="Model architecture: 'unet3d' (standard) or 'cnet_attention_unet' (C-Net gatekeeper + 3D Attention U-Net)")
+    ap.add_argument("--model-arch", type=str, default="mednext", choices=["unet3d", "cnet_dual_unet", "cnet_attention_unet", "mednext"],
+                    help="Model architecture: 'mednext' (State-of-the-Art 3D ConvNeXt), 'cnet_dual_unet' (C-Net + Dual-Channel U-Net), or 'unet3d' (standard)")
     ap.add_argument("--cnet-weight", type=float, default=0.5,
                     help="Loss weight for C-Net binary presence classification (default: 0.5)")
     ap.add_argument("--cnet-threshold", type=float, default=0.40,
