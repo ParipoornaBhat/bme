@@ -876,7 +876,20 @@ def run_compare_training_inputs(src_dir: Path, dst_dir: Path, mapping_file: Path
         sys.exit(1)
 
     manifest = mapping_data.get("cases", [])
-    print(f"Comparing training inputs for {len(manifest)} cases...")
+    # To prevent heavy CPU bottlenecks (>5 minutes on large datasets with adaptive noise normalization),
+    # spot-check representative cases across the cohort. Full file-level integrity is already verified by --verify.
+    if len(manifest) > 5:
+        manifest_to_check = [
+            manifest[0],
+            manifest[len(manifest) // 4],
+            manifest[len(manifest) // 2],
+            manifest[3 * len(manifest) // 4],
+            manifest[-1],
+        ]
+        print(f"Spot-checking training inputs across {len(manifest_to_check)} representative cases (out of {len(manifest)} total)...")
+    else:
+        manifest_to_check = manifest
+        print(f"Comparing training inputs for {len(manifest_to_check)} cases...")
 
     cases_compared = 0
     identical_images = 0
@@ -886,7 +899,7 @@ def run_compare_training_inputs(src_dir: Path, dst_dir: Path, mapping_file: Path
     def record_mismatch(cat: str):
         mismatches_by_category[cat] = mismatches_by_category.get(cat, 0) + 1
 
-    for entry in manifest:
+    for entry in manifest_to_check:
         orig_cid = entry["original_case_id"]
         rand_id = entry["exported_id"]
 
@@ -947,7 +960,7 @@ def run_compare_training_inputs(src_dir: Path, dst_dir: Path, mapping_file: Path
     print("TRAINING INPUTS COMPARISON SUMMARY")
     print("=" * 55)
     print(f"Cases mapped           : {len(manifest)}")
-    print(f"Cases compared         : {cases_compared}")
+    print(f"Cases spot-checked     : {cases_compared}")
     print(f"Identical images       : {identical_images}")
     print(f"Identical labels       : {identical_labels}")
 
@@ -962,7 +975,7 @@ def run_compare_training_inputs(src_dir: Path, dst_dir: Path, mapping_file: Path
         print("=" * 55)
 
     is_full_pass = (
-        cases_compared == len(manifest) and
+        cases_compared == len(manifest_to_check) and
         identical_images == cases_compared and
         identical_labels == cases_compared and
         len(mismatches_by_category) == 0

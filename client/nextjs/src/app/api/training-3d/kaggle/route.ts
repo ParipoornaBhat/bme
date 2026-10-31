@@ -210,15 +210,48 @@ export async function GET(req: NextRequest) {
         const r = root();
         const candidatePaths = [
           runState.dest_dir ? path.join(runState.dest_dir, "metrics.json") : null,
+          runState.dest_dir ? path.join(runState.dest_dir, "metrics_partial.json") : null,
           path.join(r, "data", "results3d_experiments", runState.run_id, "metrics.json"),
+          path.join(r, "data", "results3d_experiments", runState.run_id, "metrics_partial.json"),
           path.join(stagingDir, "download", runState.run_id, "metrics.json"),
+          path.join(stagingDir, "download", runState.run_id, "metrics_partial.json"),
           path.join(stagingDir, "download", runState.run_id, "results3d", "metrics.json"),
+          path.join(stagingDir, "download", runState.run_id, "results3d", "metrics_partial.json"),
+          path.join(r, "data", "results3d", "metrics.json"),
         ].filter(Boolean) as string[];
 
         for (const p of candidatePaths) {
           if (fs.existsSync(p)) {
             try {
-              runMetrics = JSON.parse(fs.readFileSync(p, "utf8"));
+              const raw = JSON.parse(fs.readFileSync(p, "utf8"));
+              if (Array.isArray(raw)) {
+                const folds = raw;
+                const calcMeanStd = (arr: number[]) => {
+                  if (!arr.length) return { mean: 0, std: 0 };
+                  const mean = arr.reduce((a, b) => a + b, 0) / arr.length;
+                  const variance = arr.reduce((a, b) => a + Math.pow(b - mean, 2), 0) / arr.length;
+                  return { mean, std: Math.sqrt(variance) };
+                };
+                runMetrics = {
+                  model: folds[0]?.model_arch || "mednext",
+                  device: folds[0]?.device || "cuda",
+                  folds: folds.length,
+                  epochs: folds[0]?.epochs ?? 2,
+                  summary: {
+                    bone_dice: calcMeanStd(folds.map((r: any) => r.bone_dice || 0)),
+                    bme_dice: calcMeanStd(folds.map((r: any) => r.bme_dice || 0)),
+                    lesion_sensitivity: calcMeanStd(folds.map((r: any) => r.lesion_sensitivity || 0)),
+                    fp_per_case: calcMeanStd(folds.map((r: any) => r.fp_per_case || 0)),
+                  },
+                  presence_correct: folds.reduce((acc: number, r: any) => acc + (r.presence_correct || 0), 0),
+                  presence_n: folds.reduce((acc: number, r: any) => acc + (r.presence_n || 0), 0),
+                  per_fold: folds,
+                  trained_at: new Date().toISOString(),
+                  note: `Quick test run with ${folds.length} evaluated folds.`,
+                };
+              } else {
+                runMetrics = raw;
+              }
               break;
             } catch {
               // ignore
