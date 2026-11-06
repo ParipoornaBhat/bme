@@ -53,8 +53,10 @@ async function ensureSeries(caseId: string) {
 
 export async function GET() {
   try {
+    // Newest row per case. Every save appends a row, so a plain "latest N rows"
+    // let a few busy cases push everyone else's name off the list.
     const rows = await db
-      .select({
+      .selectDistinctOn([annotation.storageKey], {
         id: annotation.id,
         seriesId: annotation.seriesId,
         authorId: annotation.authorId,
@@ -66,8 +68,7 @@ export async function GET() {
         createdAt: annotation.createdAt,
       })
       .from(annotation)
-      .orderBy(desc(annotation.createdAt))
-      .limit(500);
+      .orderBy(annotation.storageKey, desc(annotation.createdAt));
 
     // storageKey is "data/annotations/<CASE>/<CASE>.seg.nrrd"; the case id is
     // recoverable from it without another join.
