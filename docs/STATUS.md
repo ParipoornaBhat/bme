@@ -76,11 +76,27 @@ In order. Each step's output is the next step's input.
    all the zips in the repo root and runs `pnpm data:import:team` (newest zip per person, dry run,
    asks, never overwrites painted work). Focus annotation on the **axial** stack: the 3D model is
    trained on axial clinical stacks (3-4 mm between slices), so other planes are interpolated.
-   **H200 (2026-10-27):** `pnpm h200` is the menu (status, push, train3d, train2d, log, cancel,
-   get3d, get2d, env); it uses the only H200 password in `.env` or asks which. `train3d` runs
-   `ml/slurm/train_3d.sbatch` (width 32, 128x128x16 patches cut fresh each epoch, flips,
-   bf16, cosine LR, epochs fitted to 3.3 h) into `data/results3d-h200`; `get3d` downloads it and
-   asks before replacing `data/results3d`. Old split (2026-10-07) was
+   NBME zips from `pnpm zipnbme:<name>` (`nbme_annotations_<name>.zip`) are picked up by the
+   same import (also `pnpm data:process` -> "Import team annotations"); do not use
+   `zipnbme:combine` to merge, it overwrites without a backup or scan check.
+   **H200 (2026-11-07):** `pnpm h200` is the menu (status, push, train3d, resume3d, train2d, log,
+   cancel, get3d, get2d, env); it uses the only H200 password in `.env` or asks which, and refuses
+   to submit above 45 GB of server home. `train3d` runs `ml/slurm/train_3d.sbatch` into
+   `data/results3d-h200-v2`: in-plane resample to 1 mm (`--spacing 1.0`), 160x160x16 patches,
+   first pooling in-plane only (`--aniso`), live nnU-Net-style rotation +-30 deg / zoom 0.7-1.4
+   slice-wise (`--aug-spatial`), sampling a third each on edema, bone and anywhere, epochs fitted
+   to 3.3 h, resumable checkpoint each epoch. Live augmentation was chosen over a saved augmented
+   dataset: nothing extra on the 50 GB server disk, and the literature default is on-the-fly.
+   Why the change: the 2026-10-08 laptop 3D run scored bone 0.54, edema 0.18, ~2000 FP blobs per
+   case, while 2D on the same scans scored bone 0.91 -- the 3D patch (96x96 at 0.35 mm, ~3 cm)
+   could not see the knee. Not yet run; compare against those numbers.
+   **Four-account comparison (planned 2026-11-07), same case-level folds for all:**
+   `train3d` (U-Net, live augmentation) · `train3dplain` (same, no augmentation; control) ·
+   `nnunet3d` and `nnunet2d` (nnU-Net v2.5.1 ResEnc M, `nnUNetTrainer_100epochs`,
+   `ml/slurm/nnunet.sbatch`, data under `data/nnunet/`, scores via `ml/scripts/nnunet_prep.py
+   metrics` into `data/results-nnunet-<config>/`). New accounts first run `pnpm h200 setup --as
+   <roll>`. Every op takes `--as <roll>`; `log --as <roll>` live-tails that account's newest job.
+   nnU-Net folds may need several 4 h submissions; resubmitting continues. Old split (2026-10-07) was
    Aditi 6-26, 46-47 · Paripoorna 1-5, 54-59 · Reegan 27-45, 60-61 · Elvin 48-53. Elvin's laptop is the hub.
    Every laptop runs `team_annotations.py assign . --apply` once, to fill `assigned_to` in
    the worklist. A teammate runs `export . --who <name>`, which zips only their cases with bone

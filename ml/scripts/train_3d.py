@@ -37,6 +37,7 @@ import nibabel as nib
 import numpy as np
 import torch
 import torch.nn as nn
+from scipy.ndimage import affine_transform, zoom
 from scipy.ndimage import label as cc_label
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -220,6 +221,72 @@ def augment(image: np.ndarray, labels: np.ndarray, rng: np.random.Generator):
     return np.ascontiguousarray(image, dtype=np.float32), np.ascontiguousarray(labels)
 
 
+def to_spacing(image: np.ndarray, labels: np.ndarray | None, spacing, target: float):
+    """Resample in-plane only to `target` mm; slices are left alone.
+
+    Clinical knee stacks here are ~0.35 mm in-plane and 3.6-5.8 mm between
+    slices. At 0.35 mm a 96-pixel patch sees ~3 cm of a ~14 cm knee; at 1 mm a
+    160-pixel patch sees the whole cross-section. Through-plane spacing is not
+    touched: interpolating between 4 mm slices would invent anatomy.
+    """
+    if not target:
+        return image, labels
+    f = (float(spacing[0]) / target, float(spacing[1]) / target, 1.0)
+    if abs(f[0] - 1) < 0.02 and abs(f[1] - 1) < 0.02:
+        return image, labels
+    image = zoom(image, f, order=1).astype(np.float32)
+    if labels is not None:
+        labels = zoom(labels, f, order=0).astype(np.uint8)
+    return image, labels
+
+
+def back_to_shape(mask: np.ndarray, shape) -> np.ndarray:
+    """Nearest-neighbour resize of a label mask to an exact shape."""
+    if tuple(mask.shape) == tuple(shape):
+        return mask
+    idx = [
+        np.minimum((np.arange(n) + 0.5) * mask.shape[ax] / n, mask.shape[ax] - 1).astype(int)
+        for ax, n in enumerate(shape)
+    ]
+    return mask[np.ix_(*idx)]
+
+
+def spatial_crop(image: np.ndarray, labels: np.ndarray, origin, patch, rng: np.random.Generator,
+                 p_rot: float = 0.2, p_scale: float = 0.2, max_deg: float = 30.0,
+                 scale_range: tuple[float, float] = (0.7, 1.4)):
+    """Cut one patch, rotated and/or zoomed in-plane about its centre.
+
+    nnU-Net's defaults (rotation within +-30 deg, scaling 0.7-1.4, each with
+    p=0.2), applied slice-wise: the same 2D transform on every slice, z left
+    alone. nnU-Net does this whenever a patch's longest edge is more than twice
+    its shortest, which 160x160x16 is. Image is linear-interpolated, labels
+    nearest, outside the scan is 0 (background). No noise is added.
+    """
+    rot = rng.random() < p_rot
+    scl = rng.random() < p_scale
+    if not (rot or scl):
+        return crop(image, origin, patch).astype(np.float32), crop(labels, origin, patch)
+    theta = np.deg2rad(rng.uniform(-max_deg, max_deg)) if rot else 0.0
+    s = rng.uniform(*scale_range) if scl else 1.0
+    m2 = np.array([[np.cos(theta), -np.sin(theta)], [np.sin(theta), np.cos(theta)]]) / s
+    mat = np.eye(3)
+    mat[:2, :2] = m2
+    c_out = (np.array(patch, dtype=float) - 1) / 2
+    c_in = np.array(origin, dtype=float) + c_out
+    # Only the input region the output can reach is converted to float32.
+    reach = np.abs(m2) @ c_out[:2] + 2
+    lo = np.maximum(np.floor(c_in[:2] - reach).astype(int), 0)
+    hi = np.minimum(np.ceil(c_in[:2] + reach).astype(int) + 1, np.array(image.shape[:2]))
+    z0, z1 = int(origin[2]), int(origin[2]) + int(patch[2])
+    sub_img = np.asarray(image[lo[0]:hi[0], lo[1]:hi[1], z0:z1], dtype=np.float32)
+    sub_lab = np.asarray(labels[lo[0]:hi[0], lo[1]:hi[1], z0:z1])
+    centre = c_in - np.array([lo[0], lo[1], z0], dtype=float)
+    offset = centre - mat @ c_out
+    img = affine_transform(sub_img, mat, offset=offset, output_shape=tuple(patch), order=1, mode="constant", cval=0.0)
+    lab = affine_transform(sub_lab, mat, offset=offset, output_shape=tuple(patch), order=0, mode="constant", cval=0)
+    return np.clip(img, 0, 1).astype(np.float32), lab.astype(np.uint8)
+
+
 def volume_path(base: Path, case_id: str) -> Path:
     nii_dir = None
     for candidate in [
@@ -374,9 +441,12 @@ def load_case(base: Path, case_id: str) -> dict | None:
 class UNet3D(nn.Module):
     """Joint bone and lesion. Two channels, lesion clipped to bone at inference."""
 
-    def __init__(self, width: int = 16):
+    def __init__(self, width: int = 16, aniso: bool = False):
         super().__init__()
         w = width
+        # aniso: the first level pools in-plane only, so 16 thick slices are not
+        # halved twice before the network has seen any of them.
+        k1 = (2, 2, 1) if aniso else (2, 2, 2)
 
         def block(i, o):
             return nn.Sequential(
@@ -389,15 +459,16 @@ class UNet3D(nn.Module):
         self.e2 = block(w, 2 * w)
         self.e3 = block(2 * w, 4 * w)
         self.pool = nn.MaxPool3d(2)
+        self.pool1 = nn.MaxPool3d(k1)
         self.up2 = nn.ConvTranspose3d(4 * w, 2 * w, 2, stride=2)
         self.d2 = block(4 * w, 2 * w)
-        self.up1 = nn.ConvTranspose3d(2 * w, w, 2, stride=2)
+        self.up1 = nn.ConvTranspose3d(2 * w, w, k1, stride=k1)
         self.d1 = block(2 * w, w)
         self.out = nn.Conv3d(w, 2, 1)
 
     def forward(self, x):
         a = self.e1(x)
-        b = self.e2(self.pool(a))
+        b = self.e2(self.pool1(a))
         c = self.e3(self.pool(b))
         y = self.d2(torch.cat([self.up2(c), b], 1))
         y = self.d1(torch.cat([self.up1(y), a], 1))
@@ -420,9 +491,12 @@ class AttentionGate3d(nn.Module):
 class AttentionUNet3D(nn.Module):
     """3D U-Net with attention on the skip links. Same two outputs, same patch size."""
 
-    def __init__(self, width: int = 16):
+    def __init__(self, width: int = 16, aniso: bool = False):
         super().__init__()
         w = width
+        # aniso: the first level pools in-plane only, so 16 thick slices are not
+        # halved twice before the network has seen any of them.
+        k1 = (2, 2, 1) if aniso else (2, 2, 2)
 
         def block(i, o):
             return nn.Sequential(
@@ -435,17 +509,18 @@ class AttentionUNet3D(nn.Module):
         self.e2 = block(w, 2 * w)
         self.e3 = block(2 * w, 4 * w)
         self.pool = nn.MaxPool3d(2)
+        self.pool1 = nn.MaxPool3d(k1)
         self.up2 = nn.ConvTranspose3d(4 * w, 2 * w, 2, stride=2)
         self.gate2 = AttentionGate3d(2 * w, 2 * w, w)
         self.d2 = block(4 * w, 2 * w)
-        self.up1 = nn.ConvTranspose3d(2 * w, w, 2, stride=2)
+        self.up1 = nn.ConvTranspose3d(2 * w, w, k1, stride=k1)
         self.gate1 = AttentionGate3d(w, w, max(1, w // 2))
         self.d1 = block(2 * w, w)
         self.out = nn.Conv3d(w, 2, 1)
 
     def forward(self, x):
         a = self.e1(x)
-        b = self.e2(self.pool(a))
+        b = self.e2(self.pool1(a))
         c = self.e3(self.pool(b))
         y = self.up2(c)
         b = self.gate2(b, y)
@@ -456,11 +531,11 @@ class AttentionUNet3D(nn.Module):
         return self.out(y)
 
 
-def build_model(name: str, width: int = 16) -> nn.Module:
+def build_model(name: str, width: int = 16, aniso: bool = False) -> nn.Module:
     if name == "unet":
-        return UNet3D(width)
+        return UNet3D(width, aniso)
     if name == "attention-unet":
-        return AttentionUNet3D(width)
+        return AttentionUNet3D(width, aniso)
     raise SystemExit(f"unknown model {name!r}. choices: unet, attention-unet")
 
 
@@ -827,7 +902,15 @@ def main():
                     help="Allow case-level folds if patient_id is missing or blank in worklist.csv")
     ap.add_argument("--sampling-mix", type=str, default="lesion=0.7,bone=0.0,random=0.3",
                     help="Patch sampling proportions: lesion=A,bone=B,random=C (fractions summing to 1.0)")
+    ap.add_argument("--spacing", type=float, default=0.0,
+                    help="resample in-plane to this many mm before training and prediction (0 = native grid)")
+    ap.add_argument("--aniso", action="store_true",
+                    help="first pooling level in-plane only, for thick-slice stacks")
+    ap.add_argument("--aug-spatial", action="store_true",
+                    help="in-plane rotation +-30 deg and zoom 0.7-1.4, slice-wise (needs --resample)")
     args = ap.parse_args()
+    if args.aug_spatial and not args.resample:
+        raise SystemExit("--aug-spatial cuts fresh rotated patches each epoch; add --resample")
     patch = tuple(int(v) for v in args.patch.split(","))
     if len(patch) != 3 or any(p % 4 for p in patch):
         raise SystemExit(f"--patch must be three numbers divisible by 4, got {args.patch}")
@@ -848,6 +931,7 @@ def main():
     is_data_experiment = bool(
         args.resample or args.augment or
         args.aug_flip or args.aug_intensity or args.aug_noise or
+        args.spacing or args.aniso or args.aug_spatial or
         (args.sampling_mix != "lesion=0.7,bone=0.0,random=0.3")
     )
     baseline_names = ("results3d", "results3d-attn")
@@ -880,6 +964,13 @@ def main():
         "aug_noise": bool(args.aug_noise),
         "sampling_mix": sampling_mix_dict,
     }
+    # Only recorded when used, so fingerprints of earlier runs stay valid.
+    if args.spacing:
+        data_config["spacing_mm"] = args.spacing
+    if args.aniso:
+        data_config["aniso"] = True
+    if args.aug_spatial:
+        data_config["aug_spatial"] = True
 
     out_dir = Path(args.out_dir) if args.out_dir else base / "data" / out_name
 
@@ -938,6 +1029,8 @@ def main():
         item = load_case(base, cid)
         if not item:
             continue
+        if args.spacing:
+            item["image"], item["labels"] = to_spacing(item["image"], item["labels"], item["spacing"], args.spacing)
         image = pad_volume(item["image"], patch)
         labels = pad_volume(item["labels"], patch)
         case = {
@@ -1032,7 +1125,10 @@ def main():
         flush=True,
     )
     print(
-        f"Patch {patch[0]}×{patch[1]}×{patch[2]} on the original voxel grid, "
+        f"Patch {patch[0]}×{patch[1]}×{patch[2]} on "
+        f"{f'a {args.spacing} mm in-plane grid' if args.spacing else 'the original voxel grid'}"
+        f"{', in-plane-first pooling' if args.aniso else ''}"
+        f"{', rotation/zoom' if args.aug_spatial else ''}, "
         f"{args.patches_per_case} patches per case per epoch"
         f"{' (fresh every epoch)' if args.resample else ''}, width {args.width}, batch {args.batch}"
         f"{', augmented' if args.augment else ''}. "
@@ -1180,7 +1276,7 @@ def main():
         else:
             print(f"fold {fold}: train {len(train)} cases  val {len(val)} cases", flush=True)
 
-        model = build_model(args.model, args.width).to(device)
+        model = build_model(args.model, args.width, args.aniso).to(device)
         if args.channels_last_3d:
             model = model.to(memory_format=torch.channels_last_3d)
         opt = torch.optim.Adam(model.parameters(), lr=args.lr)
@@ -1272,8 +1368,11 @@ def main():
                     for _ in range(args.patches_per_case):
                         origin = sample_origin(case["image"].shape, case["labels"], rng_epoch_data,
                                                sampling_mix_dict, patch, case["lesion_pts"])
-                        items.append((crop(case["image"], origin, patch).astype(np.float32),
-                                      crop(case["labels"], origin, patch)))
+                        if args.aug_spatial:
+                            items.append(spatial_crop(case["image"], case["labels"], origin, patch, rng_epoch_data))
+                        else:
+                            items.append((crop(case["image"], origin, patch).astype(np.float32),
+                                          crop(case["labels"], origin, patch)))
                 else:
                     items.extend(zip(case["patches"], case["patch_labels"]))
             random.shuffle(items)
@@ -1349,6 +1448,8 @@ def main():
                         "opt": opt.state_dict(),
                         "patch": list(patch),
                         "width": args.width,
+                        "aniso": bool(args.aniso),
+                        "spacing_mm": args.spacing,
                         "model": args.model,
                         "seed": SEED,
                         "data_config": data_config,
@@ -1413,15 +1514,19 @@ def main():
             loaded = load_case(base, case["id"])
             if not loaded:
                 continue
+            # Predicted on the training grid, scored on the scan's own grid.
+            val_image, _ = to_spacing(loaded["image"], None, loaded["spacing"], args.spacing)
             pred = predict_volume(
                 model,
-                loaded["image"],
+                val_image,
                 device,
                 patch,
                 val_batch_size=args.val_batch_size,
                 use_amp=use_amp,
                 channels_last=args.channels_last_3d,
             )
+            pred = back_to_shape(pred, loaded["labels"].shape)
+            del val_image
             bone_d.append(dice(loaded["labels"], pred, 1))
             bme_d.append(dice(loaded["labels"], pred, 2))
             gt_bone = (loaded["labels"] == 1) | (loaded["labels"] == 2)
@@ -1462,6 +1567,8 @@ def main():
                 "state": model.state_dict(),
                 "patch": list(patch),
                 "width": args.width,
+                "aniso": bool(args.aniso),
+                "spacing_mm": args.spacing,
                 "model": args.model,
                 "seed": SEED,
                 "data_config": data_config,
@@ -1532,6 +1639,8 @@ def main():
             "device": device,
             "patch": list(patch),
             "width": args.width,
+            "aniso": bool(args.aniso),
+            "spacing_mm": args.spacing,
             "model": args.model,
             "n_cases": len(cases),
             "n_bme": n_bme,
@@ -1584,6 +1693,8 @@ def main():
             "seed": SEED,
             "patch": list(patch),
             "width": args.width,
+            "aniso": bool(args.aniso),
+            "spacing_mm": args.spacing,
             "batch": args.batch,
             "patches_per_case": args.patches_per_case,
             "resample": args.resample,
