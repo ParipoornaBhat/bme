@@ -586,8 +586,17 @@ export async function DELETE(req: NextRequest) {
   const lock = getActiveLock(stagingDir);
   const lockFile = path.join(stagingDir, "kaggle.lock.json");
 
+  const stateFile = path.join(stagingDir, "run_state.json");
+  if (fs.existsSync(stateFile)) {
+    try {
+      fs.unlinkSync(stateFile);
+    } catch {
+      // ignore
+    }
+  }
+
   if (!lock) {
-    return NextResponse.json({ ok: true, note: "nothing running" });
+    return NextResponse.json({ ok: true, note: "nothing running", reset: true });
   }
 
   try {

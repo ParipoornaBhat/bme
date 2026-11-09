@@ -310,15 +310,23 @@ export default function Train3DKaggle({
                             <Square className="h-3 w-3" /> Stop / Cancel Run
                           </button>
                         )}
-                        {(phase === "FAILED" || phase === "CANCELLED" || (kaggleState?.runState && phase !== "COMPLETED")) && (
+                        {(phase === "FAILED" || phase === "CANCELLED") ? (
+                          <button
+                            onClick={() => executeKaggleAction("onetap", { confirmLaunch: true, mode: runMode })}
+                            disabled={kaggleBusy}
+                            className="inline-flex items-center gap-1.5 rounded bg-primary/10 border border-primary/30 px-3 py-1 text-xs font-semibold text-primary hover:bg-primary/20 transition"
+                          >
+                            <RefreshCw className="h-3 w-3" /> Retry (Fresh Launch)
+                          </button>
+                        ) : (kaggleState?.runState && phase !== "COMPLETED") ? (
                           <button
                             onClick={() => executeKaggleAction("onetap", { resume: true, mode: runMode })}
                             disabled={kaggleBusy}
                             className="inline-flex items-center gap-1.5 rounded bg-primary/10 border border-primary/30 px-3 py-1 text-xs font-semibold text-primary hover:bg-primary/20 transition"
                           >
-                            <RefreshCw className="h-3 w-3" /> Retry / Resume
+                            <RefreshCw className="h-3 w-3" /> Resume from saved state
                           </button>
-                        )}
+                        ) : null}
                         {(phase === "CANCELLED" || phase === "FAILED" || phase === "COMPLETED") && (
                           <button
                             onClick={() => stopKaggle(true)}

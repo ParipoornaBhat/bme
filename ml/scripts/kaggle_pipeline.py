@@ -645,6 +645,14 @@ def run_pipeline(
         if run_state.get("phase") == "COMPLETED":
             print(f"[OK] Run {run_state.get('run_id')} already completed.")
             return run_state
+        if run_state.get("phase") in ("FAILED", "CANCELLED"):
+            print(f"[NOTICE] Persisted run {run_state.get('run_id')} was {run_state.get('phase')}. Resetting and launching clean new run with latest code...")
+            resume = False
+            if state_file.exists():
+                try:
+                    state_file.unlink()
+                except Exception:
+                    pass
     else:
         # Re-check local export hash equals approved hash (no Kaggle call)
         if export_dir and export_dir.exists():
