@@ -838,7 +838,8 @@ def run_pipeline(
     download_dir = staging_dir / "download" / run_id
     download_dir.mkdir(parents=True, exist_ok=True)
 
-    if run_state.get("phase") == "DOWNLOADING":
+    has_valid_downloads = any(re.match(r"^fold_\d+\.pt$", p.name) for p in download_dir.glob("*.pt"))
+    if run_state.get("phase") in ("DOWNLOADING", "IMPORTING") and not has_valid_downloads:
         print(f"\nDownloading outputs for {full_kernel_slug} into staging...")
         download_success = False
         for attempt in range(1, 6):
