@@ -44,6 +44,18 @@ const COMMANDS = [
   },
   {
     script: "team-annotations.js",
+    args: ["import-all"],
+    label: "Import team annotations",
+    about: "Merge every teammate zip in the repo root or data/exports (BME and NBME). Shows the plan, asks first, never overwrites.",
+  },
+  {
+    script: "swap-fs.js",
+    args: ["install", "--apply"],
+    label: "Install light-marrow fix",
+    about: "With fs_fix.zip in the repo root: swap NBME-005/058 to the dark scan and move your annotations onto it.",
+  },
+  {
+    script: "team-annotations.js",
     args: ["share"],
     label: "Share hub zip",
     about: "Build the annotations zip to send to the rest of the team.",

@@ -20,7 +20,7 @@ import torch
 from scipy.ndimage import label as cc_label
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from train_3d import UNet3D, build_model, guard_device, normalize, predict_volume  # noqa: E402
+from train_3d import PATCH, back_to_shape, build_model, guard_device, normalize, predict_volume, to_spacing  # noqa: E402
 
 
 def read_nrrd(path: Path):
@@ -64,31 +64,41 @@ def main():
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
     guard_device(device)
-    model_name = WEIGHTS.get(out_name, "unet")
-    masks = []
-    for ck in ckpts:
+    first = torch.load(ckpts[0], map_location=device, weights_only=False)
+    arch = first.get("model_arch") or first.get("model") or WEIGHTS.get(out_name, "unet3d")
+    if arch in ("attention-unet", "attention_unet"):
+        arch = "cnet_dual_unet"
+    elif arch == "unet":
+        arch = "unet3d"
+    model_name = arch
+    width = int(first.get("base_channels") or first.get("width") or 16)
+    double_conv = bool(first.get("double_conv", False))
+    patch = tuple(first.get("patch") or PATCH)
+    aniso = bool(first.get("aniso", False))
+    grid_mm = float(first.get("spacing_mm") or 0.0)
+    min_vox = first.get("min_bme_voxels", 50)
+    cnet_thresh = first.get("cnet_threshold", 0.40)
+
+    grid, _ = to_spacing(norm, None, spacing, grid_mm)
+    model = build_model(arch=arch, base_channels=width, double_conv=double_conv, aniso=aniso).to(device)
+    model.load_state_dict(first["state"])
+    masks = [back_to_shape(predict_volume(model, grid, device, patch, min_bme_voxels=min_vox, cnet_threshold=cnet_thresh), norm.shape)]
+    for ck in ckpts[1:]:
         blob = torch.load(ck, map_location=device, weights_only=False)
         arch = blob.get("model_arch") or blob.get("model") or WEIGHTS.get(out_name, "unet3d")
         if arch in ("attention-unet", "attention_unet"):
             arch = "cnet_dual_unet"
         elif arch == "unet":
             arch = "unet3d"
-        model_name = arch
         bc = blob.get("base_channels") or blob.get("width") or 16
         dc = blob.get("double_conv", False)
+        an = bool(blob.get("aniso", aniso))
         min_vox = blob.get("min_bme_voxels", 50)
         cnet_thresh = blob.get("cnet_threshold", 0.40)
-        model = build_model(arch=arch, base_channels=bc, double_conv=dc).to(device)
+        model = build_model(arch=arch, base_channels=bc, double_conv=dc, aniso=an).to(device)
         model.load_state_dict(blob["state"])
-        masks.append(
-            predict_volume(
-                model,
-                norm,
-                device,
-                min_bme_voxels=min_vox,
-                cnet_threshold=cnet_thresh,
-            )
-        )
+        masks.append(back_to_shape(predict_volume(model, grid, device, patch, min_bme_voxels=min_vox, cnet_threshold=cnet_thresh), norm.shape))
+
     # Majority across folds, then drop edema that is not inside bone in that vote.
     bone_votes = sum((m > 0).astype(np.uint8) for m in masks)
     bme_votes = sum((m == 2).astype(np.uint8) for m in masks)

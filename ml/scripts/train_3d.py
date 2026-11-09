@@ -37,6 +37,7 @@ import nibabel as nib
 import numpy as np
 import torch
 import torch.nn as nn
+from scipy.ndimage import affine_transform, zoom
 from scipy.ndimage import label as cc_label
 import scipy.ndimage as ndi
 
@@ -287,6 +288,72 @@ def augment(image: np.ndarray, labels: np.ndarray, rng: np.random.Generator):
     return np.ascontiguousarray(image, dtype=np.float32), np.ascontiguousarray(labels)
 
 
+def to_spacing(image: np.ndarray, labels: np.ndarray | None, spacing, target: float):
+    """Resample in-plane only to `target` mm; slices are left alone.
+
+    Clinical knee stacks here are ~0.35 mm in-plane and 3.6-5.8 mm between
+    slices. At 0.35 mm a 96-pixel patch sees ~3 cm of a ~14 cm knee; at 1 mm a
+    160-pixel patch sees the whole cross-section. Through-plane spacing is not
+    touched: interpolating between 4 mm slices would invent anatomy.
+    """
+    if not target:
+        return image, labels
+    f = (float(spacing[0]) / target, float(spacing[1]) / target, 1.0)
+    if abs(f[0] - 1) < 0.02 and abs(f[1] - 1) < 0.02:
+        return image, labels
+    image = zoom(image, f, order=1).astype(np.float32)
+    if labels is not None:
+        labels = zoom(labels, f, order=0).astype(np.uint8)
+    return image, labels
+
+
+def back_to_shape(mask: np.ndarray, shape) -> np.ndarray:
+    """Nearest-neighbour resize of a label mask to an exact shape."""
+    if tuple(mask.shape) == tuple(shape):
+        return mask
+    idx = [
+        np.minimum((np.arange(n) + 0.5) * mask.shape[ax] / n, mask.shape[ax] - 1).astype(int)
+        for ax, n in enumerate(shape)
+    ]
+    return mask[np.ix_(*idx)]
+
+
+def spatial_crop(image: np.ndarray, labels: np.ndarray, origin, patch, rng: np.random.Generator,
+                 p_rot: float = 0.2, p_scale: float = 0.2, max_deg: float = 30.0,
+                 scale_range: tuple[float, float] = (0.7, 1.4)):
+    """Cut one patch, rotated and/or zoomed in-plane about its centre.
+
+    nnU-Net's defaults (rotation within +-30 deg, scaling 0.7-1.4, each with
+    p=0.2), applied slice-wise: the same 2D transform on every slice, z left
+    alone. nnU-Net does this whenever a patch's longest edge is more than twice
+    its shortest, which 160x160x16 is. Image is linear-interpolated, labels
+    nearest, outside the scan is 0 (background). No noise is added.
+    """
+    rot = rng.random() < p_rot
+    scl = rng.random() < p_scale
+    if not (rot or scl):
+        return crop(image, origin, patch).astype(np.float32), crop(labels, origin, patch)
+    theta = np.deg2rad(rng.uniform(-max_deg, max_deg)) if rot else 0.0
+    s = rng.uniform(*scale_range) if scl else 1.0
+    m2 = np.array([[np.cos(theta), -np.sin(theta)], [np.sin(theta), np.cos(theta)]]) / s
+    mat = np.eye(3)
+    mat[:2, :2] = m2
+    c_out = (np.array(patch, dtype=float) - 1) / 2
+    c_in = np.array(origin, dtype=float) + c_out
+    # Only the input region the output can reach is converted to float32.
+    reach = np.abs(m2) @ c_out[:2] + 2
+    lo = np.maximum(np.floor(c_in[:2] - reach).astype(int), 0)
+    hi = np.minimum(np.ceil(c_in[:2] + reach).astype(int) + 1, np.array(image.shape[:2]))
+    z0, z1 = int(origin[2]), int(origin[2]) + int(patch[2])
+    sub_img = np.asarray(image[lo[0]:hi[0], lo[1]:hi[1], z0:z1], dtype=np.float32)
+    sub_lab = np.asarray(labels[lo[0]:hi[0], lo[1]:hi[1], z0:z1])
+    centre = c_in - np.array([lo[0], lo[1], z0], dtype=float)
+    offset = centre - mat @ c_out
+    img = affine_transform(sub_img, mat, offset=offset, output_shape=tuple(patch), order=1, mode="constant", cval=0.0)
+    lab = affine_transform(sub_lab, mat, offset=offset, output_shape=tuple(patch), order=0, mode="constant", cval=0)
+    return np.clip(img, 0, 1).astype(np.float32), lab.astype(np.uint8)
+
+
 def volume_path(base: Path, case_id: str) -> Path:
     nii_dir = None
     for candidate in [
@@ -446,7 +513,7 @@ def load_case(base: Path, case_id: str) -> dict | None:
 class UNet3D(nn.Module):
     """Joint bone and lesion. Two channels, lesion clipped to bone at inference."""
 
-    def __init__(self, base_channels: int = 16, double_conv: bool = False, width: int = None):
+    def __init__(self, base_channels: int = 16, double_conv: bool = False, width: int = None, aniso: bool = False):
         super().__init__()
         if width is not None:
             base_channels = width
@@ -454,6 +521,9 @@ class UNet3D(nn.Module):
         self.base_channels = base_channels
         self.width = base_channels
         self.double_conv = double_conv
+        self.aniso = aniso
+        w = base_channels
+        k1 = (2, 2, 1) if aniso else (2, 2, 2)
 
         def block(i, o):
             if double_conv:
@@ -471,136 +541,16 @@ class UNet3D(nn.Module):
                 nn.ReLU(inplace=True),
             )
 
-        c1 = base_channels
-        c2 = base_channels * 2
-        c3 = base_channels * 4
-
-        self.e1 = block(1, c1)
-        self.e2 = block(c1, c2)
-        self.e3 = block(c2, c3)
+        self.e1 = block(1, w)
+        self.e2 = block(w, 2 * w)
+        self.e3 = block(2 * w, 4 * w)
         self.pool = nn.MaxPool3d(2)
-        self.up2 = nn.ConvTranspose3d(c3, c2, 2, stride=2)
-        self.d2 = block(c3, c2)
-        self.up1 = nn.ConvTranspose3d(c2, c1, 2, stride=2)
-        self.d1 = block(c2, c1)
-        self.out = nn.Conv3d(c1, 2, 1)
-
-    def forward(self, x, return_cnet: bool = False):
-        a = self.e1(x)
-        b = self.e2(self.pool(a))
-        c = self.e3(self.pool(b))
-        y = self.d2(torch.cat([self.up2(c), b], 1))
-        y = self.d1(torch.cat([self.up1(y), a], 1))
-        out = self.out(y)
-        if return_cnet:
-            return out, None
-        return out
-
-
-class AttentionGate3D(nn.Module):
-    """3D Attention Gate (Oktay et al., 2018).
-    Weights encoder skip features by attention coefficients derived from coarser gating features.
-    """
-
-    def __init__(self, f_g: int, f_l: int, f_int: int):
-        super().__init__()
-        self.w_g = nn.Sequential(
-            nn.Conv3d(f_g, f_int, kernel_size=1, stride=1, padding=0, bias=False),
-            nn.InstanceNorm3d(f_int),
-        )
-        self.w_x = nn.Sequential(
-            nn.Conv3d(f_l, f_int, kernel_size=1, stride=1, padding=0, bias=False),
-            nn.InstanceNorm3d(f_int),
-        )
-        self.psi = nn.Sequential(
-            nn.Conv3d(f_int, 1, kernel_size=1, stride=1, padding=0, bias=True),
-            nn.InstanceNorm3d(1),
-            nn.Sigmoid(),
-        )
-        self.relu = nn.ReLU(inplace=True)
-
-    def forward(self, g: torch.Tensor, x: torch.Tensor) -> torch.Tensor:
-        w_g = self.w_g(g)
-        w_x = self.w_x(x)
-        if w_g.shape[2:] != w_x.shape[2:]:
-            w_g = nn.functional.interpolate(w_g, size=w_x.shape[2:], mode="trilinear", align_corners=True)
-        psi = self.relu(w_g + w_x)
-        alpha = self.psi(psi)
-        return x * alpha
-
-
-class CNetHead3D(nn.Module):
-    """Candidate/Classification Network (C-Net) Gatekeeper.
-    Predicts patient/patch-level edema presence logit from global bottleneck features.
-    """
-
-    def __init__(self, in_channels: int):
-        super().__init__()
-        self.pool = nn.AdaptiveAvgPool3d(1)
-        self.fc = nn.Sequential(
-            nn.Linear(in_channels, 64),
-            nn.ReLU(inplace=True),
-            nn.Dropout(0.2),
-            nn.Linear(64, 1),
-        )
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        b = x.size(0)
-        pooled = self.pool(x).view(b, -1)
-        return self.fc(pooled).squeeze(-1)
-
-
-class CNetDualUNet3D(nn.Module):
-    """C-Net Gatekeeper + Dual-Channel 3D U-Net.
-
-    1. C-Net head at bottleneck gates edema presence (blocks false positives on negative controls).
-    2. Direct high-fidelity skip connections preserve 100% of bone cortex boundaries without attention dampening.
-    3. Dual-channel output: Channel 0 for Bone, Channel 1 for Edema (BME).
-    """
-
-    def __init__(self, base_channels: int = 16, double_conv: bool = True):
-        super().__init__()
-        self.model_arch = "cnet_dual_unet"
-        self.base_channels = base_channels
-        self.double_conv = double_conv
-
-        def block(i, o):
-            if double_conv:
-                return nn.Sequential(
-                    nn.Conv3d(i, o, 3, padding=1, bias=False),
-                    nn.InstanceNorm3d(o),
-                    nn.ReLU(inplace=True),
-                    nn.Conv3d(o, o, 3, padding=1, bias=False),
-                    nn.InstanceNorm3d(o),
-                    nn.ReLU(inplace=True),
-                )
-            return nn.Sequential(
-                nn.Conv3d(i, o, 3, padding=1, bias=False),
-                nn.InstanceNorm3d(o),
-                nn.ReLU(inplace=True),
-            )
-
-        c1 = base_channels
-        c2 = base_channels * 2
-        c3 = base_channels * 4
-
-        # Encoder
-        self.e1 = block(1, c1)
-        self.e2 = block(c1, c2)
-        self.e3 = block(c2, c3)
-        self.pool = nn.MaxPool3d(2)
-
-        # C-Net presence classifier head at bottleneck
-        self.cnet = CNetHead3D(c3)
-
-        # Decoder with transposed convolutions and direct high-fidelity skip connections
-        self.up2 = nn.ConvTranspose3d(c3, c2, 2, stride=2)
-        self.d2 = block(c3, c2)
-        self.up1 = nn.ConvTranspose3d(c2, c1, 2, stride=2)
-        self.d1 = block(c2, c1)
-
-        # Output dual-channel segmentation head (channel 0: bone, channel 1: edema)
-        self.out = nn.Conv3d(c1, 2, 1)
+        self.pool1 = nn.MaxPool3d(k1)
+        self.up2 = nn.ConvTranspose3d(4 * w, 2 * w, 2, stride=2)
+        self.d2 = block(4 * w, 2 * w)
+        self.up1 = nn.ConvTranspose3d(2 * w, w, k1, stride=k1)
+        self.d1 = block(2 * w, w)
+        self.out = nn.Conv3d(w, 2, 1)
 
     def forward(self, x: torch.Tensor, return_cnet: bool = False):
         a = self.e1(x)
@@ -753,9 +703,12 @@ class AttentionGate3d(nn.Module):
 class AttentionUNet3D(nn.Module):
     """3D U-Net with attention on the skip links. Same two outputs, same patch size."""
 
-    def __init__(self, width: int = 16):
+    def __init__(self, width: int = 16, aniso: bool = False):
         super().__init__()
         w = width
+        # aniso: the first level pools in-plane only, so 16 thick slices are not
+        # halved twice before the network has seen any of them.
+        k1 = (2, 2, 1) if aniso else (2, 2, 2)
 
         def block(i, o):
             return nn.Sequential(
@@ -768,17 +721,18 @@ class AttentionUNet3D(nn.Module):
         self.e2 = block(w, 2 * w)
         self.e3 = block(2 * w, 4 * w)
         self.pool = nn.MaxPool3d(2)
+        self.pool1 = nn.MaxPool3d(k1)
         self.up2 = nn.ConvTranspose3d(4 * w, 2 * w, 2, stride=2)
         self.gate2 = AttentionGate3d(2 * w, 2 * w, w)
         self.d2 = block(4 * w, 2 * w)
-        self.up1 = nn.ConvTranspose3d(2 * w, w, 2, stride=2)
+        self.up1 = nn.ConvTranspose3d(2 * w, w, k1, stride=k1)
         self.gate1 = AttentionGate3d(w, w, max(1, w // 2))
         self.d1 = block(2 * w, w)
         self.out = nn.Conv3d(w, 2, 1)
 
     def forward(self, x, return_cnet: bool = False):
         a = self.e1(x)
-        b = self.e2(self.pool(a))
+        b = self.e2(self.pool1(a))
         c = self.e3(self.pool(b))
         y = self.up2(c)
         b = self.gate2(b, y)
@@ -796,17 +750,19 @@ def build_model(
     arch: str = "mednext",
     base_channels: int = 16,
     double_conv: bool = False,
+    aniso: bool = False,
     **kwargs,
 ) -> nn.Module:
     name = kwargs.get("name", arch)
     width = kwargs.get("width", base_channels)
+    aniso = kwargs.get("aniso", aniso)
     if name == "mednext":
         return MedNeXt3D(base_channels=width)
     if name in ("cnet_dual_unet", "cnet_attention_unet"):
         return CNetDualUNet3D(base_channels=width, double_conv=double_conv)
     if name in ("attention-unet", "attn"):
-        return AttentionUNet3D(width=width)
-    return UNet3D(base_channels=width, double_conv=double_conv)
+        return AttentionUNet3D(width=width, aniso=aniso)
+    return UNet3D(base_channels=width, double_conv=double_conv, aniso=aniso)
 
 
 def targets(labels: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
@@ -1246,7 +1202,15 @@ def main():
                     help="Loss weight for BME edema class to address class imbalance (default: 2.5)")
     ap.add_argument("--bme-threshold", type=float, default=0.35,
                     help="Probability threshold for BME edema segmentation (default: 0.35)")
+    ap.add_argument("--spacing", type=float, default=0.0,
+                    help="resample in-plane to this many mm before training and prediction (0 = native grid)")
+    ap.add_argument("--aniso", action="store_true",
+                    help="first pooling level in-plane only, for thick-slice stacks")
+    ap.add_argument("--aug-spatial", action="store_true",
+                    help="in-plane rotation +-30 deg and zoom 0.7-1.4, slice-wise (needs --resample)")
     args = ap.parse_args()
+    if args.aug_spatial and not args.resample:
+        raise SystemExit("--aug-spatial cuts fresh rotated patches each epoch; add --resample")
     patch = tuple(int(v) for v in args.patch.split(","))
     if len(patch) != 3 or any(p % 4 for p in patch):
         raise SystemExit(f"--patch must be three numbers divisible by 4, got {args.patch}")
@@ -1268,6 +1232,7 @@ def main():
     is_data_experiment = bool(
         args.resample or args.augment or
         args.aug_flip or args.aug_intensity or args.aug_noise or
+        args.spacing or args.aniso or args.aug_spatial or
         (args.sampling_mix != "lesion=0.7,bone=0.0,random=0.3")
     )
     baseline_names = ("results3d", "results3d-attn")
@@ -1300,6 +1265,13 @@ def main():
         "aug_noise": bool(args.aug_noise),
         "sampling_mix": sampling_mix_dict,
     }
+    # Only recorded when used, so fingerprints of earlier runs stay valid.
+    if args.spacing:
+        data_config["spacing_mm"] = args.spacing
+    if args.aniso:
+        data_config["aniso"] = True
+    if args.aug_spatial:
+        data_config["aug_spatial"] = True
 
     out_dir = Path(args.out_dir) if args.out_dir else base / "data" / out_name
 
@@ -1358,6 +1330,8 @@ def main():
         item = load_case(base, cid)
         if not item:
             continue
+        if args.spacing:
+            item["image"], item["labels"] = to_spacing(item["image"], item["labels"], item["spacing"], args.spacing)
         image = pad_volume(item["image"], patch)
         labels = pad_volume(item["labels"], patch)
         case = {
@@ -1452,7 +1426,10 @@ def main():
         flush=True,
     )
     print(
-        f"Patch {patch[0]}×{patch[1]}×{patch[2]} on the original voxel grid, "
+        f"Patch {patch[0]}×{patch[1]}×{patch[2]} on "
+        f"{f'a {args.spacing} mm in-plane grid' if args.spacing else 'the original voxel grid'}"
+        f"{', in-plane-first pooling' if args.aniso else ''}"
+        f"{', rotation/zoom' if args.aug_spatial else ''}, "
         f"{args.patches_per_case} patches per case per epoch"
         f"{' (fresh every epoch)' if args.resample else ''}, width {args.width}, batch {args.batch}"
         f"{', augmented' if args.augment else ''}. "
@@ -1629,7 +1606,8 @@ def main():
             arch = args.model_arch if hasattr(args, "model_arch") else ("attention-unet" if getattr(args, "model", "") == "attention-unet" else "unet3d")
             base_channels = getattr(args, "base_channels", getattr(args, "width", 16))
             double_conv = getattr(args, "double_conv", False)
-            model = build_model(arch=arch, base_channels=base_channels, double_conv=double_conv).to(device)
+            aniso = getattr(args, "aniso", False)
+            model = build_model(arch=arch, base_channels=base_channels, double_conv=double_conv, aniso=aniso).to(device)
             if args.channels_last_3d:
                 model = model.to(memory_format=torch.channels_last_3d)
 
@@ -1729,8 +1707,11 @@ def main():
                     for _ in range(args.patches_per_case):
                         origin = sample_origin(case["image"].shape, case["labels"], rng_epoch_data,
                                                sampling_mix_dict, patch, case["lesion_pts"])
-                        items.append((crop(case["image"], origin, patch).astype(np.float32),
-                                      crop(case["labels"], origin, patch)))
+                        if args.aug_spatial:
+                            items.append(spatial_crop(case["image"], case["labels"], origin, patch, rng_epoch_data))
+                        else:
+                            items.append((crop(case["image"], origin, patch).astype(np.float32),
+                                          crop(case["labels"], origin, patch)))
                 else:
                     items.extend(zip(case["patches"], case["patch_labels"]))
             random.shuffle(items)
@@ -1873,6 +1854,8 @@ def main():
                         "opt": opt.state_dict(),
                         "patch": list(patch),
                         "width": args.width,
+                        "aniso": bool(args.aniso),
+                        "spacing_mm": args.spacing,
                         "model": args.model,
                         "seed": SEED,
                         "data_config": data_config,
@@ -1942,9 +1925,11 @@ def main():
             loaded = load_case(base, case["id"])
             if not loaded:
                 continue
+            # Predicted on the training grid, scored on the scan's own grid.
+            val_image, _ = to_spacing(loaded["image"], None, loaded["spacing"], args.spacing)
             pred = predict_volume(
                 model,
-                loaded["image"],
+                val_image,
                 device,
                 patch,
                 val_batch_size=args.val_batch_size,
@@ -1954,6 +1939,8 @@ def main():
                 cnet_threshold=args.cnet_threshold,
                 bme_threshold=args.bme_threshold,
             )
+            pred = back_to_shape(pred, loaded["labels"].shape)
+            del val_image
             bone_d.append(dice(loaded["labels"], pred, 1))
             bme_d.append(dice(loaded["labels"], pred, 2))
             gt_bone = (loaded["labels"] == 1) | (loaded["labels"] == 2)
@@ -1995,6 +1982,8 @@ def main():
                     "state": model.state_dict(),
                     "patch": list(patch),
                     "width": getattr(args, "width", getattr(model, "base_channels", 16)),
+                    "aniso": bool(getattr(args, "aniso", False)),
+                    "spacing_mm": getattr(args, "spacing", 0.0),
                     "model": getattr(args, "model", getattr(model, "model_arch", "mednext")),
                     "seed": SEED,
                     "data_config": data_config,
@@ -2074,6 +2063,8 @@ def main():
             "device": device,
             "patch": list(patch),
             "width": args.width,
+            "aniso": bool(args.aniso),
+            "spacing_mm": args.spacing,
             "model": args.model,
             "n_cases": len(cases),
             "n_bme": n_bme,
@@ -2126,6 +2117,8 @@ def main():
             "seed": SEED,
             "patch": list(patch),
             "width": args.width,
+            "aniso": bool(args.aniso),
+            "spacing_mm": args.spacing,
             "batch": args.batch,
             "patches_per_case": args.patches_per_case,
             "resample": args.resample,

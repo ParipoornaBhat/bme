@@ -42,7 +42,8 @@ async function ask(question) {
   }
 }
 
-export async function chooseH200(root) {
+/** want: a roll number ("149") to skip the menu, as `pnpm h200 <op> --as 149` does. */
+export async function chooseH200(root, want = "") {
   const env = { ...process.env, ...loadDotEnv(root) };
   const host = env.H200_HOST || "172.18.0.83";
   const accounts = accountsIn(env);
@@ -52,7 +53,14 @@ export async function chooseH200(root) {
     process.exit(1);
   }
   let account = accounts[0];
-  if (accounts.length > 1) {
+  if (want) {
+    account = accounts.find((a) => a.roll === want || a.user === want);
+    if (!account) {
+      console.error(`No password for account ${want} in .env. Have: ${accounts.map((a) => a.roll).join(", ")}`);
+      process.exit(1);
+    }
+    console.log(`Using ${account.user}.`);
+  } else if (accounts.length > 1) {
     console.log("\nWhich college account?");
     accounts.forEach((a, i) => console.log(`  ${i + 1}. ${a.user}`));
     account = accounts[Number(await ask(`Account [1-${accounts.length}]: `)) - 1];

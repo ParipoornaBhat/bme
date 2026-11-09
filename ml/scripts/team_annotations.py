@@ -218,17 +218,25 @@ def cmd_export(base: Path, who: str):
 
 
 def find_team_zips(base: Path) -> list[Path]:
-    """annotations_<who>_<stamp>.zip in the repo root and data/exports/, newest per person.
+    """Teammate zips in the repo root and data/exports/, newest per person and kind.
 
-    Byte-identical copies (the same zip downloaded twice) count once. An older zip
-    from the same person is superseded by their newer one, so two versions of one
-    file never race each other.
+    Picks up annotations_<who>_<stamp>.zip (pnpm zipbme:<who>) and
+    nbme_annotations_<who>.zip (pnpm zipnbme:<who>); the combined
+    nbme_annotations_all*.zip is a hub bundle, not a teammate's work, and is
+    skipped. Byte-identical copies count once. An older zip of the same kind from
+    the same person is superseded by their newer one, so two versions of one file
+    never race each other.
     """
     seen: dict[str, Path] = {}
     for folder in (base, base / "data" / "exports"):
-        for zp in sorted(folder.glob("annotations_*.zip")):
-            seen.setdefault(hashlib.sha256(zp.read_bytes()).hexdigest(), zp)
-    newest: dict[str, tuple[str, Path]] = {}
+        if not folder.is_dir():
+            continue
+        for pattern in ("annotations_*.zip", "nbme_annotations_*.zip"):
+            for zp in sorted(folder.glob(pattern)):
+                if zp.name.startswith("nbme_annotations_all"):
+                    continue
+                seen.setdefault(hashlib.sha256(zp.read_bytes()).hexdigest(), zp)
+    newest: dict[tuple[str, str], tuple[str, Path]] = {}
     for zp in seen.values():
         try:
             with zipfile.ZipFile(zp) as z:
@@ -236,13 +244,17 @@ def find_team_zips(base: Path) -> list[Path]:
         except (zipfile.BadZipFile, KeyError, json.JSONDecodeError):
             print(f"  {zp.name}: not an annotations export, ignored")
             continue
-        who, stamp = man.get("who", "?"), str(man.get("created", ""))
-        if who not in newest or stamp > newest[who][0]:
-            if who in newest:
-                print(f"  {newest[who][1].name}: older than {zp.name}, ignored")
-            newest[who] = (stamp, zp)
+        if not isinstance(man.get("cases"), dict):
+            print(f"  {zp.name}: no case list in manifest.json, ignored")
+            continue
+        key = (man.get("who", "?"), "nbme" if zp.name.startswith("nbme_") else "bme")
+        stamp = str(man.get("created", ""))
+        if key not in newest or stamp > newest[key][0]:
+            if key in newest:
+                print(f"  {newest[key][1].name}: older than {zp.name}, ignored")
+            newest[key] = (stamp, zp)
         else:
-            print(f"  {zp.name}: older than {newest[who][1].name}, ignored")
+            print(f"  {zp.name}: older than {newest[key][1].name}, ignored")
     return [zp for _, zp in sorted(newest.values(), key=lambda t: t[1].name)]
 
 
@@ -273,6 +285,9 @@ def cmd_import(base: Path, zips: list[Path], apply: bool, prefer_incoming: bool,
                     refused += 1
                     continue
                 for name in info["files"]:
+                    # labelmaps and voxel counts are rebuilt from the .seg.nrrd
+                    if not name.endswith(".seg.nrrd"):
+                        continue
                     data = z.read(f"{cid}/{name}")
                     dest = ann / cid / name
                     if not dest.exists():
