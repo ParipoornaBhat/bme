@@ -1886,7 +1886,7 @@ def main():
                 has_cnet = hasattr(model, "cnet")
 
                 if has_cnet:
-                    has_bme = torch.stack([((lb == 2).sum() > 0).float() for lb in lab]).to(device).unsqueeze(1)
+                    has_bme = torch.stack([((lb == 2).sum() > 0).float() for lb in lab]).to(device).view(-1)
                     if use_amp:
                         with torch.amp.autocast(device_type="cuda"):
                             logits, cnet_logit = model(x, return_cnet=True)
@@ -1896,7 +1896,7 @@ def main():
                             tgt, valid = targets(lab[b])
                             loss_seg = loss_seg + dice_focal(logits[b], tgt, valid, bme_weight=args.bme_loss_weight)
                         loss_seg = loss_seg / len(chunk)
-                        loss_cnet = nn.functional.binary_cross_entropy_with_logits(cnet_logit.float(), has_bme.float())
+                        loss_cnet = nn.functional.binary_cross_entropy_with_logits(cnet_logit.view(-1).float(), has_bme.float())
                         loss = loss_seg + args.cnet_weight * loss_cnet
                         if not torch.isfinite(loss):
                             amp_skipped_epoch += 1
@@ -1922,7 +1922,7 @@ def main():
                             tgt, valid = targets(lab[b])
                             loss_seg = loss_seg + dice_focal(logits[b], tgt, valid, bme_weight=args.bme_loss_weight)
                         loss_seg = loss_seg / len(chunk)
-                        loss_cnet = nn.functional.binary_cross_entropy_with_logits(cnet_logit, has_bme)
+                        loss_cnet = nn.functional.binary_cross_entropy_with_logits(cnet_logit.view(-1).float(), has_bme.float())
                         loss = loss_seg + args.cnet_weight * loss_cnet
                         loss.backward()
                         opt.step()
