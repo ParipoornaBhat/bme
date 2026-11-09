@@ -37,6 +37,7 @@ import nibabel as nib
 import numpy as np
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from scipy.ndimage import affine_transform, zoom
 from scipy.ndimage import label as cc_label
 import scipy.ndimage as ndi
@@ -288,34 +289,87 @@ def augment(image: np.ndarray, labels: np.ndarray, rng: np.random.Generator):
     return np.ascontiguousarray(image, dtype=np.float32), np.ascontiguousarray(labels)
 
 
-def to_spacing(image: np.ndarray, labels: np.ndarray | None, spacing, target: float):
-    """Resample in-plane only to `target` mm; slices are left alone.
+def parse_target_spacing(target) -> tuple[float, float, float] | None:
+    """Parse target spacing into a 3-tuple (sx, sy, sz) in mm.
 
-    Clinical knee stacks here are ~0.35 mm in-plane and 3.6-5.8 mm between
-    slices. At 0.35 mm a 96-pixel patch sees ~3 cm of a ~14 cm knee; at 1 mm a
-    160-pixel patch sees the whole cross-section. Through-plane spacing is not
-    touched: interpolating between 4 mm slices would invent anatomy.
+    Supports:
+      - None, 0, 0.0, "0", "none", "native" -> None (keep native resolution)
+      - (0.5, 0.5, 3.0) or [0.5, 0.5, 3.0] -> (0.5, 0.5, 3.0)
+      - "0.5,0.5,3.0" or "0.5x0.5x3.0" or "0.5*0.5*3.0" -> (0.5, 0.5, 3.0)
+      - 0.5 or "0.5" -> (0.5, 0.5, 3.0) [default 3.0 mm slice thickness]
     """
-    if not target:
+    if target is None:
+        return None
+    if isinstance(target, (list, tuple)):
+        if len(target) == 3:
+            return (float(target[0]), float(target[1]), float(target[2]))
+        if len(target) == 1:
+            val = float(target[0])
+            return (val, val, 3.0) if val > 0 else None
+    if isinstance(target, (int, float)):
+        val = float(target)
+        if val <= 0:
+            return None
+        return (val, val, 3.0)
+    if isinstance(target, str):
+        cleaned = target.strip().lower()
+        if cleaned in ("", "0", "0.0", "none", "native", "false"):
+            return None
+        parts = [p.strip() for p in cleaned.replace("x", ",").replace("*", ",").split(",") if p.strip()]
+        if len(parts) == 3:
+            return (float(parts[0]), float(parts[1]), float(parts[2]))
+        if len(parts) == 1:
+            val = float(parts[0])
+            return (val, val, 3.0) if val > 0 else None
+    return None
+
+
+def to_spacing(image: np.ndarray, labels: np.ndarray | None, spacing, target):
+    """Resample volume (and labels) to physical target spacing (standardizing to 0.5 x 0.5 x 3.0 mm).
+
+    Normalizes voxel size across diverse scanner acquisitions so patches cover the
+    identical physical anatomical volume across every patient.
+    """
+    tgt = parse_target_spacing(target)
+    if tgt is None:
         return image, labels
-    f = (float(spacing[0]) / target, float(spacing[1]) / target, 1.0)
-    if abs(f[0] - 1) < 0.02 and abs(f[1] - 1) < 0.02:
+    sx, sy, sz = float(spacing[0]), float(spacing[1]), float(spacing[2])
+    tx, ty, tz = tgt
+    fx = sx / tx
+    fy = sy / ty
+    fz = sz / tz
+    factors = (fx, fy, fz)
+
+    # If within 2% of target on all axes, skip resampling
+    if all(abs(f - 1.0) < 0.02 for f in factors):
         return image, labels
-    image = zoom(image, f, order=1).astype(np.float32)
+
+    out_shape = tuple(max(1, int(round(s * f))) for s, f in zip(image.shape, factors))
+    if out_shape == image.shape:
+        return image, labels
+
+    # Fast multi-threaded 3D interpolation with PyTorch
+    t_img = torch.from_numpy(np.ascontiguousarray(image, dtype=np.float32)).unsqueeze(0).unsqueeze(0)
+    res_img = F.interpolate(t_img, size=out_shape, mode="trilinear", align_corners=False).squeeze(0).squeeze(0).numpy()
+    np.clip(res_img, 0.0, 1.0, out=res_img)
+
+    res_lab = None
     if labels is not None:
-        labels = zoom(labels, f, order=0).astype(np.uint8)
-    return image, labels
+        t_lab = torch.from_numpy(np.ascontiguousarray(labels, dtype=np.float32)).unsqueeze(0).unsqueeze(0)
+        # Nearest-neighbor for discrete segmentation classes {0, 1, 2, 3}
+        res_lab = F.interpolate(t_lab, size=out_shape, mode="nearest").squeeze(0).squeeze(0).to(torch.uint8).numpy()
+
+    return res_img, res_lab
 
 
 def back_to_shape(mask: np.ndarray, shape) -> np.ndarray:
     """Nearest-neighbour resize of a label mask to an exact shape."""
-    if tuple(mask.shape) == tuple(shape):
+    shape = tuple(int(s) for s in shape)
+    if tuple(mask.shape) == shape:
         return mask
-    idx = [
-        np.minimum((np.arange(n) + 0.5) * mask.shape[ax] / n, mask.shape[ax] - 1).astype(int)
-        for ax, n in enumerate(shape)
-    ]
-    return mask[np.ix_(*idx)]
+    t = torch.from_numpy(np.ascontiguousarray(mask, dtype=np.float32)).unsqueeze(0).unsqueeze(0)
+    res = F.interpolate(t, size=shape, mode="nearest").squeeze(0).squeeze(0).to(torch.uint8).numpy()
+    return res
 
 
 def spatial_crop(image: np.ndarray, labels: np.ndarray, origin, patch, rng: np.random.Generator,
@@ -1202,8 +1256,8 @@ def main():
                     help="Loss weight for BME edema class to address class imbalance (default: 2.5)")
     ap.add_argument("--bme-threshold", type=float, default=0.35,
                     help="Probability threshold for BME edema segmentation (default: 0.35)")
-    ap.add_argument("--spacing", type=float, default=0.0,
-                    help="resample in-plane to this many mm before training and prediction (0 = native grid)")
+    ap.add_argument("--spacing", type=str, default="0.5,0.5,3.0",
+                    help="Physical voxel spacing in mm for isotropic standardization (default: 0.5,0.5,3.0; '0' or 'none' for native grid)")
     ap.add_argument("--aniso", action="store_true",
                     help="first pooling level in-plane only, for thick-slice stacks")
     ap.add_argument("--aug-spatial", action="store_true",
@@ -1266,8 +1320,9 @@ def main():
         "sampling_mix": sampling_mix_dict,
     }
     # Only recorded when used, so fingerprints of earlier runs stay valid.
-    if args.spacing:
-        data_config["spacing_mm"] = args.spacing
+    tgt_spacing = parse_target_spacing(args.spacing)
+    if tgt_spacing:
+        data_config["spacing_mm"] = list(tgt_spacing)
     if args.aniso:
         data_config["aniso"] = True
     if args.aug_spatial:
@@ -1330,8 +1385,9 @@ def main():
         item = load_case(base, cid)
         if not item:
             continue
-        if args.spacing:
-            item["image"], item["labels"] = to_spacing(item["image"], item["labels"], item["spacing"], args.spacing)
+        if tgt_spacing:
+            item["image"], item["labels"] = to_spacing(item["image"], item["labels"], item["spacing"], tgt_spacing)
+            item["bme_voxels"] = int((item["labels"] == 2).sum())
         image = pad_volume(item["image"], patch)
         labels = pad_volume(item["labels"], patch)
         case = {
@@ -1855,7 +1911,7 @@ def main():
                         "patch": list(patch),
                         "width": args.width,
                         "aniso": bool(args.aniso),
-                        "spacing_mm": args.spacing,
+                        "spacing_mm": list(tgt_spacing) if tgt_spacing else None,
                         "model": args.model,
                         "seed": SEED,
                         "data_config": data_config,
@@ -1926,7 +1982,7 @@ def main():
             if not loaded:
                 continue
             # Predicted on the training grid, scored on the scan's own grid.
-            val_image, _ = to_spacing(loaded["image"], None, loaded["spacing"], args.spacing)
+            val_image, _ = to_spacing(loaded["image"], None, loaded["spacing"], tgt_spacing)
             pred = predict_volume(
                 model,
                 val_image,
@@ -1983,7 +2039,7 @@ def main():
                     "patch": list(patch),
                     "width": getattr(args, "width", getattr(model, "base_channels", 16)),
                     "aniso": bool(getattr(args, "aniso", False)),
-                    "spacing_mm": getattr(args, "spacing", 0.0),
+                    "spacing_mm": list(tgt_spacing) if tgt_spacing else None,
                     "model": getattr(args, "model", getattr(model, "model_arch", "mednext")),
                     "seed": SEED,
                     "data_config": data_config,
@@ -2064,7 +2120,7 @@ def main():
             "patch": list(patch),
             "width": args.width,
             "aniso": bool(args.aniso),
-            "spacing_mm": args.spacing,
+            "spacing_mm": list(tgt_spacing) if tgt_spacing else None,
             "model": args.model,
             "n_cases": len(cases),
             "n_bme": n_bme,
@@ -2118,7 +2174,7 @@ def main():
             "patch": list(patch),
             "width": args.width,
             "aniso": bool(args.aniso),
-            "spacing_mm": args.spacing,
+            "spacing_mm": list(tgt_spacing) if tgt_spacing else None,
             "batch": args.batch,
             "patches_per_case": args.patches_per_case,
             "resample": args.resample,
