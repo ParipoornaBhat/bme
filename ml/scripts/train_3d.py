@@ -373,7 +373,7 @@ def back_to_shape(mask: np.ndarray, shape) -> np.ndarray:
 
 
 def spatial_crop(image: np.ndarray, labels: np.ndarray, origin, patch, rng: np.random.Generator,
-                 p_rot: float = 0.2, p_scale: float = 0.2, max_deg: float = 30.0,
+                 p_rot: float = 0.5, p_scale: float = 0.5, max_deg: float = 30.0,
                  scale_range: tuple[float, float] = (0.7, 1.4)):
     """Cut one patch, rotated and/or zoomed in-plane about its centre.
 
@@ -1348,6 +1348,10 @@ def main():
                     help="first pooling level in-plane only, for thick-slice stacks")
     ap.add_argument("--aug-spatial", action="store_true",
                     help="in-plane rotation +-30 deg and zoom 0.7-1.4, slice-wise (needs --resample)")
+    ap.add_argument("--aug-p-rot", type=float, default=0.5,
+                    help="probability of in-plane rotation per patch (default: 0.5)")
+    ap.add_argument("--aug-p-scale", type=float, default=0.5,
+                    help="probability of in-plane scaling per patch (default: 0.5)")
     args = ap.parse_args()
     if args.aug_spatial and not args.resample:
         raise SystemExit("--aug-spatial cuts fresh rotated patches each epoch; add --resample")
@@ -1850,7 +1854,7 @@ def main():
                         origin = sample_origin(case["image"].shape, case["labels"], rng_epoch_data,
                                                sampling_mix_dict, patch, case["lesion_pts"])
                         if args.aug_spatial:
-                            items.append(spatial_crop(case["image"], case["labels"], origin, patch, rng_epoch_data))
+                            items.append(spatial_crop(case["image"], case["labels"], origin, patch, rng_epoch_data, p_rot=args.aug_p_rot, p_scale=args.aug_p_scale))
                         else:
                             items.append((crop(case["image"], origin, patch).astype(np.float32),
                                           crop(case["labels"], origin, patch)))
