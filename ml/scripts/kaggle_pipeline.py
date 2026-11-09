@@ -951,6 +951,32 @@ def run_pipeline(
     return run_state
 
 
+def safe_clear_directory(target: Path, retries: int = 5, delay: float = 0.5) -> None:
+    """Safely and thoroughly remove a directory on Windows, retrying if files are briefly locked."""
+    if not target.exists():
+        return
+    for _ in range(retries):
+        try:
+            shutil.rmtree(target, ignore_errors=False)
+            return
+        except Exception:
+            time.sleep(delay)
+    shutil.rmtree(target, ignore_errors=True)
+    if target.exists():
+        for item in list(target.iterdir()):
+            try:
+                if item.is_dir():
+                    shutil.rmtree(item, ignore_errors=True)
+                else:
+                    item.unlink(missing_ok=True)
+            except Exception:
+                pass
+        try:
+            target.rmdir()
+        except Exception:
+            pass
+
+
 def compute_source_fingerprint(src_dir: Path) -> str:
     """Compute cheap fingerprint of source data (file names, sizes and mtimes only; no case IDs in logs)."""
     data_dir = src_dir / "data"
@@ -967,14 +993,38 @@ def compute_source_fingerprint(src_dir: Path) -> str:
     return hashlib.sha256("\n".join(entries).encode("utf-8")).hexdigest()
 
 
-def run_export_with_fingerprint(src_dir: Path, export_dir: Path, mapping_file: Path) -> None:
+def run_export_with_fingerprint(
+    src_dir: Path,
+    export_dir: Path,
+    mapping_file: Path,
+    force: bool = False,
+) -> None:
     """Compare cheap source fingerprint. Skip if unchanged; else run export, verify, compare, deid."""
     staging_dir = get_staging_dir(src_dir)
     fingerprint_file = staging_dir / "source_fingerprint.json"
     curr_fp = compute_source_fingerprint(src_dir)
 
+    # Detect case count mismatch between source annotations and existing mapping
+    src_ann_dir = src_dir / "data" / "annotations"
+    src_case_count = 0
+    if src_ann_dir.is_dir():
+        src_case_count = len([
+            p for p in src_ann_dir.iterdir()
+            if p.is_dir() and (p / f"{p.name}.seg.nrrd").exists()
+        ])
+
+    mapped_case_count = 0
+    if mapping_file.exists():
+        try:
+            m_data = json.loads(mapping_file.read_text(encoding="utf-8"))
+            mapped_case_count = len(m_data.get("cases", []))
+        except Exception:
+            mapped_case_count = 0
+
+    cases_mismatch = (src_case_count > 0 and mapped_case_count > 0 and src_case_count != mapped_case_count)
+
     skip_export = False
-    if fingerprint_file.exists() and export_dir.exists() and any(export_dir.iterdir()):
+    if not force and not cases_mismatch and fingerprint_file.exists() and export_dir.exists() and any(export_dir.iterdir()):
         try:
             fp_data = json.loads(fingerprint_file.read_text(encoding="utf-8"))
             saved_fp = fp_data.get("fingerprint") if isinstance(fp_data, dict) else fp_data
@@ -999,7 +1049,7 @@ def run_export_with_fingerprint(src_dir: Path, export_dir: Path, mapping_file: P
     export_exists_with_files = export_dir.exists() and any(export_dir.iterdir())
     need_full_export = True
 
-    if export_exists_with_files and mapping_file.exists():
+    if not force and not cases_mismatch and export_exists_with_files and mapping_file.exists():
         print("Existing export folder detected. Testing verification before re-exporting...")
         cmd_ver_test = [
             sys.executable,
@@ -1015,14 +1065,19 @@ def run_export_with_fingerprint(src_dir: Path, export_dir: Path, mapping_file: P
             print("[OK] Existing export folder passed verification.")
         else:
             print(f"[INFO] Existing export directory '{export_dir.name}' is outdated or incomplete. Automatically clearing to regenerate...")
-            shutil.rmtree(export_dir, ignore_errors=True)
+            safe_clear_directory(export_dir)
             need_full_export = True
+    elif export_exists_with_files:
+        print(f"[INFO] Dataset change or force requested (source: {src_case_count} cases, mapped: {mapped_case_count} cases). Clearing '{export_dir.name}'...")
+        safe_clear_directory(export_dir)
+        need_full_export = True
 
     if need_full_export:
         print("[EXPORT] 1/4: Exporting de-identified dataset (export_for_colab.py)...")
         cmd_export = [
             sys.executable,
             str(export_script),
+            "--clean",
             "--src", str(src_dir),
             "--dst", str(export_dir),
             "--mapping-file", str(mapping_file),
@@ -1245,7 +1300,7 @@ def run_update_dataset(
 
     # 1. Export with fingerprint (clears outdated export if any mismatch)
     print("\n[STEP 1/3] Exporting and validating dataset...")
-    run_export_with_fingerprint(src_dir, export_dir, mapping_file)
+    run_export_with_fingerprint(src_dir, export_dir, mapping_file, force=force_export)
 
     # 2. Record approval hash
     print("\n[STEP 2/3] Recording dataset approval...")

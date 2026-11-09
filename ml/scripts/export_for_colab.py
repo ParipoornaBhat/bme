@@ -396,15 +396,22 @@ def run_dry_run(src_dir: Path, manifest: list[dict]):
     print("=" * 60)
 
 
-def run_export(src_dir: Path, dst_dir: Path, manifest: list[dict], mapping_file: Path):
-    # Requirement: Refuse to run when dst_dir exists and is non-empty
+def run_export(src_dir: Path, dst_dir: Path, manifest: list[dict], mapping_file: Path, clean: bool = False):
+    # Requirement: Refuse to run when dst_dir exists and is non-empty unless --clean is passed
     if dst_dir.exists():
         existing_items = list(dst_dir.iterdir())
         if existing_items:
-            raise SystemExit(
-                f"[ERROR] Destination directory ({dst_dir}) already exists and is non-empty ({len(existing_items)} items found). "
-                "Refusing to overwrite or merge. Please specify an empty or non-existent destination."
-            )
+            if clean:
+                for item in existing_items:
+                    if item.is_dir():
+                        shutil.rmtree(item, ignore_errors=True)
+                    else:
+                        item.unlink(missing_ok=True)
+            else:
+                raise SystemExit(
+                    f"[ERROR] Destination directory ({dst_dir}) already exists and is non-empty ({len(existing_items)} items found). "
+                    "Refusing to overwrite or merge. Please specify an empty or non-existent destination."
+                )
 
     # Count eligible cases that have both volume and segmentation
     eligible_count = 0
@@ -997,6 +1004,7 @@ def main():
                     help="Path to mapping file (MUST be strictly OUTSIDE repository, data/, and --dst)")
     ap.add_argument("--scripts-dir", type=str, default=None,
                     help="Directory containing ml/scripts (seg2nifti, train_3d)")
+    ap.add_argument("--clean", action="store_true", help="Clean destination directory if it already exists")
     ap.add_argument("--dry-run", action="store_true", help="Print summary counts without exporting")
     ap.add_argument("--verify", action="store_true", help="Verify exported files against source data")
     ap.add_argument("--compare-training-inputs", action="store_true",
@@ -1035,7 +1043,7 @@ def main():
 
     existing_manifest = load_and_validate_existing_mapping(mapping_file, patient_map)
     manifest = build_export_manifest(cases, patient_map, existing_manifest=existing_manifest)
-    run_export(src_dir, dst_dir, manifest, mapping_file)
+    run_export(src_dir, dst_dir, manifest, mapping_file, clean=args.clean)
 
 
 if __name__ == "__main__":

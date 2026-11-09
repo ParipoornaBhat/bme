@@ -269,13 +269,13 @@ export default function Train3D({
     }
   };
 
-  const stopKaggle = async () => {
+  const stopKaggle = async (reset = false) => {
     await fetch("/api/training-3d/kaggle", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ action: "cancel-watch" }),
+      body: JSON.stringify({ action: "cancel-watch", reset }),
     });
-    setTimeout(loadKaggle, 500);
+    setTimeout(loadKaggle, 400);
   };
 
   const n = state?.annotated ?? 0;
@@ -553,6 +553,7 @@ export default function Train3D({
                 IMPORTING: 95,
                 COMPLETED: 100,
                 FAILED: 100,
+                CANCELLED: 100,
                 IDLE: 0,
               };
               const progressPercent = progressMap[phase] ?? (kaggleState?.running ? 75 : 0);
@@ -565,7 +566,9 @@ export default function Train3D({
                       <div>
                         <div className="flex items-center gap-2 flex-wrap">
                           <Database className="h-4 w-4 text-primary" />
-                          <span className="text-xs sm:text-sm font-bold text-foreground">3D Dataset (76 Cases)</span>
+                          <span className="text-xs sm:text-sm font-bold text-foreground">
+                            3D Dataset ({kaggleState?.sourceStats?.totalCases ?? 76} Cases)
+                          </span>
                           <span className="rounded-full bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border border-emerald-500/20 px-2.5 py-0.5 text-[11px] font-semibold">
                             {kaggleState?.sourceStats?.totalCases ?? n} Cases ({kaggleState?.sourceStats?.bme ?? 61} BME, {kaggleState?.sourceStats?.nonBme ?? 15} Non-BME)
                           </span>
@@ -644,6 +647,8 @@ export default function Train3D({
                             className={`inline-block h-2 w-2 rounded-full ${
                               phase === "COMPLETED"
                                 ? "bg-emerald-500"
+                                : phase === "CANCELLED"
+                                ? "bg-amber-500"
                                 : phase === "FAILED"
                                 ? "bg-destructive"
                                 : "bg-primary animate-ping"
@@ -659,6 +664,8 @@ export default function Train3D({
                           className={`h-2 rounded-full transition-all duration-500 ${
                             phase === "COMPLETED"
                               ? "bg-emerald-500"
+                              : phase === "CANCELLED"
+                              ? "bg-amber-500"
                               : phase === "FAILED"
                               ? "bg-destructive"
                               : "bg-primary"
@@ -678,23 +685,32 @@ export default function Train3D({
                         </div>
                       )}
 
-                      <div className="flex items-center justify-end gap-2 pt-1">
-                        {kaggleState?.running ? (
+                      <div className="flex items-center justify-end gap-2 pt-1 flex-wrap">
+                        {(kaggleState?.running || phase === "RUNNING" || phase === "QUEUED") && (
                           <button
-                            onClick={stopKaggle}
-                            className="inline-flex items-center gap-1 text-[11px] text-destructive hover:underline"
+                            onClick={() => stopKaggle(false)}
+                            className="inline-flex items-center gap-1.5 rounded bg-destructive/10 border border-destructive/30 px-2.5 py-1 text-xs font-semibold text-destructive hover:bg-destructive/20 transition"
                           >
-                            <Square className="h-3 w-3" /> Stop Watcher
+                            <Square className="h-3 w-3" /> Stop / Cancel Run
                           </button>
-                        ) : phase === "FAILED" || (kaggleState?.runState && phase !== "COMPLETED") ? (
+                        )}
+                        {(phase === "FAILED" || phase === "CANCELLED" || (kaggleState?.runState && phase !== "COMPLETED")) && (
                           <button
                             onClick={() => executeKaggleAction("onetap", { resume: true, mode: runMode })}
                             disabled={kaggleBusy}
-                            className="inline-flex items-center gap-1.5 rounded bg-primary/10 border border-primary/30 px-3 py-1 text-xs font-semibold text-primary hover:bg-primary/20"
+                            className="inline-flex items-center gap-1.5 rounded bg-primary/10 border border-primary/30 px-3 py-1 text-xs font-semibold text-primary hover:bg-primary/20 transition"
                           >
-                            <RefreshCw className="h-3 w-3" /> Retry / Resume from saved state
+                            <RefreshCw className="h-3 w-3" /> Retry / Resume
                           </button>
-                        ) : null}
+                        )}
+                        {(phase === "CANCELLED" || phase === "FAILED" || phase === "COMPLETED") && (
+                          <button
+                            onClick={() => stopKaggle(true)}
+                            className="inline-flex items-center gap-1 text-[11px] text-muted-foreground hover:text-foreground hover:underline ml-1"
+                          >
+                            Dismiss / Reset
+                          </button>
+                        )}
                       </div>
                     </div>
                   )}
@@ -1004,12 +1020,20 @@ export default function Train3D({
                       >
                         <RefreshCw className="h-3.5 w-3.5" /> Refresh Status
                       </button>
-                      {kaggleState?.running && (
+                      {(kaggleState?.running || kaggleState?.runState?.phase === "RUNNING") && (
                         <button
-                          onClick={stopKaggle}
+                          onClick={() => stopKaggle(false)}
                           className="inline-flex items-center gap-1.5 rounded-md border border-destructive px-3 py-1.5 text-xs text-destructive hover:bg-destructive/10"
                         >
-                          <Square className="h-3.5 w-3.5" /> Stop Watcher
+                          <Square className="h-3.5 w-3.5" /> Stop / Cancel Run
+                        </button>
+                      )}
+                      {kaggleState?.runState && (
+                        <button
+                          onClick={() => stopKaggle(true)}
+                          className="inline-flex items-center gap-1.5 rounded-md border border-border px-3 py-1.5 text-xs text-muted-foreground hover:bg-muted"
+                        >
+                          Reset State
                         </button>
                       )}
                     </div>

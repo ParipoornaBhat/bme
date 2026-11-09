@@ -16,6 +16,8 @@ const ALLOWED_ACTIONS = [
   "onetap",
   "status",
   "cancel-watch",
+  "stop",
+  "reset",
   "fetch-results",
   "download",
   "import",
@@ -305,11 +307,13 @@ export async function POST(req: NextRequest) {
     );
   }
 
-  // Handle cancel-watch
-  if (action === "cancel-watch") {
+  // Handle cancel-watch, stop, or reset
+  if (action === "cancel-watch" || action === "stop" || action === "reset") {
+    let stoppedPid: number | null = null;
     if (active) {
       try {
         process.kill(active.pid);
+        stoppedPid = active.pid;
       } catch {
         // already stopped
       }
@@ -318,9 +322,26 @@ export async function POST(req: NextRequest) {
       } catch {
         // ignore
       }
-      return NextResponse.json({ ok: true, stopped: active.pid });
     }
-    return NextResponse.json({ ok: true, note: "nothing running" });
+
+    const runStateFile = path.join(stagingDir, "run_state.json");
+    if (fs.existsSync(runStateFile)) {
+      try {
+        if (action === "reset" || body.reset === true) {
+          fs.unlinkSync(runStateFile);
+        } else {
+          const st = JSON.parse(fs.readFileSync(runStateFile, "utf8"));
+          st.phase = "CANCELLED";
+          st.status_message = "Stopped by user";
+          st.updated_at = Math.floor(Date.now() / 1000);
+          fs.writeFileSync(runStateFile, JSON.stringify(st, null, 2), "utf8");
+        }
+      } catch {
+        // ignore
+      }
+    }
+
+    return NextResponse.json({ ok: true, stopped: stoppedPid });
   }
 
   // Check single-job lock
