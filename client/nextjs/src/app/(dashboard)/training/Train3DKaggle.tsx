@@ -756,7 +756,7 @@ export default function Train3DKaggle({
                     </span>
                   </div>
 
-                  {/* Metric Summary Cards */}
+                  {/* Metric Summary Cards - Clinical Standard Split (Positive vs Negative) */}
                   <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
                     <div className="rounded-lg border border-border bg-muted/30 p-3 space-y-1">
                       <span className="text-[10px] font-bold uppercase tracking-wider text-muted-foreground">Bone Dice</span>
@@ -768,24 +768,40 @@ export default function Train3DKaggle({
                       <p className="text-[10px] text-muted-foreground">Overlap with bone cortex</p>
                     </div>
 
-                    <div className="rounded-lg border border-border bg-muted/30 p-3 space-y-1">
-                      <span className="text-[10px] font-bold uppercase tracking-wider text-muted-foreground">BME (Edema) Dice</span>
-                      <div className="text-lg font-bold text-emerald-500">
-                        {runMetrics.summary?.bme_dice?.mean != null
+                    <div className="rounded-lg border border-emerald-500/30 bg-emerald-500/5 p-3 space-y-1">
+                      <span className="text-[10px] font-bold uppercase tracking-wider text-emerald-400">
+                        {runMetrics.summary?.bme_dice_pos?.mean != null ? "BME Dice (Positives Only)" : "BME (Edema) Dice"}
+                      </span>
+                      <div className="text-lg font-bold text-emerald-400">
+                        {runMetrics.summary?.bme_dice_pos?.mean != null
+                          ? `${runMetrics.summary.bme_dice_pos.mean.toFixed(3)} ± ${runMetrics.summary.bme_dice_pos.std.toFixed(3)}`
+                          : runMetrics.summary?.bme_dice?.mean != null
                           ? `${runMetrics.summary.bme_dice.mean.toFixed(3)} ± ${runMetrics.summary.bme_dice.std.toFixed(3)}`
                           : "N/A"}
                       </div>
-                      <p className="text-[10px] text-muted-foreground">Overlap with lesion volume</p>
+                      <p className="text-[10px] text-muted-foreground">
+                        {runMetrics.summary?.bme_dice_pos?.mean != null && runMetrics.summary?.bme_dice?.mean != null
+                          ? `True lesion (Overall: ${runMetrics.summary.bme_dice.mean.toFixed(3)})`
+                          : "Overlap with lesion volume"}
+                      </p>
                     </div>
 
-                    <div className="rounded-lg border border-border bg-muted/30 p-3 space-y-1">
-                      <span className="text-[10px] font-bold uppercase tracking-wider text-muted-foreground">Lesion Sensitivity</span>
-                      <div className="text-lg font-bold text-foreground">
-                        {runMetrics.summary?.lesion_sensitivity?.mean != null
+                    <div className="rounded-lg border border-sky-500/30 bg-sky-500/5 p-3 space-y-1">
+                      <span className="text-[10px] font-bold uppercase tracking-wider text-sky-400">
+                        {runMetrics.summary?.clean_scan_specificity?.mean != null ? "Scan Specificity (TNR)" : "Lesion Sensitivity"}
+                      </span>
+                      <div className="text-lg font-bold text-sky-400">
+                        {runMetrics.summary?.clean_scan_specificity?.mean != null
+                          ? `${(runMetrics.summary.clean_scan_specificity.mean * 100).toFixed(1)}%`
+                          : runMetrics.summary?.lesion_sensitivity?.mean != null
                           ? `${(runMetrics.summary.lesion_sensitivity.mean * 100).toFixed(1)}%`
                           : "N/A"}
                       </div>
-                      <p className="text-[10px] text-muted-foreground">Patches touched by model</p>
+                      <p className="text-[10px] text-muted-foreground">
+                        {runMetrics.summary?.clean_scan_specificity?.mean != null
+                          ? "Healthy scans 100% clean"
+                          : "Patches touched by model"}
+                      </p>
                     </div>
 
                     <div className="rounded-lg border border-border bg-muted/30 p-3 space-y-1">
@@ -812,7 +828,9 @@ export default function Train3DKaggle({
                             <tr className="border-b border-border bg-muted/20 text-muted-foreground text-left font-medium">
                               <th className="p-2.5">Fold</th>
                               <th className="p-2.5">Bone Dice</th>
-                              <th className="p-2.5">BME Dice</th>
+                              <th className="p-2.5">BME Dice (Pos)</th>
+                              <th className="p-2.5">Overall Dice</th>
+                              <th className="p-2.5">TNR (Specificity)</th>
                               <th className="p-2.5">Sensitivity</th>
                               <th className="p-2.5">FP / Case</th>
                               <th className="p-2.5">Presence Match</th>
@@ -823,7 +841,13 @@ export default function Train3DKaggle({
                               <tr key={idx} className="hover:bg-muted/30">
                                 <td className="p-2.5 font-semibold font-mono">Fold {f.fold ?? idx}</td>
                                 <td className="p-2.5 font-mono">{f.bone_dice != null ? f.bone_dice.toFixed(3) : "—"}</td>
-                                <td className="p-2.5 font-mono text-emerald-500 font-semibold">{f.bme_dice != null ? f.bme_dice.toFixed(3) : "—"}</td>
+                                <td className="p-2.5 font-mono text-emerald-400 font-semibold">
+                                  {f.bme_dice_pos != null ? f.bme_dice_pos.toFixed(3) : f.bme_dice != null ? f.bme_dice.toFixed(3) : "—"}
+                                </td>
+                                <td className="p-2.5 font-mono text-muted-foreground">{f.bme_dice != null ? f.bme_dice.toFixed(3) : "—"}</td>
+                                <td className="p-2.5 font-mono text-sky-400 font-medium">
+                                  {f.clean_scan_specificity != null ? `${(f.clean_scan_specificity * 100).toFixed(1)}%` : "—"}
+                                </td>
                                 <td className="p-2.5 font-mono">{f.lesion_sensitivity != null ? `${(f.lesion_sensitivity * 100).toFixed(1)}%` : "—"}</td>
                                 <td className="p-2.5 font-mono">{f.fp_per_case != null ? f.fp_per_case.toFixed(1) : "—"}</td>
                                 <td className="p-2.5 font-mono">{f.presence_correct != null ? `${f.presence_correct}/${f.presence_n}` : "—"}</td>

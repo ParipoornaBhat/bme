@@ -1015,6 +1015,7 @@ DEFAULT_ARCH = {"model": "unet", "width": 16, "patch": list(PATCH)}
 
 SUMMARY_KEYS = (
     "bone_dice", "bme_dice", "lesion_sensitivity", "fp_per_case",
+    "bme_dice_pos", "lesion_sensitivity_pos", "clean_scan_specificity", "fp_per_neg_case",
     "bone_precision", "bone_recall", "bone_f1", "bone_iou",
     "edema_precision", "edema_recall", "edema_f1", "edema_iou",
 )
@@ -1975,6 +1976,11 @@ def main():
 
         t_val_start = time.time()
         bone_d, bme_d, sens, fps, present_hit, present_n = [], [], [], [], 0, 0
+        bme_d_pos = []
+        sens_pos = []
+        neg_clean_hits = 0
+        neg_n = 0
+        fps_neg = []
         bone_box = [0, 0, 0]
         edema_box = [0, 0, 0]
         for val_idx, case in enumerate(val, 1):
@@ -2016,6 +2022,14 @@ def main():
             pr_pos = bool((pred == 2).any())
             present_n += 1
             present_hit += int(gt_pos == pr_pos)
+            if gt_pos:
+                bme_d_pos.append(bme_d[-1])
+                sens_pos.append(s)
+            else:
+                neg_n += 1
+                if not pr_pos:
+                    neg_clean_hits += 1
+                fps_neg.append(fp)
             prefix = f"  {case['id']}" if args.show_ids else f"  val case {val_idx}/{len(val)}"
             print(
                 f"{prefix}  bone_dice={bone_d[-1]:.3f}  bme_dice={bme_d[-1]:.3f}  "
@@ -2084,6 +2098,17 @@ def main():
             if amp_pct > 1.0:
                 print(f"[WARNING] fold {fold}: AMP skipped steps ({amp_pct:.2f}%) exceeded 1% threshold!", flush=True)
 
+        bme_pos_mean = float(np.mean(bme_d_pos)) if bme_d_pos else float(np.mean(bme_d))
+        sens_pos_mean = float(np.mean(sens_pos)) if sens_pos else float(np.mean(sens))
+        clean_spec = float(neg_clean_hits / neg_n) if neg_n > 0 else 1.0
+        fps_neg_mean = float(np.mean(fps_neg)) if fps_neg else 0.0
+
+        print(
+            f"fold {fold}: BME Dice (Positives Only) = {bme_pos_mean:.3f} (n={len(bme_d_pos)})  |  "
+            f"Negative Specificity (TNR) = {clean_spec * 100:.1f}% (n={neg_n}, FP/neg={fps_neg_mean:.1f})",
+            flush=True,
+        )
+
         fold_row = {
             "fold": fold,
             "val": [c["id"] for c in val],
@@ -2096,8 +2121,14 @@ def main():
             "final_loss": float(total / max(steps, 1)) if steps > 0 else 0.0,
             "bone_dice": float(np.mean(bone_d)),
             "bme_dice": float(np.mean(bme_d)),
+            "bme_dice_pos": bme_pos_mean,
             "lesion_sensitivity": float(np.mean(sens)),
+            "lesion_sensitivity_pos": sens_pos_mean,
+            "clean_scan_specificity": clean_spec,
             "fp_per_case": float(np.mean(fps)),
+            "fp_per_neg_case": fps_neg_mean,
+            "n_pos_val": len(bme_d_pos),
+            "n_neg_val": neg_n,
             "presence_correct": present_hit,
             "presence_n": present_n,
             "min_bme_voxels": getattr(args, "min_bme_voxels", 50),
