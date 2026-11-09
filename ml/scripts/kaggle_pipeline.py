@@ -840,16 +840,21 @@ def run_pipeline(
 
     if run_state.get("phase") == "DOWNLOADING":
         print(f"\nDownloading outputs for {full_kernel_slug} into staging...")
-        try:
-            api.kernels_output(full_kernel_slug, path=str(download_dir), file_pattern="results3d.zip|results3d/*|fold_*.pt|metrics*.json|run_status.json")
-        except TypeError:
-            # Fallback without file_pattern if not supported by client library version
-            api.kernels_output(full_kernel_slug, path=str(download_dir))
-        except Exception:
+        download_success = False
+        for attempt in range(1, 6):
             try:
-                api.kernels_output(full_kernel_slug, path=str(download_dir))
+                print(f"Downloading outputs from Kaggle (attempt {attempt}/5)...", flush=True)
+                try:
+                    api.kernels_output(full_kernel_slug, path=str(download_dir), file_pattern="results3d.zip|results3d/*|fold_*.pt|metrics*.json|run_status.json")
+                except TypeError:
+                    api.kernels_output(full_kernel_slug, path=str(download_dir))
+                download_success = True
+                break
             except Exception as e:
-                print(f"[WARNING] kernels_output error: {e}")
+                print(f"[WARNING] Download attempt {attempt} failed ({type(e).__name__}: {e}). Retrying in 6s...", flush=True)
+                time.sleep(6)
+        if not download_success:
+            print(f"[ERROR] Failed to download outputs after 5 attempts due to network interruption.")
 
         # Flatten any files downloaded inside a nested results3d/ directory
         nested_results = download_dir / "results3d"
