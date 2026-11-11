@@ -79,8 +79,10 @@ In order. Each step's output is the next step's input.
    Shared as a name-free `bme_newcases_20261111.zip` (182 MB, Drive) with a manifest pinning
    each folder to its ID. Each laptop: put the zip in the repo root, `data/` or
    `data/exports/`, then `pnpm data:import:newcases`. It refuses if the laptop would assign
-   different IDs, and skips cases already imported. Tested on scratch copies only (fresh,
-   re-run, ID mismatch); **not yet run on the hub.** Review before trusting: tiny markings on
+   different IDs, and skips cases already imported. Tested on scratch copies (fresh,
+   re-run, ID mismatch). **Imported on the hub 2026-11-11:** edema identical to the source
+   for all 24, worklist and deid_map +24 rows. No bone painted on them yet; they are not
+   in any teammate's annotation range (1-61). Review before trusting: tiny markings on
    Drive 67, 71, 154, 157, X3 (X3 is 1 slice, 0.38 ml); Drive 67 may be the same patient as
    66 (BME-035), and 69 / X3 / 49 share a name word (DICOM demographics blank, unconfirmed);
    147 and 149 have unnamed series, so fat suppression is not confirmed by name.
