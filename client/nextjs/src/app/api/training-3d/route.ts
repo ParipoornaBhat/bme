@@ -170,9 +170,9 @@ export async function POST(req: NextRequest) {
   const epochs = Math.min(Math.max(Number(body.epochs ?? 40), 1), 200);
   const folds = Math.min(Math.max(Number(body.folds ?? 5), 2), info.cases.length);
   const device = ["auto", "cuda", "cpu"].includes(body.device) ? body.device : "auto";
-  const modelArch = ["mednext", "cnet_dual_unet", "cnet_attention_unet", "unet3d"].includes(body.modelArch)
+  const modelArch = ["orthogate_mednext", "mednext", "cnet_dual_unet", "cnet_attention_unet", "unet3d"].includes(body.modelArch)
     ? body.modelArch
-    : "mednext";
+    : "orthogate_mednext";
 
   const dir = dirOf(model);
   fs.mkdirSync(dir, { recursive: true });

@@ -50,7 +50,9 @@ def verify_pt_file(path: Path) -> tuple[bool, str]:
         arch = blob.get("model_arch", "unet3d")
         bc = blob.get("base_channels", 16)
         dc = blob.get("double_conv", False)
-        expected_model = build_model(arch=arch, base_channels=bc, double_conv=dc)
+        an = bool(blob.get("aniso", False))
+        nt = blob.get("norm_type", "instance")
+        expected_model = build_model(arch=arch, base_channels=bc, double_conv=dc, aniso=an, norm_type=nt)
         expected_state = expected_model.state_dict()
         
         # Check keys match exactly

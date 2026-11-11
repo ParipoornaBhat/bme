@@ -353,3 +353,62 @@ export const predictionRelations = relations(prediction, ({ one, many }) => ({
 export const lesionRelations = relations(lesion, ({ one }) => ({
   prediction: one(prediction, { fields: [lesion.predictionId], references: [prediction.id] }),
 }));
+
+// ---------------------------------------------------------------- benchmarks
+// Shareable de-identified model training runs, metrics, and architecture metadata.
+// Zero PHI or case IDs ever enter this table.
+
+export const modelBenchmarkRun = pgTable(
+  "model_benchmark_run",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    runKey: varchar("run_key", { length: 128 }).notNull().unique(),
+    pipeline: varchar("pipeline", { length: 16 }).notNull(), // 2d_cls | 2d_seg | 3d_seg
+    modelArch: varchar("model_arch", { length: 64 }).notNull(),
+    displayName: varchar("display_name", { length: 128 }).notNull(),
+    status: varchar("status", { length: 32 }).notNull().default("completed"),
+    isActiveModel: boolean("is_active_model").notNull().default(false),
+    versionLabel: varchar("version_label", { length: 64 }),
+    computeTarget: varchar("compute_target", { length: 64 }),
+    nCases: integer("n_cases"),
+    nBme: integer("n_bme"),
+    nNegative: integer("n_negative"),
+    folds: integer("folds"),
+    epochs: integer("epochs"),
+    presenceCorrect: integer("presence_correct"),
+    presenceN: integer("presence_n"),
+    boneDice: real("bone_dice"),
+    bmeDice: real("bme_dice"),
+    bmeDicePos: real("bme_dice_pos"),
+    lesionSensitivity: real("lesion_sensitivity"),
+    lesionSensitivityPos: real("lesion_sensitivity_pos"),
+    cleanScanSpecificity: real("clean_scan_specificity"),
+    fpPerCase: real("fp_per_case"),
+    fpPerNegCase: real("fp_per_neg_case"),
+    bonePrecision: real("bone_precision"),
+    boneRecall: real("bone_recall"),
+    boneF1: real("bone_f1"),
+    boneIou: real("bone_iou"),
+    edemaPrecision: real("edema_precision"),
+    edemaRecall: real("edema_recall"),
+    edemaF1: real("edema_f1"),
+    edemaIou: real("edema_iou"),
+    finalLoss: real("final_loss"),
+    ampSkippedPct: real("amp_skipped_pct"),
+    patchSize: varchar("patch_size", { length: 32 }),
+    spacingMm: varchar("spacing_mm", { length: 32 }),
+    normType: varchar("norm_type", { length: 32 }),
+    architectureDetail: jsonb("architecture_detail"),
+    hyperparams: jsonb("hyperparams"),
+    perFoldMetrics: jsonb("per_fold_metrics"),
+    summaryNote: text("summary_note"),
+    trainedAt: timestamp("trained_at"),
+    createdAt: timestamp("created_at").defaultNow().notNull(),
+    updatedAt: timestamp("updated_at").defaultNow().notNull().$onUpdate(() => new Date()),
+  },
+  (t) => [
+    index("benchmark_pipeline_idx").on(t.pipeline),
+    index("benchmark_arch_idx").on(t.modelArch),
+    index("benchmark_status_idx").on(t.status),
+  ],
+);

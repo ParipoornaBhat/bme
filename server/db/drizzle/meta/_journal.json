@@ -15,6 +15,13 @@
       "when": 1787713973799,
       "tag": "0001_bme_domain_schema",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1794380881518,
+      "tag": "0002_model_benchmark_runs",
+      "breakpoints": true
     }
   ]
 }

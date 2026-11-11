@@ -14,6 +14,7 @@ Writes data/results3d/metrics.json and fold_<k>.pt.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import csv
 import gc
 import hashlib
@@ -74,7 +75,31 @@ def sanitize_labels(labels: np.ndarray) -> np.ndarray:
     return np.clip(labels, 0, 3).astype(np.uint8)
 
 
-def normalize(raw: np.ndarray, denoise: bool = True) -> np.ndarray:
+def _apply_fast_n4(x: np.ndarray, body_mask: np.ndarray) -> np.ndarray:
+    """Apply downsampled SimpleITK N4 bias-field correction inside the foreground mask."""
+    try:
+        import SimpleITK as sitk
+    except ImportError:
+        return x
+    try:
+        pos_x = np.maximum(x, 0.0).astype(np.float32)
+        img = sitk.GetImageFromArray(pos_x)
+        msk = sitk.GetImageFromArray(body_mask.astype(np.uint8))
+        # sitk.GetImageFromArray reverses numpy (H, W, D) -> ITK (D, W, H)
+        sz_z = max(1, min(2, x.shape[2] // 8))
+        shrink = [sz_z, 6, 6]
+        n4_filter = sitk.N4BiasFieldCorrectionImageFilter()
+        n4_filter.SetMaximumNumberOfIterations([20, 20])
+        n4_filter.Execute(sitk.Shrink(img, shrink), sitk.Shrink(msk, shrink))
+        log_bias = sitk.GetArrayFromImage(n4_filter.GetLogBiasFieldAsImage(img))
+        bias = np.exp(np.clip(log_bias, -4.0, 4.0)).astype(np.float32)
+        corrected = pos_x / np.maximum(bias, 1e-3)
+        return np.where(body_mask, corrected, 0.0).astype(np.float32)
+    except Exception:
+        return x
+
+
+def normalize(raw: np.ndarray, denoise: bool = True, n4: bool = False) -> np.ndarray:
     """Robust MRI preprocessing and noise cleaning:
     1. Filter background air and Rician thermal noise down to exact 0.0 via
        adaptive noise peak & valley detection.
@@ -126,6 +151,10 @@ def normalize(raw: np.ndarray, denoise: bool = True) -> np.ndarray:
     if body_mask is None or body_mask.sum() < 100:
         air_threshold = max(float(x.min()), mean_val * 0.10)
         body_mask = x > air_threshold
+
+    # N4 bias-field correction removes RF coil shading before smoothing/percentile clipping
+    if n4 and x.ndim == 3 and min(x.shape[:2]) >= 48 and x.shape[2] >= 8 and body_mask.sum() > 1000:
+        x = _apply_fast_n4(x, body_mask)
 
     # In-plane mild gaussian smoothing to eliminate thermal Rician noise grain
     if denoise and body_mask.sum() > 100 and x.ndim == 3:
@@ -237,6 +266,54 @@ def sample_origin(
     return anywhere()
 
 
+def _mri_intensity_augment(
+    img: np.ndarray,
+    rng: np.random.Generator,
+    apply_shading: bool = True,
+    apply_contrast: bool = True,
+    apply_gamma: bool = True,
+    apply_scale_shift: bool = True,
+    apply_noise: bool = False,
+) -> np.ndarray:
+    """Scanner-invariant MRI intensity transforms: gamma, contrast, synthetic 3D coil shading, scale/shift."""
+    out = np.asarray(img, dtype=np.float32).copy()
+
+    # 1. Non-linear gamma (simulates STIR / T2-FS receiver LUT differences)
+    if apply_gamma and rng.random() < 0.5:
+        gamma = float(rng.uniform(0.75, 1.35))
+        out = np.power(np.clip(out, 0.0, 1.0), gamma, dtype=np.float32)
+
+    # 2. Local dynamic contrast stretch around volume mean
+    if apply_contrast and rng.random() < 0.5:
+        c_alpha = float(rng.uniform(0.82, 1.22))
+        mu = float(out.mean())
+        out = mu + c_alpha * (out - mu)
+
+    # 3. Smooth 3D synthetic coil-shading bias field (models B1 receiver drop-off)
+    if apply_shading and rng.random() < 0.5:
+        sx, sy, sz = out.shape
+        gx = np.linspace(-1.0, 1.0, sx, dtype=np.float32)[:, None, None]
+        gy = np.linspace(-1.0, 1.0, sy, dtype=np.float32)[None, :, None]
+        gz = np.linspace(-1.0, 1.0, sz, dtype=np.float32)[None, None, :]
+        cx, cy, cz = rng.uniform(-0.22, 0.22, size=3)
+        qx, qy = rng.uniform(-0.10, 0.10, size=2)
+        bias = np.clip(1.0 + cx * gx + cy * gy + cz * gz + qx * (gx ** 2 - 0.33) + qy * (gy ** 2 - 0.33), 0.70, 1.30)
+        out = out * bias.astype(np.float32)
+
+    # 4. Affine scale and shift
+    if apply_scale_shift:
+        scale = float(rng.uniform(0.9, 1.1))
+        shift = float(rng.uniform(-0.05, 0.05))
+        out = out * scale + shift
+
+    # 5. Optional Gaussian noise
+    if apply_noise:
+        noise = rng.normal(0.0, 0.01, size=out.shape).astype(np.float32)
+        out = out + noise
+
+    return np.clip(out, 0.0, 1.0).astype(np.float32)
+
+
 def apply_augmentation(
     img_patch: np.ndarray,
     lbl_patch: np.ndarray,
@@ -250,7 +327,7 @@ def apply_augmentation(
     Preserves spatial alignment between img_patch and lbl_patch.
     Constraints:
       - Flip: left-right horizontal flip along axis 1 (width) with p=0.5. No z-flips.
-      - Intensity: scale in [0.9, 1.1] and shift in [-0.05, 0.05], clipped to [0, 1].
+      - Intensity: gamma, contrast, synthetic coil shading, scale/shift, clipped to [0, 1].
       - Noise: additive Gaussian with sigma=0.01, clipped to [0, 1].
       - Labels: NEVER modified by intensity scaling or noise.
     """
@@ -262,30 +339,39 @@ def apply_augmentation(
         img = np.ascontiguousarray(np.flip(img, axis=1))
         lbl = np.ascontiguousarray(np.flip(lbl, axis=1))
 
-    # 2. Intensity scale and shift (image only)
-    if do_intensity:
-        scale = float(rng.uniform(0.9, 1.1))
-        shift = float(rng.uniform(-0.05, 0.05))
-        img = np.clip(img * scale + shift, 0.0, 1.0)
-
-    # 3. Additive Gaussian noise (image only)
-    if do_noise:
-        noise = rng.normal(0.0, 0.01, size=img.shape).astype(np.float32)
-        img = np.clip(img + noise, 0.0, 1.0)
+    # 2 & 3. MRI intensity transforms & Gaussian noise (image only)
+    if do_intensity or do_noise:
+        img = _mri_intensity_augment(
+            img,
+            rng,
+            apply_shading=do_intensity,
+            apply_contrast=do_intensity,
+            apply_gamma=do_intensity,
+            apply_scale_shift=do_intensity,
+            apply_noise=do_noise,
+        )
 
     return img, lbl
 
 
 def augment(image: np.ndarray, labels: np.ndarray, rng: np.random.Generator):
-    """In-plane flips and a mild intensity change. No resampling, so labels stay exact."""
+    """In-plane flips + scanner-invariant MRI intensity augmentation (gamma, contrast, coil shading)."""
     for ax in (0, 1):
         if rng.random() < 0.5:
             image = np.flip(image, ax)
             labels = np.flip(labels, ax)
-    if rng.random() < 0.8:
-        gamma = np.float32(np.exp(rng.uniform(-0.3, 0.3)))
-        image = np.power(np.clip(image, 0, 1), gamma)
-        image = image * np.float32(rng.uniform(0.9, 1.1)) + np.float32(rng.uniform(-0.05, 0.05))
+    if rng.random() < 0.85:
+        image = _mri_intensity_augment(
+            image,
+            rng,
+            apply_shading=True,
+            apply_contrast=True,
+            apply_gamma=True,
+            apply_scale_shift=True,
+            apply_noise=(rng.random() < 0.35),
+        )
+    else:
+        image = np.clip(image, 0.0, 1.0).astype(np.float32)
     return np.ascontiguousarray(image, dtype=np.float32), np.ascontiguousarray(labels)
 
 
@@ -491,7 +577,7 @@ def worklist_class(base: Path) -> dict[str, str]:
     return c_cls
 
 
-def load_case(base: Path, case_id: str) -> dict | None:
+def load_case(base: Path, case_id: str, n4: bool = False) -> dict | None:
     vol = volume_path(base, case_id)
     ann_dir = None
     for candidate in [
@@ -520,7 +606,7 @@ def load_case(base: Path, case_id: str) -> dict | None:
         img = nib.load(str(vol))
         lab_img = nib.load(str(labs[0]))
         placed = sanitize_labels(np.asanyarray(lab_img.dataobj))
-        norm = normalize(np.asanyarray(img.dataobj))
+        norm = normalize(np.asanyarray(img.dataobj), n4=n4)
         spacing = tuple(float(abs(z)) or 1.0 for z in img.header.get_zooms()[:3])
         return {
             "id": case_id,
@@ -551,7 +637,7 @@ def load_case(base: Path, case_id: str) -> dict | None:
         print(f"  {case_id}  skipped ({e})", flush=True)
         return None
     placed = sanitize_labels(placed)
-    norm = normalize(np.asanyarray(img.dataobj))
+    norm = normalize(np.asanyarray(img.dataobj), n4=n4)
     spacing = tuple(float(abs(z)) or 1.0 for z in img.header.get_zooms()[:3])
     for note in notes:
         print(f"  {case_id}  {note}", flush=True)
@@ -618,6 +704,16 @@ class UNet3D(nn.Module):
         return out
 
 
+def _make_norm3d(channels: int, norm_type: str = "group") -> nn.Module:
+    """Batch-size-safe 3D normalization helper ('group' uses gcd so any channel count works)."""
+    if norm_type == "batch":
+        return nn.BatchNorm3d(channels)
+    if norm_type == "instance":
+        return nn.InstanceNorm3d(channels, affine=True)
+    groups = math.gcd(channels, 8) or 1
+    return nn.GroupNorm(groups, channels, affine=True)
+
+
 class CNetHead3D(nn.Module):
     """Candidate/Classification Network (C-Net) Gatekeeper.
     Predicts patient/patch-level edema presence logit from global bottleneck features.
@@ -625,7 +721,8 @@ class CNetHead3D(nn.Module):
 
     def __init__(self, in_channels: int):
         super().__init__()
-        self.pool = nn.AdaptiveAvgPool3d(1)
+        # Max pooling preserves peak focal lesion activation across the bottleneck instead of averaging small BME out.
+        self.pool = nn.AdaptiveMaxPool3d(1)
         self.fc = nn.Sequential(
             nn.Linear(in_channels, 64),
             nn.ReLU(inplace=True),
@@ -647,25 +744,31 @@ class CNetDualUNet3D(nn.Module):
     3. Dual-channel output: Channel 0 for Bone, Channel 1 for Edema (BME).
     """
 
-    def __init__(self, base_channels: int = 16, double_conv: bool = True):
+    def __init__(self, base_channels: int = 16, double_conv: bool = True, aniso: bool = False, norm_type: str = "instance"):
         super().__init__()
         self.model_arch = "cnet_dual_unet"
         self.base_channels = base_channels
         self.double_conv = double_conv
+        self.aniso = aniso
+        self.norm_type = norm_type
+        k1 = (2, 2, 1) if aniso else 2
+
+        def _norm(o: int) -> nn.Module:
+            return _make_norm3d(o, norm_type)
 
         def block(i, o):
             if double_conv:
                 return nn.Sequential(
                     nn.Conv3d(i, o, 3, padding=1, bias=False),
-                    nn.InstanceNorm3d(o),
+                    _norm(o),
                     nn.ReLU(inplace=True),
                     nn.Conv3d(o, o, 3, padding=1, bias=False),
-                    nn.InstanceNorm3d(o),
+                    _norm(o),
                     nn.ReLU(inplace=True),
                 )
             return nn.Sequential(
                 nn.Conv3d(i, o, 3, padding=1, bias=False),
-                nn.InstanceNorm3d(o),
+                _norm(o),
                 nn.ReLU(inplace=True),
             )
 
@@ -677,6 +780,7 @@ class CNetDualUNet3D(nn.Module):
         self.e1 = block(1, c1)
         self.e2 = block(c1, c2)
         self.e3 = block(c2, c3)
+        self.pool1 = nn.MaxPool3d(k1)
         self.pool = nn.MaxPool3d(2)
 
         # C-Net presence classifier head at bottleneck
@@ -685,7 +789,7 @@ class CNetDualUNet3D(nn.Module):
         # Decoder with transposed convolutions and direct high-fidelity skip connections
         self.up2 = nn.ConvTranspose3d(c3, c2, 2, stride=2)
         self.d2 = block(c3, c2)
-        self.up1 = nn.ConvTranspose3d(c2, c1, 2, stride=2)
+        self.up1 = nn.ConvTranspose3d(c2, c1, k1, stride=k1)
         self.d1 = block(c2, c1)
 
         # Output dual-channel segmentation head (channel 0: bone, channel 1: edema)
@@ -693,7 +797,7 @@ class CNetDualUNet3D(nn.Module):
 
     def forward(self, x: torch.Tensor, return_cnet: bool = False):
         a = self.e1(x)
-        b = self.e2(self.pool(a))
+        b = self.e2(self.pool1(a))
         c = self.e3(self.pool(b))
 
         cnet_logit = self.cnet(c)
@@ -885,20 +989,197 @@ class AttentionUNet3D(nn.Module):
         return out
 
 
+class _OrthoMedNeXtBlock3D(nn.Module):
+    """5x5x3 Anisotropic Depthwise-Separable MedNeXt residual block with batch-invariant norm."""
+
+    def __init__(self, channels: int, exp_ratio: int = 2, kernel_size: tuple[int, int, int] = (5, 5, 3), norm_type: str = "group"):
+        super().__init__()
+        pad = tuple(k // 2 for k in kernel_size)
+        self.dw = nn.Conv3d(channels, channels, kernel_size=kernel_size, padding=pad, groups=channels, bias=False)
+        self.norm = _make_norm3d(channels, norm_type)
+        hidden = channels * exp_ratio
+        self.pw1 = nn.Conv3d(channels, hidden, kernel_size=1)
+        self.act = nn.GELU()
+        self.pw2 = nn.Conv3d(hidden, channels, kernel_size=1)
+        self.gamma = nn.Parameter(torch.full((1, channels, 1, 1, 1), 0.5))
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        y = self.pw2(self.act(self.pw1(self.norm(self.dw(x)))))
+        return x + self.gamma * y
+
+
+class _ASPP3D(nn.Module):
+    """Lightweight depthwise-separable 3D ASPP for multi-scale focal & diffuse BME context."""
+
+    def __init__(self, channels: int, norm_type: str = "group"):
+        super().__init__()
+        mid = max(8, channels // 4)
+        self.b0 = nn.Sequential(nn.Conv3d(channels, mid, 1, bias=False), _make_norm3d(mid, norm_type), nn.GELU())
+        self.b1 = nn.Sequential(
+            nn.Conv3d(channels, channels, 3, padding=1, groups=channels, bias=False),
+            nn.Conv3d(channels, mid, 1, bias=False),
+            _make_norm3d(mid, norm_type),
+            nn.GELU(),
+        )
+        self.b2 = nn.Sequential(
+            nn.Conv3d(channels, channels, 3, padding=(2, 2, 1), dilation=(2, 2, 1), groups=channels, bias=False),
+            nn.Conv3d(channels, mid, 1, bias=False),
+            _make_norm3d(mid, norm_type),
+            nn.GELU(),
+        )
+        self.b3 = nn.Sequential(
+            nn.AdaptiveAvgPool3d(1),
+            nn.Conv3d(channels, mid, 1, bias=True),
+            nn.GELU(),
+        )
+        self.proj = nn.Sequential(
+            nn.Conv3d(mid * 4, channels, 1, bias=False),
+            _make_norm3d(channels, norm_type),
+        )
+        self.gamma = nn.Parameter(torch.full((1, channels, 1, 1, 1), 0.5))
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        g = self.b3(x).expand(-1, -1, x.shape[2], x.shape[3], x.shape[4])
+        cat = torch.cat([self.b0(x), self.b1(x), self.b2(x), g], dim=1)
+        return x + self.gamma * self.proj(cat)
+
+
+class _BoneGuidedAttention3D(nn.Module):
+    """Locks edema features inside predicted bone marrow while damping extra-osseous signal."""
+
+    def __init__(self, channels: int, norm_type: str = "group"):
+        super().__init__()
+        mid = max(4, channels // 2)
+        self.gate = nn.Sequential(
+            nn.Conv3d(channels + 1, mid, 1, bias=False),
+            _make_norm3d(mid, norm_type),
+            nn.GELU(),
+            nn.Conv3d(mid, 1, 1),
+            nn.Sigmoid(),
+        )
+        self.refine = nn.Sequential(
+            nn.Conv3d(channels, channels, 3, padding=1, groups=channels, bias=False),
+            nn.Conv3d(channels, channels, 1, bias=False),
+            _make_norm3d(channels, norm_type),
+            nn.GELU(),
+        )
+
+    def forward(self, feat: torch.Tensor, bone_logit: torch.Tensor) -> torch.Tensor:
+        bone_prob = torch.sigmoid(bone_logit)
+        learned_gate = self.gate(torch.cat([feat, bone_prob], dim=1))
+        # Blend structural bone prior with learned gating while preserving non-zero gradient floor
+        soft_mask = 0.10 + 0.90 * (0.5 * bone_prob + 0.5 * learned_gate)
+        gated = feat * soft_mask
+        return gated + self.refine(gated)
+
+
+class OrthoGateMedNeXt3D(nn.Module):
+    """OrthoGate-MedNeXt3D:
+    5x5x3 anisotropic MedNeXt blocks + GroupNorm + ASPP3D bottleneck +
+    Bone-Guided Spatial Attention + Deep Supervision + Bottleneck C-Net Gatekeeper (< 2.5 MB/fold).
+    """
+
+    def __init__(
+        self,
+        base_channels: int = 16,
+        double_conv: bool = True,
+        aniso: bool = True,
+        norm_type: str = "group",
+        exp_ratio: int = 2,
+        **kwargs,
+    ):
+        super().__init__()
+        resolved_norm = norm_type if norm_type in ("group", "instance", "batch") else "group"
+        self.model_arch = "orthogate_mednext"
+        self.base_channels = base_channels
+        self.double_conv = double_conv
+        self.aniso = aniso
+        self.norm_type = resolved_norm
+
+        c1 = base_channels
+        c2 = base_channels * 2
+        c3 = base_channels * 4
+        n_blocks = 2 if double_conv else 1
+        k1 = (2, 2, 1) if aniso else (2, 2, 2)
+
+        def stage(ch: int) -> nn.Sequential:
+            return nn.Sequential(
+                *[_OrthoMedNeXtBlock3D(ch, exp_ratio=exp_ratio, kernel_size=(5, 5, 3), norm_type=resolved_norm) for _ in range(n_blocks)]
+            )
+
+        self.stem = nn.Sequential(
+            nn.Conv3d(1, c1, kernel_size=3, padding=1, bias=False),
+            _make_norm3d(c1, resolved_norm),
+            nn.GELU(),
+        )
+        self.enc1 = stage(c1)
+        self.down1 = nn.Sequential(
+            nn.Conv3d(c1, c2, kernel_size=k1, stride=k1, bias=False),
+            _make_norm3d(c2, resolved_norm),
+        )
+        self.enc2 = stage(c2)
+        self.down2 = nn.Sequential(
+            nn.Conv3d(c2, c3, kernel_size=2, stride=2, bias=False),
+            _make_norm3d(c3, resolved_norm),
+        )
+        self.enc3 = stage(c3)
+        self.aspp = _ASPP3D(c3, norm_type=resolved_norm)
+        self.cnet = CNetHead3D(c3)
+
+        self.up2 = nn.ConvTranspose3d(c3, c2, kernel_size=2, stride=2)
+        self.fuse2 = nn.Sequential(nn.Conv3d(c2 * 2, c2, 1, bias=False), _make_norm3d(c2, resolved_norm), nn.GELU())
+        self.dec2 = stage(c2)
+        self.ds2 = nn.Conv3d(c2, 2, kernel_size=1)
+
+        self.up1 = nn.ConvTranspose3d(c2, c1, kernel_size=k1, stride=k1)
+        self.fuse1 = nn.Sequential(nn.Conv3d(c1 * 2, c1, 1, bias=False), _make_norm3d(c1, resolved_norm), nn.GELU())
+        self.dec1 = stage(c1)
+
+        self.out_bone = nn.Conv3d(c1, 1, kernel_size=1)
+        self.bone_attn = _BoneGuidedAttention3D(c1, norm_type=resolved_norm)
+        self.out_bme = nn.Conv3d(c1, 1, kernel_size=1)
+
+    def forward(self, x: torch.Tensor, return_cnet: bool = False, return_aux: bool = False):
+        e1 = self.enc1(self.stem(x))
+        e2 = self.enc2(self.down1(e1))
+        e3 = self.aspp(self.enc3(self.down2(e2)))
+
+        cnet_logit = self.cnet(e3)
+
+        d2 = self.dec2(self.fuse2(torch.cat([self.up2(e3), e2], dim=1)))
+        d1 = self.dec1(self.fuse1(torch.cat([self.up1(d2), e1], dim=1)))
+
+        bone_logit = self.out_bone(d1)
+        bme_feat = self.bone_attn(d1, bone_logit)
+        bme_logit = self.out_bme(bme_feat)
+        seg = torch.cat([bone_logit, bme_logit], dim=1)
+
+        if return_aux:
+            ds2_up = F.interpolate(self.ds2(d2), size=x.shape[2:], mode="trilinear", align_corners=False)
+            return seg, cnet_logit, [ds2_up]
+        if return_cnet:
+            return seg, cnet_logit
+        return seg
+
+
 def build_model(
     arch: str = "mednext",
     base_channels: int = 16,
     double_conv: bool = False,
     aniso: bool = False,
+    norm_type: str = "instance",
     **kwargs,
 ) -> nn.Module:
     name = kwargs.get("name", arch)
     width = kwargs.get("width", base_channels)
     aniso = kwargs.get("aniso", aniso)
+    norm_type = kwargs.get("norm_type", norm_type)
+    if name == "orthogate_mednext":
+        return OrthoGateMedNeXt3D(base_channels=width, double_conv=double_conv, aniso=aniso, norm_type=norm_type)
     if name == "mednext":
         return MedNeXt3D(base_channels=width)
     if name in ("cnet_dual_unet", "cnet_attention_unet"):
-        return CNetDualUNet3D(base_channels=width, double_conv=double_conv)
+        return CNetDualUNet3D(base_channels=width, double_conv=double_conv, aniso=aniso, norm_type=norm_type)
     if name in ("attention-unet", "attn"):
         return AttentionUNet3D(width=width, aniso=aniso)
     return UNet3D(base_channels=width, double_conv=double_conv, aniso=aniso)
@@ -918,22 +1199,32 @@ def dice_focal(
     valid: torch.Tensor,
     gamma: float = 2.0,
     bme_weight: float = 2.5,
+    tversky_alpha: float = 0.5,
+    tversky_beta: float = 0.5,
+    label_smoothing: float = 0.0,
 ) -> torch.Tensor:
-    """Dice + focal. Uncertain voxels are weighted out. Edema is weighted by bme_weight (default: 2.5) to counteract class imbalance."""
-    prob = torch.sigmoid(logits)
-    loss = logits.new_zeros(())
-    denom_v = valid.sum().clamp(min=1)
+    """Tversky/Dice + AMP-safe Focal loss. Channel 1 (edema) supports asymmetric Tversky (alpha<beta) to stop FN collapse."""
+    prob = torch.sigmoid(logits.float()).clamp(1e-4, 1.0 - 1e-4)
+    loss = logits.new_zeros((), dtype=torch.float32)
+    denom_v = valid.sum().clamp(min=1.0)
+    ls = float(max(0.0, min(0.1, label_smoothing)))
     for c in range(2):
         p = prob[c]
-        t = target[c]
+        t = target[c].float()
         pv, tv = p * valid, t * valid
-        inter = (pv * tv).sum()
-        dice = 1 - (2 * inter + 1) / (pv.sum() + tv.sum() + 1)
-        bce = nn.functional.binary_cross_entropy(p.clamp(1e-4, 1 - 1e-4), t, reduction="none")
-        pt = torch.where(t > 0.5, p, 1 - p)
-        focal = ((1 - pt).pow(gamma) * bce * valid).sum() / denom_v
+        tp = (pv * tv).sum()
+        if c == 1 and (abs(tversky_alpha - 0.5) > 1e-6 or abs(tversky_beta - 0.5) > 1e-6):
+            fp = (pv * (1.0 - tv) * valid).sum()
+            fn = ((1.0 - pv) * tv).sum()
+            region_loss = 1.0 - (tp + 1.0) / (tp + tversky_alpha * fp + tversky_beta * fn + 1.0)
+        else:
+            region_loss = 1.0 - (2.0 * tp + 1.0) / (pv.sum() + tv.sum() + 1.0)
+        t_bce = t * (1.0 - ls) + 0.5 * ls if ls > 0.0 else t
+        bce = nn.functional.binary_cross_entropy(p, t_bce, reduction="none")
+        pt = torch.where(t > 0.5, p, 1.0 - p)
+        focal = ((1.0 - pt).pow(gamma) * bce * valid).sum() / denom_v
         w = 1.0 if c == 0 else bme_weight
-        loss = loss + w * (dice + focal)
+        loss = loss + w * (region_loss + focal)
     return loss
 
 
@@ -999,45 +1290,116 @@ def release():
 def postprocess_prediction(
     pred: np.ndarray,
     min_bme_voxels: int = 50,
+    prob_bme: np.ndarray | None = None,
+    min_conf_voxels: int = 25,
+    high_conf: float = 0.65,
+    closing_iters: int = 1,
 ) -> np.ndarray:
-    """Filter out isolated noise speckles of predicted BME smaller than min_bme_voxels."""
+    """Apply intra-osseous 3D morphological closing + confidence hysteresis speckle filtering.
+
+    1. Reconnects fragmented lesion islands via 3D closing strictly inside predicted bone.
+    2. Drops tiny components < min_bme_voxels UNLESS prob_bme confirms a high-confidence peak (>= high_conf)
+       with at least min_conf_voxels voxels.
+    """
     if min_bme_voxels <= 0 or not (pred == 2).any():
         return pred
     out = pred.copy()
+    if closing_iters > 0:
+        bone_mask = (out == 1) | (out == 2)
+        # In-plane 3x3x1 closing reconnects split edema islands without smearing across 3mm thick Z slices.
+        struct = np.ones((3, 3, 1), dtype=bool)
+        closed_bme = ndi.binary_closing(out == 2, structure=struct, iterations=closing_iters) & bone_mask
+        out[closed_bme] = 2
+
     lab, num = cc_label(out == 2)
     if num > 0:
         counts = np.bincount(lab.ravel())
-        small_ids = np.where((counts < min_bme_voxels) & (counts > 0))[0]
-        if len(small_ids) > 0:
-            small_mask = np.isin(lab, small_ids)
-            # Demote small false positive speckles to bone (1)
-            out[small_mask] = 1
+        demote_ids: list[int] = []
+        for cid in range(1, num + 1):
+            cnt = int(counts[cid])
+            if cnt >= min_bme_voxels:
+                continue
+            keep_hyst = (
+                prob_bme is not None
+                and min_conf_voxels > 0
+                and cnt >= min_conf_voxels
+                and float(prob_bme[lab == cid].max()) >= high_conf
+            )
+            if not keep_hyst:
+                demote_ids.append(cid)
+        if demote_ids:
+            out[np.isin(lab, demote_ids)] = 1
     return out
 
 
-@torch.no_grad()
-def predict_volume(
-    model: nn.Module,
-    image: np.ndarray,
-    device: str,
-    patch_size=PATCH,
-    val_batch_size: int = 1,
-    use_amp: bool = False,
-    channels_last: bool = False,
-    min_bme_voxels: int = 50,
-    cnet_threshold: float = 0.40,
-    bme_threshold: float = 0.35,
+_GAUSS_CACHE: dict[tuple[int, int, int], np.ndarray] = {}
+
+
+def _gaussian_window_3d(patch_size: tuple[int, int, int], sigma_scale: float = 0.25) -> np.ndarray:
+    """Cached normalized 3D Gaussian importance window (patch centers weighted higher than edges)."""
+    key = tuple(int(p) for p in patch_size)
+    if key in _GAUSS_CACHE:
+        return _GAUSS_CACHE[key]
+    axes = []
+    for s in key:
+        coords = np.arange(s, dtype=np.float32) - (s - 1) / 2.0
+        sig = max(1.0, float(s) * sigma_scale)
+        g = np.exp(-0.5 * (coords / sig) ** 2, dtype=np.float32)
+        axes.append(g)
+    win = axes[0][:, None, None] * axes[1][None, :, None] * axes[2][None, None, :]
+    win = np.maximum(win / max(float(win.max()), 1e-6), 0.05).astype(np.float32)
+    _GAUSS_CACHE[key] = win
+    return win
+
+
+def _apply_cnet_gate(
+    avg_bme: np.ndarray,
+    cnet_probs: list[float],
+    cnet_threshold: float,
+    cnet_soft: bool = True,
 ) -> np.ndarray:
-    """Sliding-window inference with patch batching and optional C-Net presence gating. Votes stay uint16 so full scan is not copied as float."""
-    model.eval()
-    patch_size = tuple(int(p) for p in patch_size)
-    shape = image.shape
-    padded = pad_volume(image, patch_size)
-    votes_bone = np.zeros(padded.shape, dtype=np.uint16)
-    votes_bme = np.zeros(padded.shape, dtype=np.uint16)
-    hits = np.zeros(padded.shape, dtype=np.uint16)
+    """Apply hard or soft-ramp C-Net gatekeeper using top-3 patch confidence."""
+    if not cnet_probs or cnet_threshold <= 0:
+        return avg_bme
+    top_k = min(3, len(cnet_probs))
+    top_mean = float(np.mean(sorted(cnet_probs)[-top_k:]))
+    if not cnet_soft:
+        if top_mean < cnet_threshold:
+            avg_bme.fill(0.0)
+        return avg_bme
+    t_high = float(cnet_threshold)
+    t_low = max(0.05, t_high - 0.20)
+    if top_mean >= t_high:
+        return avg_bme
+    if top_mean <= t_low:
+        avg_bme.fill(0.0)
+        return avg_bme
+    ramp = (top_mean - t_low) / max(t_high - t_low, 1e-6)
+    return (avg_bme * float(ramp)).astype(np.float32)
+
+
+@torch.no_grad()
+def _score_volume_passes(
+    model: nn.Module,
+    vol: np.ndarray,
+    device: str,
+    patch_size: tuple[int, int, int],
+    val_batch_size: int,
+    use_amp: bool,
+    channels_last: bool,
+    gaussian_window: bool = True,
+    cnet_temperature: float = 1.0,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, list[float]]:
+    """Run one sliding-window pass and return unpadded (prob_bone, prob_bme, weights, cnet_probs)."""
+    shape = vol.shape
+    padded = pad_volume(vol, patch_size)
+    prob_sum_bone = np.zeros(padded.shape, dtype=np.float32)
+    prob_sum_bme = np.zeros(padded.shape, dtype=np.float32)
+    hits = np.zeros(padded.shape, dtype=np.float32)
+    win = _gaussian_window_3d(patch_size) if gaussian_window else np.ones(patch_size, dtype=np.float32)
     origins = window_origins(padded.shape, patch_size)
     has_cnet = hasattr(model, "cnet")
+    temp = max(0.25, float(cnet_temperature))
     cnet_probs: list[float] = []
 
     for i in range(0, len(origins), val_batch_size):
@@ -1051,11 +1413,11 @@ def predict_volume(
                 with torch.amp.autocast(device_type="cuda"):
                     raw_seg, cnet_logit = model(x, return_cnet=True)
                     probs = torch.sigmoid(raw_seg.float()).cpu().numpy()
-                    cnet_ps = torch.sigmoid(cnet_logit.float()).cpu().numpy()
+                    cnet_ps = torch.sigmoid(cnet_logit.float() / temp).cpu().numpy()
             else:
                 raw_seg, cnet_logit = model(x, return_cnet=True)
                 probs = torch.sigmoid(raw_seg).cpu().numpy()
-                cnet_ps = torch.sigmoid(cnet_logit).cpu().numpy()
+                cnet_ps = torch.sigmoid(cnet_logit / temp).cpu().numpy()
             cnet_probs.extend(cnet_ps.tolist() if hasattr(cnet_ps, "tolist") else [float(cnet_ps)])
         else:
             if use_amp and device == "cuda":
@@ -1064,27 +1426,260 @@ def predict_volume(
             else:
                 probs = torch.sigmoid(model(x)).cpu().numpy()
         for j, o in enumerate(batch_orig):
-            bone = probs[j, 0] >= 0.5
-            bme = (probs[j, 1] >= bme_threshold) & bone
             sl = tuple(slice(o[k], o[k] + patch_size[k]) for k in range(3))
-            votes_bone[sl] += bone
-            votes_bme[sl] += bme
-            hits[sl] += 1
+            prob_sum_bone[sl] += probs[j, 0] * win
+            prob_sum_bme[sl] += probs[j, 1] * win
+            hits[sl] += win
         del x, probs
 
-    # C-Net gatekeeper: if maximum presence probability across scan is below threshold, block BME entirely
-    if has_cnet and cnet_probs and (max(cnet_probs) < cnet_threshold):
-        votes_bme.fill(0)
+    sl_crop = (slice(0, shape[0]), slice(0, shape[1]), slice(0, shape[2]))
+    return prob_sum_bone[sl_crop], prob_sum_bme[sl_crop], hits[sl_crop], cnet_probs
 
-    votes_bone = votes_bone[: shape[0], : shape[1], : shape[2]]
-    votes_bme = votes_bme[: shape[0], : shape[1], : shape[2]]
-    hits = np.maximum(hits[: shape[0], : shape[1], : shape[2]], 1)
+
+@torch.no_grad()
+def predict_volume_probs(
+    model: nn.Module,
+    image: np.ndarray,
+    device: str,
+    patch_size=PATCH,
+    val_batch_size: int = 1,
+    use_amp: bool = False,
+    channels_last: bool = False,
+    cnet_threshold: float = 0.30,
+    tta: bool = False,
+    gaussian_window: bool = True,
+    cnet_soft: bool = True,
+    cnet_temperature: float = 1.0,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Compute continuous (avg_bone, avg_bme) probability maps with Gaussian stitching, TTA, and C-Net gate."""
+    model.eval()
+    patch_size = tuple(int(p) for p in patch_size)
+    prob_bone, prob_bme, hits, cnet_probs = _score_volume_passes(
+        model,
+        image,
+        device,
+        patch_size,
+        val_batch_size,
+        use_amp,
+        channels_last,
+        gaussian_window=gaussian_window,
+        cnet_temperature=cnet_temperature,
+    )
+    if tta:
+        flipped_img = np.ascontiguousarray(np.flip(image, axis=1))
+        fb, fm, fh, fc = _score_volume_passes(
+            model,
+            flipped_img,
+            device,
+            patch_size,
+            val_batch_size,
+            use_amp,
+            channels_last,
+            gaussian_window=gaussian_window,
+            cnet_temperature=cnet_temperature,
+        )
+        prob_bone = prob_bone + np.flip(fb, axis=1)
+        prob_bme = prob_bme + np.flip(fm, axis=1)
+        hits = hits + np.flip(fh, axis=1)
+        cnet_probs.extend(fc)
+
+    hits_crop = np.maximum(hits, 1e-6).astype(np.float32)
+    avg_bone = (prob_bone / hits_crop).astype(np.float32)
+    avg_bme = (prob_bme / hits_crop).astype(np.float32)
+    if hasattr(model, "cnet") and cnet_probs and cnet_threshold > 0:
+        avg_bme = _apply_cnet_gate(avg_bme, cnet_probs, cnet_threshold, cnet_soft=cnet_soft)
+    return avg_bone, avg_bme
+
+
+@torch.no_grad()
+def predict_volume(
+    model: nn.Module,
+    image: np.ndarray,
+    device: str,
+    patch_size=PATCH,
+    val_batch_size: int = 1,
+    use_amp: bool = False,
+    channels_last: bool = False,
+    min_bme_voxels: int = 50,
+    cnet_threshold: float = 0.30,
+    bme_threshold: float = 0.50,
+    tta: bool = False,
+    gaussian_window: bool = True,
+    cnet_soft: bool = True,
+    cnet_temperature: float = 1.0,
+    min_conf_voxels: int = 25,
+    high_conf: float = 0.65,
+) -> np.ndarray:
+    """Sliding-window Gaussian probability averaging + Soft C-Net gating + 3D closing & hysteresis."""
+    shape = image.shape
+    avg_bone, avg_bme = predict_volume_probs(
+        model,
+        image,
+        device,
+        patch_size=patch_size,
+        val_batch_size=val_batch_size,
+        use_amp=use_amp,
+        channels_last=channels_last,
+        cnet_threshold=cnet_threshold,
+        tta=tta,
+        gaussian_window=gaussian_window,
+        cnet_soft=cnet_soft,
+        cnet_temperature=cnet_temperature,
+    )
     out = np.zeros(shape, dtype=np.uint8)
-    out[votes_bone * 2 >= hits] = 1
-    out[(votes_bme * 2 >= hits) & (out == 1)] = 2
+    out[avg_bone >= 0.5] = 1
+    out[(avg_bme >= bme_threshold) & (out == 1)] = 2
     if min_bme_voxels > 0:
-        out = postprocess_prediction(out, min_bme_voxels=min_bme_voxels)
+        out = postprocess_prediction(
+            out,
+            min_bme_voxels=min_bme_voxels,
+            prob_bme=avg_bme,
+            min_conf_voxels=min_conf_voxels,
+            high_conf=high_conf,
+        )
     return out
+
+
+@torch.no_grad()
+def calibrate_cnet_threshold_from_train(
+    model: nn.Module,
+    train_cases: list[dict],
+    device: str,
+    patch_size: tuple[int, int, int],
+    val_batch_size: int = 8,
+    use_amp: bool = False,
+    channels_last: bool = False,
+    default_thresh: float = 0.50,
+    max_per_class: int = 24,
+    cnet_temperature: float = 1.0,
+) -> float:
+    """Calibrate fold C-Net top-3 threshold strictly on training-fold cases (zero val leakage)."""
+    if not hasattr(model, "cnet"):
+        return default_thresh
+    pos = sorted([c for c in train_cases if c.get("bme_voxels", 0) > 0 and "image" in c], key=lambda c: c["id"])
+    neg = sorted([c for c in train_cases if c.get("bme_voxels", 0) == 0 and "image" in c], key=lambda c: c["id"])
+    if len(pos) < 4 or len(neg) < 4:
+        return default_thresh
+
+    def _evenly(lst: list[dict], k: int) -> list[dict]:
+        if len(lst) <= k:
+            return lst
+        idxs = np.linspace(0, len(lst) - 1, k, dtype=int)
+        return [lst[int(i)] for i in idxs]
+
+    sample = _evenly(pos, max_per_class) + _evenly(neg, max_per_class)
+    model.eval()
+    temp = max(0.25, float(cnet_temperature))
+    pos_scores: list[float] = []
+    neg_scores: list[float] = []
+    for c in sample:
+        vol = np.asarray(c["image"], dtype=np.float32)
+        padded = pad_volume(vol, patch_size)
+        origins = window_origins(padded.shape, patch_size)
+        cnet_ps_all: list[float] = []
+        for i in range(0, len(origins), val_batch_size):
+            batch_orig = origins[i : i + val_batch_size]
+            x = torch.from_numpy(np.stack([crop(padded, o, patch_size) for o in batch_orig])).float().unsqueeze(1).to(device)
+            if channels_last:
+                x = x.to(memory_format=torch.channels_last_3d)
+            if use_amp and device == "cuda":
+                with torch.amp.autocast(device_type="cuda"):
+                    _, cl = model(x, return_cnet=True)
+            else:
+                _, cl = model(x, return_cnet=True)
+            ps = torch.sigmoid(cl.float() / temp).cpu().numpy().reshape(-1).tolist()
+            cnet_ps_all.extend(ps)
+            del x
+        top_k = min(3, len(cnet_ps_all))
+        score = float(np.mean(sorted(cnet_ps_all)[-top_k:])) if cnet_ps_all else 0.0
+        if c["bme_voxels"] > 0:
+            pos_scores.append(score)
+        else:
+            neg_scores.append(score)
+
+    best_score = -1.0
+    best_threshs: list[float] = [default_thresh]
+    # Keep upper threshold conservative (<= 0.58) and require >= 92% positive sensitivity.
+    for t in np.linspace(0.25, 0.58, 15):
+        tpr = float(np.mean([s >= t for s in pos_scores]))
+        tnr = float(np.mean([s < t for s in neg_scores]))
+        obj = (tpr + tnr - 1.0) if tpr >= 0.92 else (tpr + tnr - 2.0)
+        if obj > best_score + 1e-9:
+            best_score = obj
+            best_threshs = [float(t)]
+        elif abs(obj - best_score) <= 1e-9:
+            best_threshs.append(float(t))
+    return round(float(np.median(best_threshs)), 3)
+
+
+@torch.no_grad()
+def calibrate_bme_threshold_from_train(
+    model: nn.Module,
+    train_cases: list[dict],
+    device: str,
+    patch_size: tuple[int, int, int],
+    val_batch_size: int = 8,
+    use_amp: bool = False,
+    channels_last: bool = False,
+    min_bme_voxels: int = 50,
+    cnet_threshold: float = 0.30,
+    default_thresh: float = 0.50,
+    tta: bool = False,
+    max_pos: int = 16,
+    gaussian_window: bool = True,
+    cnet_soft: bool = True,
+    cnet_temperature: float = 1.0,
+) -> float:
+    """Calibrate fold BME voxel threshold strictly on positive training-fold cases (zero val leakage)."""
+    pos = sorted(
+        [c for c in train_cases if c.get("bme_voxels", 0) > 0 and "image" in c and "labels" in c],
+        key=lambda c: c["id"],
+    )
+    if len(pos) < 4:
+        return default_thresh
+    if len(pos) > max_pos:
+        idxs = np.linspace(0, len(pos) - 1, max_pos, dtype=int)
+        pos = [pos[int(i)] for i in idxs]
+
+    model.eval()
+    candidates = [0.35, 0.40, 0.45, 0.50]
+    dice_by_thr: dict[float, list[float]] = {t: [] for t in candidates}
+
+    for c in pos:
+        vol = np.asarray(c["image"], dtype=np.float32)
+        lbl = np.asarray(c["labels"], dtype=np.uint8)
+        avg_bone, avg_bme = predict_volume_probs(
+            model,
+            vol,
+            device,
+            patch_size=patch_size,
+            val_batch_size=val_batch_size,
+            use_amp=use_amp,
+            channels_last=channels_last,
+            cnet_threshold=cnet_threshold,
+            tta=tta,
+            gaussian_window=gaussian_window,
+            cnet_soft=cnet_soft,
+            cnet_temperature=cnet_temperature,
+        )
+        bone_mask = avg_bone >= 0.5
+
+        for t in candidates:
+            out = np.zeros(vol.shape, dtype=np.uint8)
+            out[bone_mask] = 1
+            out[(avg_bme >= t) & bone_mask] = 2
+            if min_bme_voxels > 0:
+                out = postprocess_prediction(out, min_bme_voxels=min_bme_voxels, prob_bme=avg_bme)
+            dice_by_thr[t].append(dice(lbl, out, 2))
+
+    best_thr = default_thresh
+    best_dice = -1.0
+    for t in candidates:
+        mean_d = float(np.mean(dice_by_thr[t]))
+        if mean_d > best_dice + 1e-6:
+            best_dice = mean_d
+            best_thr = t
+    return round(float(best_thr), 3)
 
 
 
@@ -1244,6 +1839,17 @@ def merge_metrics_files(out_dir: Path, folds_n: int = 5) -> dict | None:
         "presence_correct": sum(r.get("presence_correct", 0) for r in fold_rows),
         "presence_n": sum(r.get("presence_n", 0) for r in fold_rows),
         "min_bme_voxels": first.get("min_bme_voxels", 50),
+        "model_arch": first.get("model_arch"),
+        "cnet_threshold": first.get("cnet_threshold"),
+        "cnet_soft": first.get("cnet_soft", True),
+        "cnet_temperature": first.get("cnet_temperature", 1.0),
+        "bme_threshold": first.get("bme_threshold"),
+        "norm_type": first.get("norm_type", "instance"),
+        "gaussian_window": first.get("gaussian_window", True),
+        "tversky_beta": first.get("tversky_beta", 0.5),
+        "aniso": first.get("aniso", False),
+        "val_tta": first.get("val_tta", False),
+        "n4": first.get("n4", False),
         "base_channels": first.get("base_channels", 16),
         "double_conv": first.get("double_conv", False),
         "amp_skipped_steps_total": total_skipped,
@@ -1332,16 +1938,34 @@ def main():
                     help="Use dual conv layers per resolution block in UNet3D")
     ap.add_argument("--eval-only", action="store_true",
                     help="Run validation evaluation on existing fold checkpoints without training")
-    ap.add_argument("--model-arch", type=str, default="mednext", choices=["unet3d", "cnet_dual_unet", "cnet_attention_unet", "mednext", "attention-unet"],
-                    help="Model architecture: 'mednext', 'cnet_dual_unet', 'cnet_attention_unet', 'attention-unet', or 'unet3d'")
+    ap.add_argument("--model-arch", type=str, default="mednext", choices=["unet3d", "cnet_dual_unet", "cnet_attention_unet", "mednext", "orthogate_mednext", "attention-unet"],
+                    help="Model architecture: 'orthogate_mednext', 'mednext', 'cnet_dual_unet', 'cnet_attention_unet', 'attention-unet', or 'unet3d'")
     ap.add_argument("--cnet-weight", type=float, default=0.5,
                     help="Loss weight for C-Net binary presence classification (default: 0.5)")
-    ap.add_argument("--cnet-threshold", type=float, default=0.40,
-                    help="Presence threshold for C-Net gatekeeper (default: 0.40)")
+    ap.add_argument("--cnet-threshold", type=float, default=0.30,
+                    help="Presence threshold for C-Net gatekeeper (default: 0.30)")
+    ap.add_argument("--cnet-soft", dest="cnet_soft", action="store_true", default=True,
+                    help="Use smooth ramp C-Net gatekeeper instead of hard zero cutoff (default: True)")
+    ap.add_argument("--no-cnet-soft", dest="cnet_soft", action="store_false",
+                    help="Use legacy binary C-Net hard cutoff")
+    ap.add_argument("--cnet-temperature", type=float, default=1.0,
+                    help="Logit temperature scaling for calibrated C-Net probability (default: 1.0)")
     ap.add_argument("--bme-loss-weight", type=float, default=2.5,
                     help="Loss weight for BME edema class to address class imbalance (default: 2.5)")
-    ap.add_argument("--bme-threshold", type=float, default=0.35,
-                    help="Probability threshold for BME edema segmentation (default: 0.35)")
+    ap.add_argument("--tversky-alpha", type=float, default=None,
+                    help="Tversky FP weight on edema (default: 0.3 for orthogate_mednext, 0.5 otherwise)")
+    ap.add_argument("--tversky-beta", type=float, default=None,
+                    help="Tversky FN weight on edema (default: 0.7 for orthogate_mednext, 0.5 otherwise)")
+    ap.add_argument("--gaussian-window", dest="gaussian_window", action="store_true", default=True,
+                    help="Weight sliding-window predictions with a 3D Gaussian center kernel (default: True)")
+    ap.add_argument("--no-gaussian-window", dest="gaussian_window", action="store_false",
+                    help="Disable Gaussian window weighting in sliding-window stitching")
+    ap.add_argument("--deep-supervision", dest="deep_supervision", action="store_true", default=True,
+                    help="Enable auxiliary decoder deep-supervision loss when supported (default: True)")
+    ap.add_argument("--no-deep-supervision", dest="deep_supervision", action="store_false",
+                    help="Disable deep-supervision auxiliary loss")
+    ap.add_argument("--bme-threshold", type=float, default=0.50,
+                    help="Probability threshold for BME edema segmentation (default: 0.50)")
     ap.add_argument("--spacing", type=str, default="0.5,0.5,3.0",
                     help="Physical voxel spacing in mm for isotropic standardization (default: 0.5,0.5,3.0; '0' or 'none' for native grid)")
     ap.add_argument("--aniso", action="store_true",
@@ -1352,6 +1976,16 @@ def main():
                     help="probability of in-plane rotation per patch (default: 0.5)")
     ap.add_argument("--aug-p-scale", type=float, default=0.5,
                     help="probability of in-plane scaling per patch (default: 0.5)")
+    ap.add_argument("--norm-type", type=str, default="instance", choices=["instance", "batch", "group"],
+                    help="Normalization layer for CNetDualUNet3D: 'instance' (default), 'batch', or 'group'")
+    ap.add_argument("--n4", action="store_true",
+                    help="Apply fast downsampled SimpleITK N4 bias-field correction during normalization")
+    ap.add_argument("--val-tta", action="store_true",
+                    help="Average original and left-right flipped volume probabilities at validation/inference")
+    ap.add_argument("--calibrate-cnet", action="store_true",
+                    help="Calibrate per-fold C-Net threshold strictly on training-fold cases (zero val leakage)")
+    ap.add_argument("--calibrate-bme", action="store_true",
+                    help="Calibrate per-fold BME voxel threshold strictly on training-fold positives (zero val leakage)")
     args = ap.parse_args()
     if args.aug_spatial and not args.resample:
         raise SystemExit("--aug-spatial cuts fresh rotated patches each epoch; add --resample")
@@ -1377,6 +2011,7 @@ def main():
         args.resample or args.augment or
         args.aug_flip or args.aug_intensity or args.aug_noise or
         args.spacing or args.aniso or args.aug_spatial or
+        args.n4 or (args.norm_type != "instance") or
         (args.sampling_mix != "lesion=0.7,bone=0.0,random=0.3")
     )
     baseline_names = ("results3d", "results3d-attn")
@@ -1417,6 +2052,13 @@ def main():
         data_config["aniso"] = True
     if args.aug_spatial:
         data_config["aug_spatial"] = True
+    if args.n4:
+        data_config["n4"] = True
+    eff_norm_type = "group" if (args.model_arch == "orthogate_mednext" and args.norm_type == "instance") else args.norm_type
+    eff_tversky_alpha = float(args.tversky_alpha) if args.tversky_alpha is not None else (0.3 if args.model_arch == "orthogate_mednext" else 0.5)
+    eff_tversky_beta = float(args.tversky_beta) if args.tversky_beta is not None else (0.7 if args.model_arch == "orthogate_mednext" else 0.5)
+    if eff_norm_type != "instance":
+        data_config["norm_type"] = eff_norm_type
 
     out_dir = Path(args.out_dir) if args.out_dir else base / "data" / out_name
 
@@ -1472,7 +2114,7 @@ def main():
     t_sampling_total = 0.0
     for n, cid in enumerate(case_ids, start=1):
         print(f"Reading scan {n}/{len(case_ids)}. Cutting patches, then releasing the scan.", flush=True)
-        item = load_case(base, cid)
+        item = load_case(base, cid, n4=args.n4)
         if not item:
             continue
         if tgt_spacing:
@@ -1533,14 +2175,14 @@ def main():
                     "Patient-grouped folds cannot be formed safely without patient IDs. "
                     "To allow case-level splits, pass --allow-case-level-folds, or use --legacy-case-folds."
                 )
-            fold_mode = "case_level"
+            fold_mode = "case_level_stratified"
             for c in cases:
                 if not c.get("patient_id"):
                     c["patient_id"] = c["id"]
         else:
-            fold_mode = "patient_grouped"
+            fold_mode = "patient_grouped_stratified"
 
-        # 1. Group cases by patient
+        # 1. Group cases by patient so same-patient scans never leak across train and val
         patient_to_cases: dict[str, list[dict]] = {}
         for case in cases:
             pid = case["patient_id"]
@@ -1552,17 +2194,33 @@ def main():
         for pid in patient_to_cases:
             patient_to_cases[pid].sort(key=lambda c: c["id"])
 
-        # 2. Shuffle sorted unique patient IDs with SEED
+        # 2. Stratify unique patients into negative controls + 3 lesion-size tertile bins
         unique_patient_ids = sorted(patient_to_cases.keys())
         rng_patients = random.Random(SEED)
-        rng_patients.shuffle(unique_patient_ids)
+        neg_pids = [
+            pid for pid in unique_patient_ids
+            if sum(c["bme_voxels"] for c in patient_to_cases[pid]) == 0
+        ]
+        pos_pids = sorted(
+            [
+                pid for pid in unique_patient_ids
+                if sum(c["bme_voxels"] for c in patient_to_cases[pid]) > 0
+            ],
+            key=lambda pid: (sum(c["bme_voxels"] for c in patient_to_cases[pid]), pid),
+        )
+        n_pos = len(pos_pids)
+        b1, b2 = n_pos // 3, (2 * n_pos) // 3
+        strata = [neg_pids, pos_pids[:b1], pos_pids[b1:b2], pos_pids[b2:]]
 
-        # 3. Assign each patient group to the currently smallest fold (ties to lowest fold index)
+        # 3. Shuffle within each stratum with SEED and distribute evenly across folds
         groups = [[] for _ in range(folds_n)]
-        for pid in unique_patient_ids:
-            p_cases = patient_to_cases[pid]
-            smallest_fold_idx = min(range(folds_n), key=lambda f: len(groups[f]))
-            groups[smallest_fold_idx].extend(p_cases)
+        fold_cursor = 0
+        for stratum in strata:
+            s_pids = list(stratum)
+            rng_patients.shuffle(s_pids)
+            for pid in s_pids:
+                groups[fold_cursor % folds_n].extend(patient_to_cases[pid])
+                fold_cursor += 1
 
         patient_count = len(unique_patient_ids)
 
@@ -1729,7 +2387,9 @@ def main():
             ckpt_arch = ckpt.get("model_arch", args.model_arch)
             ckpt_bc = ckpt.get("base_channels", args.base_channels)
             ckpt_dc = ckpt.get("double_conv", args.double_conv)
-            model = build_model(arch=ckpt_arch, base_channels=ckpt_bc, double_conv=ckpt_dc).to(device)
+            ckpt_aniso = bool(ckpt.get("aniso", args.aniso))
+            ckpt_norm = ckpt.get("norm_type", args.norm_type)
+            model = build_model(arch=ckpt_arch, base_channels=ckpt_bc, double_conv=ckpt_dc, aniso=ckpt_aniso, norm_type=ckpt_norm).to(device)
             if args.channels_last_3d:
                 model = model.to(memory_format=torch.channels_last_3d)
             model.load_state_dict(ckpt["state"])
@@ -1750,10 +2410,10 @@ def main():
                 print(f"fold {fold}: train {len(train)} cases  val {len(val)} cases (arch={args.model_arch})", flush=True)
 
             arch = args.model_arch if hasattr(args, "model_arch") else ("attention-unet" if getattr(args, "model", "") == "attention-unet" else "unet3d")
-            base_channels = getattr(args, "base_channels", getattr(args, "width", 16))
+            base_channels = args.base_channels if args.base_channels != 16 else getattr(args, "width", 16)
             double_conv = getattr(args, "double_conv", False)
             aniso = getattr(args, "aniso", False)
-            model = build_model(arch=arch, base_channels=base_channels, double_conv=double_conv, aniso=aniso).to(device)
+            model = build_model(arch=arch, base_channels=base_channels, double_conv=double_conv, aniso=aniso, norm_type=eff_norm_type).to(device)
             if args.channels_last_3d:
                 model = model.to(memory_format=torch.channels_last_3d)
 
@@ -1884,84 +2544,78 @@ def main():
                 opt.zero_grad(set_to_none=True)
                 total_steps_fold += 1
                 has_cnet = hasattr(model, "cnet")
+                has_aux = bool(args.deep_supervision and hasattr(model, "ds2"))
+                amp_ctx = torch.amp.autocast(device_type="cuda") if use_amp else contextlib.nullcontext()
+                cnet_logit = None
+                aux_logits: list[torch.Tensor] = []
 
-                if has_cnet:
-                    has_bme = torch.stack([((lb == 2).sum() > 0).float() for lb in lab]).to(device).view(-1)
-                    if use_amp:
-                        with torch.amp.autocast(device_type="cuda"):
-                            logits, cnet_logit = model(x, return_cnet=True)
-                        logits = logits.float()
-                        loss_seg = logits.new_zeros(())
-                        for b in range(len(chunk)):
-                            tgt, valid = targets(lab[b])
-                            loss_seg = loss_seg + dice_focal(logits[b], tgt, valid, bme_weight=args.bme_loss_weight)
-                        loss_seg = loss_seg / len(chunk)
-                        loss_cnet = nn.functional.binary_cross_entropy_with_logits(cnet_logit.view(-1).float(), has_bme.float())
-                        loss = loss_seg + args.cnet_weight * loss_cnet
-                        if not torch.isfinite(loss):
-                            amp_skipped_epoch += 1
-                            amp_skipped_total += 1
-                            continue
-                        if scaler:
-                            scale_before = scaler.get_scale()
-                            scaler.scale(loss).backward()
-                            scaler.step(opt)
-                            scaler.update()
-                            scale_after = scaler.get_scale()
-                            if scale_after < scale_before:
-                                amp_skipped_epoch += 1
-                                amp_skipped_total += 1
-                        else:
-                            loss.backward()
-                            opt.step()
-                    else:
+                with amp_ctx:
+                    if has_aux:
+                        logits, cnet_logit, aux_logits = model(x, return_cnet=True, return_aux=True)
+                    elif has_cnet:
                         logits, cnet_logit = model(x, return_cnet=True)
-                        logits = logits.float()
-                        loss_seg = logits.new_zeros(())
-                        for b in range(len(chunk)):
-                            tgt, valid = targets(lab[b])
-                            loss_seg = loss_seg + dice_focal(logits[b], tgt, valid, bme_weight=args.bme_loss_weight)
-                        loss_seg = loss_seg / len(chunk)
-                        loss_cnet = nn.functional.binary_cross_entropy_with_logits(cnet_logit.view(-1).float(), has_bme.float())
-                        loss = loss_seg + args.cnet_weight * loss_cnet
-                        loss.backward()
-                        opt.step()
-                else:
-                    if use_amp:
-                        with torch.amp.autocast(device_type="cuda"):
-                            logits = model(x)
-                        logits = logits.float()
-                        loss = logits.new_zeros(())
-                        for b in range(len(chunk)):
-                            tgt, valid = targets(lab[b])
-                            loss = loss + dice_focal(logits[b], tgt, valid, bme_weight=args.bme_loss_weight)
-                        loss = loss / len(chunk)
-                        if not torch.isfinite(loss):
-                            amp_skipped_epoch += 1
-                            amp_skipped_total += 1
-                            continue
-                        if scaler:
-                            scale_before = scaler.get_scale()
-                            scaler.scale(loss).backward()
-                            scaler.step(opt)
-                            scaler.update()
-                            scale_after = scaler.get_scale()
-                            if scale_after < scale_before:
-                                amp_skipped_epoch += 1
-                                amp_skipped_total += 1
-                        else:
-                            loss.backward()
-                            opt.step()
                     else:
                         logits = model(x)
-                        logits = logits.float()
-                        loss = logits.new_zeros(())
-                        for b in range(len(chunk)):
-                            tgt, valid = targets(lab[b])
-                            loss = loss + dice_focal(logits[b], tgt, valid, bme_weight=args.bme_loss_weight)
-                        loss = loss / len(chunk)
-                        loss.backward()
-                        opt.step()
+
+                logits_fp32 = logits.float()
+                loss_seg = logits_fp32.new_zeros(())
+                batch_tgts = [targets(lab[b]) for b in range(len(chunk))]
+                for b, (tgt, valid) in enumerate(batch_tgts):
+                    loss_seg = loss_seg + dice_focal(
+                        logits_fp32[b],
+                        tgt,
+                        valid,
+                        bme_weight=args.bme_loss_weight,
+                        tversky_alpha=eff_tversky_alpha,
+                        tversky_beta=eff_tversky_beta,
+                    )
+                loss_seg = loss_seg / len(chunk)
+
+                if aux_logits:
+                    aux_loss = logits_fp32.new_zeros(())
+                    for aux in aux_logits:
+                        aux_fp32 = aux.float()
+                        for b, (tgt, valid) in enumerate(batch_tgts):
+                            aux_loss = aux_loss + dice_focal(
+                                aux_fp32[b],
+                                tgt,
+                                valid,
+                                bme_weight=args.bme_loss_weight,
+                                tversky_alpha=eff_tversky_alpha,
+                                tversky_beta=eff_tversky_beta,
+                            )
+                    loss_seg = loss_seg + 0.3 * (aux_loss / (len(chunk) * len(aux_logits)))
+
+                if has_cnet and cnet_logit is not None:
+                    has_bme = torch.stack([((lb == 2).sum() > 0).float() for lb in lab]).to(device).view(-1)
+                    loss_cnet = nn.functional.binary_cross_entropy_with_logits(
+                        cnet_logit.view(-1).float(),
+                        has_bme.float(),
+                    )
+                    loss = loss_seg + args.cnet_weight * loss_cnet
+                else:
+                    loss = loss_seg
+
+                if use_amp and not torch.isfinite(loss):
+                    amp_skipped_epoch += 1
+                    amp_skipped_total += 1
+                    continue
+
+                if scaler:
+                    scale_before = scaler.get_scale()
+                    scaler.scale(loss).backward()
+                    scaler.unscale_(opt)
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+                    scaler.step(opt)
+                    scaler.update()
+                    scale_after = scaler.get_scale()
+                    if scale_after < scale_before:
+                        amp_skipped_epoch += 1
+                        amp_skipped_total += 1
+                else:
+                    loss.backward()
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+                    opt.step()
 
                 total += float(loss.detach())
                 steps += 1
@@ -2015,6 +2669,7 @@ def main():
                         "double_conv": getattr(model, "double_conv", args.double_conv),
                         "cnet_threshold": args.cnet_threshold,
                         "cnet_weight": args.cnet_weight,
+                        "bme_threshold": args.bme_threshold,
                     },
                     latest_ckpt,
                 )
@@ -2063,6 +2718,41 @@ def main():
         if time_guard_triggered:
             break
 
+        fold_cnet_threshold = float(args.cnet_threshold)
+        if (not args.eval_only) and args.calibrate_cnet and hasattr(model, "cnet") and train:
+            fold_cnet_threshold = calibrate_cnet_threshold_from_train(
+                model,
+                train,
+                device,
+                patch,
+                val_batch_size=args.val_batch_size,
+                use_amp=use_amp,
+                channels_last=args.channels_last_3d,
+                default_thresh=fold_cnet_threshold,
+                cnet_temperature=args.cnet_temperature,
+            )
+            print(f"fold {fold}: calibrated cnet_threshold = {fold_cnet_threshold:.3f} (soft={args.cnet_soft}, train-only)", flush=True)
+
+        fold_bme_threshold = float(args.bme_threshold)
+        if (not args.eval_only) and args.calibrate_bme and train:
+            fold_bme_threshold = calibrate_bme_threshold_from_train(
+                model,
+                train,
+                device,
+                patch,
+                val_batch_size=args.val_batch_size,
+                use_amp=use_amp,
+                channels_last=args.channels_last_3d,
+                min_bme_voxels=args.min_bme_voxels,
+                cnet_threshold=fold_cnet_threshold,
+                default_thresh=fold_bme_threshold,
+                tta=args.val_tta,
+                gaussian_window=args.gaussian_window,
+                cnet_soft=args.cnet_soft,
+                cnet_temperature=args.cnet_temperature,
+            )
+            print(f"fold {fold}: calibrated bme_threshold = {fold_bme_threshold:.3f} (train-only, zero val leakage)", flush=True)
+
         t_val_start = time.time()
         bone_d, bme_d, sens, fps, present_hit, present_n = [], [], [], [], 0, 0
         bme_d_pos = []
@@ -2073,7 +2763,7 @@ def main():
         bone_box = [0, 0, 0]
         edema_box = [0, 0, 0]
         for val_idx, case in enumerate(val, 1):
-            loaded = load_case(base, case["id"])
+            loaded = load_case(base, case["id"], n4=args.n4)
             if not loaded:
                 continue
             # Predicted on the training grid, scored on the scan's own grid.
@@ -2087,8 +2777,12 @@ def main():
                 use_amp=use_amp,
                 channels_last=args.channels_last_3d,
                 min_bme_voxels=args.min_bme_voxels,
-                cnet_threshold=args.cnet_threshold,
-                bme_threshold=args.bme_threshold,
+                cnet_threshold=fold_cnet_threshold,
+                bme_threshold=fold_bme_threshold,
+                tta=args.val_tta,
+                gaussian_window=args.gaussian_window,
+                cnet_soft=args.cnet_soft,
+                cnet_temperature=args.cnet_temperature,
             )
             pred = back_to_shape(pred, loaded["labels"].shape)
             del val_image
@@ -2155,8 +2849,17 @@ def main():
                     "double_conv": getattr(model, "double_conv", False),
                     "min_bme_voxels": getattr(args, "min_bme_voxels", 50),
                     "model_arch": getattr(model, "model_arch", getattr(args, "model_arch", "mednext")),
-                    "cnet_threshold": getattr(args, "cnet_threshold", 0.40),
+                    "cnet_threshold": fold_cnet_threshold,
+                    "cnet_soft": bool(args.cnet_soft),
+                    "cnet_temperature": float(args.cnet_temperature),
                     "cnet_weight": getattr(args, "cnet_weight", 0.5),
+                    "bme_threshold": fold_bme_threshold,
+                    "norm_type": getattr(model, "norm_type", eff_norm_type),
+                    "gaussian_window": bool(args.gaussian_window),
+                    "tversky_alpha": eff_tversky_alpha,
+                    "tversky_beta": eff_tversky_beta,
+                    "val_tta": bool(args.val_tta),
+                    "n4": bool(args.n4),
                 },
                 final_ckpt,
             )
@@ -2222,7 +2925,17 @@ def main():
             "presence_n": present_n,
             "min_bme_voxels": getattr(args, "min_bme_voxels", 50),
             "model_arch": getattr(model, "model_arch", getattr(args, "model_arch", "mednext")),
-            "cnet_threshold": args.cnet_threshold if hasattr(model, "cnet") else None,
+            "cnet_threshold": fold_cnet_threshold if hasattr(model, "cnet") else None,
+            "cnet_soft": bool(args.cnet_soft),
+            "cnet_temperature": float(args.cnet_temperature),
+            "bme_threshold": fold_bme_threshold,
+            "norm_type": getattr(model, "norm_type", eff_norm_type),
+            "gaussian_window": bool(args.gaussian_window),
+            "tversky_beta": eff_tversky_beta,
+            "val_tta": bool(args.val_tta),
+            "n4": bool(args.n4),
+            "base_channels": getattr(model, "base_channels", args.base_channels),
+            "double_conv": getattr(model, "double_conv", args.double_conv),
             "bone_precision": b_prec,
             "bone_recall": b_rec,
             "bone_f1": b_f1,
@@ -2311,7 +3024,15 @@ def main():
             "presence_n": sum(r["presence_n"] for r in fold_rows),
             "min_bme_voxels": args.min_bme_voxels,
             "model_arch": getattr(model, "model_arch", args.model_arch),
-            "cnet_threshold": args.cnet_threshold if hasattr(model, "cnet") else None,
+            "cnet_threshold": fold_rows[0].get("cnet_threshold") if (fold_rows and hasattr(model, "cnet")) else (args.cnet_threshold if hasattr(model, "cnet") else None),
+            "cnet_soft": bool(args.cnet_soft),
+            "cnet_temperature": float(args.cnet_temperature),
+            "bme_threshold": fold_rows[0].get("bme_threshold", args.bme_threshold) if fold_rows else args.bme_threshold,
+            "norm_type": getattr(model, "norm_type", eff_norm_type),
+            "gaussian_window": bool(args.gaussian_window),
+            "tversky_beta": eff_tversky_beta,
+            "val_tta": bool(args.val_tta),
+            "n4": bool(args.n4),
             "base_channels": getattr(model, "base_channels", args.base_channels),
             "double_conv": getattr(model, "double_conv", args.double_conv),
             "amp_skipped_steps_total": total_skipped,

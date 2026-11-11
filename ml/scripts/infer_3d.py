@@ -17,10 +17,18 @@ from pathlib import Path
 import numpy as np
 import SimpleITK as sitk
 import torch
-from scipy.ndimage import label as cc_label
+from scipy.ndimage import label as cc_label, zoom
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from train_3d import PATCH, back_to_shape, build_model, guard_device, normalize, predict_volume, to_spacing  # noqa: E402
+from train_3d import (  # noqa: E402
+    PATCH,
+    build_model,
+    guard_device,
+    normalize,
+    postprocess_prediction,
+    predict_volume_probs,
+    to_spacing,
+)
 
 
 def read_nrrd(path: Path):
@@ -42,10 +50,57 @@ def pack(vol: np.ndarray) -> str:
     return base64.b64encode(np.asfortranarray(vol).ravel(order="F").tobytes()).decode("ascii")
 
 
+def _resolve_arch(blob: dict, default_name: str) -> str:
+    """Map legacy checkpoint architecture strings to canonical build_model names."""
+    arch = blob.get("model_arch") or blob.get("model") or default_name
+    if arch in ("attention-unet", "attention_unet"):
+        return "cnet_dual_unet"
+    if arch == "unet":
+        return "unet3d"
+    return arch
+
+
 WEIGHTS = {
     "results3d": "unet",
     "results3d-attn": "attention-unet",
 }
+
+
+def _resize_prob_to_shape(prob: np.ndarray, shape: tuple[int, int, int]) -> np.ndarray:
+    """Trilinearly resample continuous probability map back onto native scan shape."""
+    if prob.shape == shape:
+        return prob.astype(np.float32, copy=False)
+    factors = tuple(t / s for t, s in zip(shape, prob.shape))
+    out = zoom(prob.astype(np.float32, copy=False), factors, order=1)
+    return np.clip(out, 0.0, 1.0).astype(np.float32)
+
+
+def ensemble_fold_predictions(
+    fold_bones: list[np.ndarray],
+    fold_bmes: list[np.ndarray],
+    bme_thresholds: list[float],
+    min_bme_voxels: int = 50,
+    min_conf_voxels: int = 25,
+    high_conf: float = 0.65,
+) -> np.ndarray:
+    """Average continuous 5-fold probability maps, lock edema to bone, and run closing + hysteresis."""
+    n = len(fold_bones)
+    avg_bone = np.mean(fold_bones, axis=0, dtype=np.float32)
+    avg_bme = np.mean(fold_bmes, axis=0, dtype=np.float32)
+    bme_thr = float(np.mean(bme_thresholds)) if bme_thresholds else 0.50
+
+    mask = np.zeros(avg_bone.shape, dtype=np.uint8)
+    mask[avg_bone >= 0.5] = 1
+    mask[(avg_bme >= bme_thr) & (mask == 1)] = 2
+    if min_bme_voxels > 0 and n > 0:
+        mask = postprocess_prediction(
+            mask,
+            min_bme_voxels=min_bme_voxels,
+            prob_bme=avg_bme,
+            min_conf_voxels=min_conf_voxels,
+            high_conf=high_conf,
+        )
+    return mask
 
 
 def main():
@@ -60,52 +115,64 @@ def main():
         raise SystemExit(f"No weights in data/{out_name}. Train that model on the Training page first.")
 
     raw, spacing, affine = read_nrrd(src)
-    norm = normalize(raw)
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
     guard_device(device)
     first = torch.load(ckpts[0], map_location=device, weights_only=False)
-    arch = first.get("model_arch") or first.get("model") or WEIGHTS.get(out_name, "unet3d")
-    if arch in ("attention-unet", "attention_unet"):
-        arch = "cnet_dual_unet"
-    elif arch == "unet":
-        arch = "unet3d"
-    model_name = arch
-    width = int(first.get("base_channels") or first.get("width") or 16)
-    double_conv = bool(first.get("double_conv", False))
+    norm = normalize(raw, n4=bool(first.get("n4", False)))
+    default_arch = WEIGHTS.get(out_name, "unet3d")
+    model_name = _resolve_arch(first, default_arch)
     patch = tuple(first.get("patch") or PATCH)
-    aniso = bool(first.get("aniso", False))
-    grid_mm = float(first.get("spacing_mm") or 0.0)
-    min_vox = first.get("min_bme_voxels", 50)
-    cnet_thresh = first.get("cnet_threshold", 0.40)
+    aniso_default = bool(first.get("aniso", False))
+    norm_default = first.get("norm_type", "instance")
+    tta_default = bool(first.get("val_tta", False))
+    raw_sp = first.get("spacing_mm")
+    grid_mm = raw_sp if isinstance(raw_sp, (list, tuple)) else float(raw_sp or 0.0)
 
     grid, _ = to_spacing(norm, None, spacing, grid_mm)
-    model = build_model(arch=arch, base_channels=width, double_conv=double_conv, aniso=aniso).to(device)
-    model.load_state_dict(first["state"])
-    masks = [back_to_shape(predict_volume(model, grid, device, patch, min_bme_voxels=min_vox, cnet_threshold=cnet_thresh), norm.shape)]
-    for ck in ckpts[1:]:
-        blob = torch.load(ck, map_location=device, weights_only=False)
-        arch = blob.get("model_arch") or blob.get("model") or WEIGHTS.get(out_name, "unet3d")
-        if arch in ("attention-unet", "attention_unet"):
-            arch = "cnet_dual_unet"
-        elif arch == "unet":
-            arch = "unet3d"
-        bc = blob.get("base_channels") or blob.get("width") or 16
-        dc = blob.get("double_conv", False)
-        an = bool(blob.get("aniso", aniso))
-        min_vox = blob.get("min_bme_voxels", 50)
-        cnet_thresh = blob.get("cnet_threshold", 0.40)
-        model = build_model(arch=arch, base_channels=bc, double_conv=dc, aniso=an).to(device)
-        model.load_state_dict(blob["state"])
-        masks.append(back_to_shape(predict_volume(model, grid, device, patch, min_bme_voxels=min_vox, cnet_threshold=cnet_thresh), norm.shape))
+    fold_bones: list[np.ndarray] = []
+    fold_bmes: list[np.ndarray] = []
+    bme_thresholds: list[float] = []
+    min_vox_vals: list[int] = []
 
-    # Majority across folds, then drop edema that is not inside bone in that vote.
-    bone_votes = sum((m > 0).astype(np.uint8) for m in masks)
-    bme_votes = sum((m == 2).astype(np.uint8) for m in masks)
-    need = max(1, (len(masks) + 1) // 2)
-    mask = np.zeros(raw.shape, dtype=np.uint8)
-    mask[bone_votes >= need] = 1
-    mask[(bme_votes >= need) & (mask == 1)] = 2
+    for idx, ck in enumerate(ckpts):
+        blob = first if idx == 0 else torch.load(ck, map_location=device, weights_only=False)
+        arch = _resolve_arch(blob, default_arch)
+        bc = int(blob.get("base_channels") or blob.get("width") or 16)
+        dc = bool(blob.get("double_conv", False))
+        an = bool(blob.get("aniso", aniso_default))
+        nt = blob.get("norm_type", norm_default)
+        use_tta = bool(blob.get("val_tta", tta_default))
+        min_vox = int(blob.get("min_bme_voxels", 50))
+        cnet_thresh = float(blob.get("cnet_threshold", 0.30) or 0.30)
+        bme_thresh = float(blob.get("bme_threshold", 0.50) or 0.50)
+        cnet_soft = bool(blob.get("cnet_soft", True))
+        cnet_temp = float(blob.get("cnet_temperature", 1.0) or 1.0)
+        gauss_win = bool(blob.get("gaussian_window", True))
+        model = build_model(arch=arch, base_channels=bc, double_conv=dc, aniso=an, norm_type=nt).to(device)
+        model.load_state_dict(blob["state"])
+        avg_bone, avg_bme = predict_volume_probs(
+            model,
+            grid,
+            device,
+            patch,
+            cnet_threshold=cnet_thresh,
+            tta=use_tta,
+            gaussian_window=gauss_win,
+            cnet_soft=cnet_soft,
+            cnet_temperature=cnet_temp,
+        )
+        fold_bones.append(_resize_prob_to_shape(avg_bone, norm.shape))
+        fold_bmes.append(_resize_prob_to_shape(avg_bme, norm.shape))
+        bme_thresholds.append(bme_thresh)
+        min_vox_vals.append(min_vox)
+
+    mask = ensemble_fold_predictions(
+        fold_bones,
+        fold_bmes,
+        bme_thresholds,
+        min_bme_voxels=int(np.median(min_vox_vals)) if min_vox_vals else 50,
+    )
 
     vox = float(spacing[0] * spacing[1] * spacing[2])
     bme_n = int((mask == 2).sum())

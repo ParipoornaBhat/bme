@@ -242,9 +242,22 @@ export async function GET(req: NextRequest) {
                   summary: {
                     bone_dice: calcMeanStd(folds.map((r: any) => r.bone_dice || 0)),
                     bme_dice: calcMeanStd(folds.map((r: any) => r.bme_dice || 0)),
+                    bme_dice_pos: folds.some((r: any) => r.bme_dice_pos != null)
+                      ? calcMeanStd(folds.map((r: any) => r.bme_dice_pos ?? r.bme_dice ?? 0))
+                      : undefined,
                     lesion_sensitivity: calcMeanStd(folds.map((r: any) => r.lesion_sensitivity || 0)),
+                    lesion_sensitivity_pos: folds.some((r: any) => r.lesion_sensitivity_pos != null)
+                      ? calcMeanStd(folds.map((r: any) => r.lesion_sensitivity_pos ?? r.lesion_sensitivity ?? 0))
+                      : undefined,
+                    clean_scan_specificity: folds.some((r: any) => r.clean_scan_specificity != null)
+                      ? calcMeanStd(folds.map((r: any) => r.clean_scan_specificity ?? 0))
+                      : undefined,
                     fp_per_case: calcMeanStd(folds.map((r: any) => r.fp_per_case || 0)),
+                    fp_per_neg_case: folds.some((r: any) => r.fp_per_neg_case != null)
+                      ? calcMeanStd(folds.map((r: any) => r.fp_per_neg_case ?? 0))
+                      : undefined,
                   },
+                  sampling_mix: folds[0]?.sampling_mix,
                   presence_correct: folds.reduce((acc: number, r: any) => acc + (r.presence_correct || 0), 0),
                   presence_n: folds.reduce((acc: number, r: any) => acc + (r.presence_n || 0), 0),
                   per_fold: folds,

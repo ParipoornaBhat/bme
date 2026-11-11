@@ -1,9 +1,10 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { Activity, Boxes, CheckCircle2, Eye, Layers, Loader2, RefreshCw } from "lucide-react";
+import { Activity, Boxes, CheckCircle2, Database, Eye, Layers, Loader2, RefreshCw } from "lucide-react";
 import TestImage from "./TestImage";
 import Test3D from "./Test3D";
+import BenchmarksReport from "./BenchmarksReport";
 import { MODELS_3D, type Model3DId } from "~/lib/models3d";
 
 /**
@@ -59,9 +60,23 @@ type Payload = {
 
 type Metrics3D = {
   model: string; device: string; folds: number; epochs: number;
+  model_arch?: string;
   n_cases: number; n_bme: number; n_negative: number;
   presence_correct: number; presence_n: number; note: string;
+  fold_mode?: string;
   summary: Record<string, { mean: number; std: number } | null>;
+  per_fold?: Array<{
+    fold: number;
+    bone_dice?: number;
+    bme_dice?: number;
+    bme_dice_pos?: number;
+    lesion_sensitivity?: number;
+    lesion_sensitivity_pos?: number;
+    clean_scan_specificity?: number;
+    fp_per_case?: number;
+    presence_correct?: number;
+    presence_n?: number;
+  }>;
 };
 
 type CamEntry = { case_id: string; true: number; pred: number; prob: number; fold: number; thumb: string };
@@ -99,7 +114,7 @@ function MetricRow({ label, m, muted }: { label: string; m: Metric; muted?: bool
 }
 
 export default function ResultsPage() {
-  const [tab, setTab] = useState<"2d" | "3d">("2d");
+  const [tab, setTab] = useState<"2d" | "3d" | "benchmarks">("2d");
   const [model3d, setModel3d] = useState<Model3DId>("unet");
   const [data, setData] = useState<Payload | null>(null);
   const [loading, setLoading] = useState(true);
@@ -113,8 +128,8 @@ export default function ResultsPage() {
   // Hydrate results tab from localStorage
   useEffect(() => {
     try {
-      const savedTab = localStorage.getItem("bme_results_tab") as "2d" | "3d" | null;
-      if (savedTab === "2d" || savedTab === "3d") {
+      const savedTab = localStorage.getItem("bme_results_tab") as "2d" | "3d" | "benchmarks" | null;
+      if (savedTab === "2d" || savedTab === "3d" || savedTab === "benchmarks") {
         setTab(savedTab);
       }
       const savedModel = localStorage.getItem("bme_results_3d_model");
@@ -122,7 +137,7 @@ export default function ResultsPage() {
     } catch { /* ignore */ }
   }, []);
 
-  const handleTabChange = (newTab: "2d" | "3d") => {
+  const handleTabChange = (newTab: "2d" | "3d" | "benchmarks") => {
     setTab(newTab);
     try {
       localStorage.setItem("bme_results_tab", newTab);
@@ -205,6 +220,7 @@ export default function ResultsPage() {
         {([
           ["2d", "2D classifier", Layers],
           ["3d", "3D segmentation", Boxes],
+          ["benchmarks", "Benchmarks & Architectures", Database],
         ] as const).map(([id, label, Icon]) => (
           <button
             key={id}
@@ -469,6 +485,8 @@ export default function ResultsPage() {
         </div>
       )}
 
+      {tab === "benchmarks" && <BenchmarksReport />}
+
       {tab === "3d" && (
         <div className="space-y-5">
           <div className="rounded-lg border border-border border-l-4 border-l-primary bg-card p-4 text-sm text-muted-foreground">
@@ -531,29 +549,105 @@ export default function ResultsPage() {
             }
             return (
               <div className="rounded-lg border border-border bg-card p-4">
-                <div className="mb-3 text-xs font-semibold uppercase tracking-wider text-muted-foreground">
-                  {label} — {metrics.n_cases} volumes,{" "}
-                  {metrics.n_bme} with edema, {metrics.n_negative} without
-                  {" · "}{metrics.folds} folds, {metrics.epochs} epochs
+                <div className="mb-3 flex flex-wrap items-center gap-2 text-xs font-semibold uppercase tracking-wider text-muted-foreground">
+                  <span>
+                    {label} — {metrics.n_cases} volumes,{" "}
+                    {metrics.n_bme} with edema, {metrics.n_negative} without
+                    {" · "}{metrics.folds} folds, {metrics.epochs} epochs
+                  </span>
+                  {metrics.model_arch && (
+                    <span className={`rounded px-2 py-0.5 text-[10px] font-semibold normal-case tracking-normal ${
+                      metrics.model_arch === "orthogate_mednext"
+                        ? "bg-emerald-500/15 text-emerald-600 dark:text-emerald-400 border border-emerald-500/30"
+                        : "bg-muted text-foreground"
+                    }`}>
+                      {metrics.model_arch === "orthogate_mednext" ? "OrthoGate-MedNeXt3D" : metrics.model_arch}
+                    </span>
+                  )}
                 </div>
-                <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
-                  {(["bone_dice", "bme_dice", "lesion_sensitivity", "fp_per_case"] as const).map((k) => {
-                    const s = metrics.summary[k];
-                    const text = !s
-                      ? "—"
-                      : k === "fp_per_case"
-                        ? `${s.mean.toFixed(1)} ± ${s.std.toFixed(1)}`
-                        : `${s.mean.toFixed(3)} ± ${s.std.toFixed(3)}`;
-                    return (
-                      <div key={k} className="rounded-lg border border-border p-3">
-                        <div className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
-                          {k.replace(/_/g, " ")}
-                        </div>
-                        <div className="mt-1 text-xl font-semibold tabular-nums">{text}</div>
+                {(() => {
+                  const s = metrics.summary;
+                  const fmt = (m: { mean: number; std: number } | null | undefined, d = 3) =>
+                    m ? `${m.mean.toFixed(d)} \u00b1 ${m.std.toFixed(d)}` : "\u2014";
+                  const hasSplit = Boolean(s.bme_dice_pos || s.clean_scan_specificity);
+                  const cards = [
+                    {
+                      label: "Bone Dice",
+                      value: fmt(s.bone_dice),
+                      sub: s.bone_precision && s.bone_recall
+                        ? `Prec ${(s.bone_precision.mean * 100).toFixed(1)}% \u00b7 Rec ${(s.bone_recall.mean * 100).toFixed(1)}%`
+                        : "Cortical bone overlap",
+                    },
+                    {
+                      label: hasSplit ? "BME Dice (Positives)" : "BME Dice",
+                      value: fmt(s.bme_dice_pos ?? s.bme_dice),
+                      sub: hasSplit && s.bme_dice
+                        ? `Overall cohort (pos+neg): ${s.bme_dice.mean.toFixed(3)}`
+                        : "Edema voxel overlap",
+                    },
+                    {
+                      label: hasSplit ? "Lesion Sensitivity (Positives)" : "Lesion Sensitivity",
+                      value: fmt(s.lesion_sensitivity_pos ?? s.lesion_sensitivity),
+                      sub: hasSplit && s.lesion_sensitivity
+                        ? `Overall cohort: ${s.lesion_sensitivity.mean.toFixed(3)}`
+                        : "Painted lesions touched",
+                    },
+                    {
+                      label: s.clean_scan_specificity ? "Control Specificity (TNR)" : "FP per Case",
+                      value: s.clean_scan_specificity
+                        ? `${(s.clean_scan_specificity.mean * 100).toFixed(1)}%`
+                        : fmt(s.fp_per_case, 1),
+                      sub: s.fp_per_case
+                        ? `FP / case: ${fmt(s.fp_per_case, 1)}`
+                        : "False lesion clusters",
+                    },
+                  ];
+                  return (
+                    <>
+                      <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+                        {cards.map((c) => (
+                          <div key={c.label} className="rounded-lg border border-border p-3">
+                            <div className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+                              {c.label}
+                            </div>
+                            <div className="mt-1 text-xl font-semibold tabular-nums">{c.value}</div>
+                            <div className="mt-0.5 text-[11px] text-muted-foreground">{c.sub}</div>
+                          </div>
+                        ))}
                       </div>
-                    );
-                  })}
-                </div>
+                      {Array.isArray(metrics.per_fold) && metrics.per_fold.length > 0 && (
+                        <div className="mt-4 overflow-x-auto rounded-lg border border-border">
+                          <table className="w-full text-xs">
+                            <thead>
+                              <tr className="border-b border-border bg-muted/30 text-left text-[10px] uppercase tracking-wider text-muted-foreground">
+                                <th className="p-2">Fold</th>
+                                <th className="p-2 text-right">Bone Dice</th>
+                                <th className="p-2 text-right">BME Dice (Pos)</th>
+                                <th className="p-2 text-right">Overall Dice</th>
+                                <th className="p-2 text-right">Sens (Pos)</th>
+                                <th className="p-2 text-right">Control TNR</th>
+                                <th className="p-2 text-right">FP / Case</th>
+                              </tr>
+                            </thead>
+                            <tbody className="divide-y divide-border/50 tabular-nums">
+                              {metrics.per_fold.map((f, idx) => (
+                                <tr key={f.fold ?? idx}>
+                                  <td className="p-2 font-medium">Fold {f.fold ?? idx}</td>
+                                  <td className="p-2 text-right">{f.bone_dice != null ? f.bone_dice.toFixed(3) : "\u2014"}</td>
+                                  <td className="p-2 text-right font-semibold">{(f.bme_dice_pos ?? f.bme_dice) != null ? (f.bme_dice_pos ?? f.bme_dice)!.toFixed(3) : "\u2014"}</td>
+                                  <td className="p-2 text-right text-muted-foreground">{f.bme_dice != null ? f.bme_dice.toFixed(3) : "\u2014"}</td>
+                                  <td className="p-2 text-right">{(f.lesion_sensitivity_pos ?? f.lesion_sensitivity) != null ? `${(((f.lesion_sensitivity_pos ?? f.lesion_sensitivity)!) * 100).toFixed(1)}%` : "\u2014"}</td>
+                                  <td className="p-2 text-right">{f.clean_scan_specificity != null ? `${(f.clean_scan_specificity * 100).toFixed(1)}%` : "\u2014"}</td>
+                                  <td className="p-2 text-right">{f.fp_per_case != null ? f.fp_per_case.toFixed(1) : "\u2014"}</td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        </div>
+                      )}
+                    </>
+                  );
+                })()}
                 <p className="mt-3 text-sm">
                   Edema present or absent matched on {metrics.presence_correct} of{" "}
                   {metrics.presence_n} held-out volumes.

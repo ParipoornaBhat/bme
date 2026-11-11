@@ -19,6 +19,7 @@ import {
   Sparkles,
 } from "lucide-react";
 import { BUILD_STAMP } from "../../api/training-3d/kaggle/buildStamp";
+import { KaggleRunSummary } from "./KaggleRunSummary";
 
 interface Train3DState {
   running: boolean;
@@ -85,11 +86,14 @@ interface KaggleState {
 
 type KaggleStepId = "doctor" | "preflight" | "approve" | "upload" | "update-dataset" | "run" | "status" | "fetch-results" | "onetap";
 
+export type ModelArch3D = "orthogate_mednext" | "mednext" | "cnet_dual_unet" | "cnet_attention_unet" | "unet3d";
+
 export interface Train3DProps {
   torch?: TorchInfo | { cudaAvailable: boolean; deviceName: string | null; vramGB: number | null; reason?: string | null } | null;
   device?: "auto" | "cuda" | "cpu";
   onDevice?: (v: "auto" | "cuda" | "cpu") => void;
   onRunning?: (running: boolean) => void;
+  sectionMode?: "default" | "orthogate";
 }
 
 export default function Train3D({
@@ -97,6 +101,7 @@ export default function Train3D({
   device: propDevice,
   onDevice: propOnDevice,
   onRunning,
+  sectionMode = "default",
 }: Train3DProps = {}) {
   const [state, setState] = useState<Train3DState | null>(null);
   const [torch, setTorch] = useState<TorchInfo | null>(null);
@@ -106,23 +111,28 @@ export default function Train3D({
   const [busy, setBusy] = useState(false);
 
   // Compute Mode: "local" vs "kaggle"
-  const [computeMode, setComputeMode] = useState<"local" | "kaggle">("local");
+  const [computeMode, setComputeMode] = useState<"local" | "kaggle">(sectionMode === "orthogate" ? "kaggle" : "local");
 
-  // Model Architecture Switcher: "mednext" vs "cnet_dual_unet" vs "unet3d"
-  const [modelArch, setModelArch] = useState<"mednext" | "cnet_dual_unet" | "cnet_attention_unet" | "unet3d">("mednext");
+  // Model Architecture Switcher
+  const [modelArch, setModelArch] = useState<ModelArch3D>(sectionMode === "orthogate" ? "orthogate_mednext" : "mednext");
+  const activeArch: ModelArch3D = sectionMode === "orthogate" ? "orthogate_mednext" : modelArch;
 
   useEffect(() => {
+    if (sectionMode === "orthogate") {
+      setModelArch("orthogate_mednext");
+      return;
+    }
     try {
       const saved = localStorage.getItem("bme-3d-model-arch");
-      if (saved === "unet3d" || saved === "cnet_dual_unet" || saved === "cnet_attention_unet" || saved === "mednext") {
-        setModelArch(saved as "mednext" | "cnet_dual_unet" | "cnet_attention_unet" | "unet3d");
+      if (saved === "orthogate_mednext" || saved === "unet3d" || saved === "cnet_dual_unet" || saved === "cnet_attention_unet" || saved === "mednext") {
+        setModelArch(saved as ModelArch3D);
       }
     } catch {
       // ignore
     }
-  }, []);
+  }, [sectionMode]);
 
-  const onModelArch = (arch: "mednext" | "cnet_dual_unet" | "cnet_attention_unet" | "unet3d") => {
+  const onModelArch = (arch: ModelArch3D) => {
     setModelArch(arch);
     try {
       localStorage.setItem("bme-3d-model-arch", arch);
@@ -220,7 +230,7 @@ export default function Train3D({
       const r = await fetch("/api/training-3d", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ epochs, folds, device, modelArch }),
+        body: JSON.stringify({ epochs, folds, device, modelArch: activeArch }),
       });
       const j = await r.json();
       if (!r.ok) alert(j.error ?? "Could not start local training");
@@ -252,7 +262,7 @@ export default function Train3D({
           datasetSlug,
           kernelSlug,
           mode: runMode,
-          modelArch,
+          modelArch: activeArch,
           ...extraBody,
         }),
       });
@@ -285,7 +295,40 @@ export default function Train3D({
 
   return (
     <div className="space-y-4">
-      {/* Model Architecture Switcher */}
+      {sectionMode === "orthogate" ? (
+        <div className="rounded-xl border border-emerald-500/40 bg-gradient-to-br from-card to-emerald-500/5 p-4 space-y-3 shadow-sm border-l-4 border-l-emerald-500">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div className="flex items-center gap-2">
+              <Sparkles className="h-5 w-5 text-emerald-500" />
+              <span className="text-base font-bold text-foreground">OrthoGate-MedNeXt3D</span>
+              <span className="rounded-full bg-emerald-500/15 border border-emerald-500/30 px-2.5 py-0.5 text-[10px] font-semibold text-emerald-600 dark:text-emerald-400">
+                Clinical Flagship · &lt; 2.5 MB/fold
+              </span>
+            </div>
+            <span className="rounded bg-muted px-2 py-0.5 text-[10px] font-mono text-muted-foreground">
+              arch: orthogate_mednext
+            </span>
+          </div>
+          <p className="text-xs text-muted-foreground leading-relaxed">
+            Dedicated 3D volumetric pipeline engineered for subtle trabecular bone marrow edema: <strong>5×5×3 anisotropic MedNeXt blocks</strong>, multi-scale <strong>3D ASPP bottleneck</strong>, <strong>Bone-Guided Spatial Attention</strong>, and <strong>Deep Supervision</strong> — stabilized with batch-invariant <strong>GroupNorm</strong>, gradient clipping, asymmetric <strong>Tversky (α=0.3, β=0.7) + Focal loss</strong>, smooth <strong>Soft C-Net</strong> ramp gating, <strong>Gaussian patch stitching</strong>, 3D closing &amp; confidence hysteresis, and MRI scanner gamma/contrast/coil-shading augmentations.
+          </p>
+          <div className="flex flex-wrap gap-1.5 text-[11px]">
+            {[
+              "GroupNorm + GradClip",
+              "Tversky β=0.7 + Focal",
+              "Soft C-Net Gatekeeper",
+              "3D Closing + Hysteresis",
+              "Gaussian Patch Stitching",
+              "5-Fold Prob Ensemble",
+              "Gamma + Contrast + Coil Shading",
+            ].map((tag) => (
+              <span key={tag} className="rounded bg-emerald-500/10 px-2 py-0.5 font-medium text-emerald-700 dark:text-emerald-300">
+                {tag}
+              </span>
+            ))}
+          </div>
+        </div>
+      ) : (
       <div className="rounded-xl border border-border bg-card p-4 space-y-3 shadow-sm">
         <div className="flex flex-wrap items-center justify-between gap-2 border-b border-border/60 pb-2.5">
           <div className="flex items-center gap-2">
@@ -299,7 +342,55 @@ export default function Train3D({
           </span>
         </div>
 
-        <div className="grid grid-cols-1 lg:grid-cols-3 gap-3">
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+          {/* Card 0: OrthoGate-MedNeXt3D */}
+          <button
+            type="button"
+            onClick={() => onModelArch("orthogate_mednext")}
+            disabled={Boolean(state?.running || kaggleState?.running)}
+            className={`group text-left rounded-lg border p-4 transition-all relative ${
+              modelArch === "orthogate_mednext"
+                ? "border-emerald-500 bg-emerald-500/5 shadow-sm ring-1 ring-emerald-500/20 border-l-4 border-l-emerald-500"
+                : "border-border bg-card/60 hover:border-muted-foreground/30 hover:bg-muted/10 opacity-85"
+            } disabled:cursor-not-allowed`}
+          >
+            <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+              <div className="flex items-center gap-2">
+                <span className="text-base font-bold text-foreground group-hover:text-emerald-500 transition-colors flex items-center gap-1.5">
+                  <Sparkles className="h-4 w-4 text-emerald-500" />
+                  OrthoGate-MedNeXt3D
+                </span>
+                <span className="rounded-full bg-emerald-500/15 border border-emerald-500/30 px-2 py-0.5 text-[10px] font-semibold text-emerald-500">
+                  Recommended
+                </span>
+              </div>
+              <div>
+                {modelArch === "orthogate_mednext" ? (
+                  <span className="inline-flex items-center gap-1 rounded bg-emerald-600 px-2 py-0.5 text-[10px] font-semibold text-white">
+                    <CheckCircle2 className="h-3 w-3" /> Selected
+                  </span>
+                ) : (
+                  <span className="rounded border border-border px-2 py-0.5 text-[10px] text-muted-foreground hover:bg-muted">
+                    Click to Switch
+                  </span>
+                )}
+              </div>
+            </div>
+            <div className="mb-2 flex flex-wrap items-center gap-1.5">
+              <span className="rounded bg-emerald-500/10 px-2 py-0.5 text-xs font-medium text-emerald-600 dark:text-emerald-400">
+                5×5×3 MedNeXt + ASPP
+              </span>
+              <span className="rounded bg-muted px-2 py-0.5 text-xs font-medium">
+                Bone-Guided Attn + Deep Sup
+              </span>
+              <span className="rounded bg-muted px-2 py-0.5 text-xs font-medium">
+                GroupNorm + Soft C-Net
+              </span>
+            </div>
+            <p className="text-xs text-muted-foreground leading-relaxed">
+              Combines wider 5×5×3 marrow context, multi-scale ASPP, bone-locked edema attention, and Tversky+Focal loss (&lt; 2.5 MB/fold).
+            </p>
+          </button>
           {/* Card 1: C-Net + Dual-Channel 3D U-Net */}
           <button
             type="button"
@@ -454,6 +545,7 @@ export default function Train3D({
           </button>
         </div>
       </div>
+      )}
 
       {/* Compute Environment Switcher */}
       <div className="rounded-lg border border-border bg-card p-4">
@@ -1101,149 +1193,7 @@ export default function Train3D({
             {/* ================================================================= */}
             {(() => {
               const runMetrics = kaggleState?.runMetrics || (kaggleState?.runState as any)?.metrics;
-              if (!runMetrics) return null;
-
-              return (
-                <div className="rounded-xl border border-border bg-gradient-to-b from-card to-background p-4 sm:p-5 shadow-sm space-y-4">
-                  <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 border-b border-border/60 pb-3">
-                    <div>
-                      <div className="flex items-center gap-2">
-                        <span className="inline-flex h-2.5 w-2.5 rounded-full bg-emerald-500 animate-pulse" />
-                        <h4 className="text-sm sm:text-base font-bold text-foreground">
-                          Kaggle Training Run Results ({runMetrics.epochs ?? 2} Epochs, {runMetrics.folds ?? 5} Folds)
-                        </h4>
-                        <span className="rounded bg-primary/10 border border-primary/20 px-2 py-0.5 text-[10px] font-mono text-primary font-semibold uppercase">
-                          {kaggleState?.runState?.mode ?? "quick"}
-                        </span>
-                      </div>
-                      <p className="text-xs text-muted-foreground mt-0.5">
-                        Run ID: <code className="font-mono text-foreground font-semibold">{kaggleState?.runState?.run_id ?? "latest"}</code> · Device: <span className="uppercase">{runMetrics.device ?? "CUDA"}</span>
-                      </p>
-                    </div>
-                    {kaggleState?.runState?.dest_dir && (
-                      <span className="text-[11px] text-muted-foreground font-mono truncate max-w-xs">
-                        Archived to: {kaggleState.runState.dest_dir.split(/[/\\]/).slice(-1)[0]}
-                      </span>
-                    )}
-                  </div>
-
-                  {/* Active Pipeline Improvements */}
-                  <div className="flex flex-wrap items-center gap-2 text-[11px]">
-                    <span className="inline-flex items-center gap-1 rounded-md bg-emerald-500/10 border border-emerald-500/20 px-2 py-0.5 text-emerald-500 font-medium">
-                      ✓ 3D Augmentation (Flip, Intensity, Noise)
-                    </span>
-                    <span className="inline-flex items-center gap-1 rounded-md bg-blue-500/10 border border-blue-500/20 px-2 py-0.5 text-blue-500 font-medium">
-                      ✓ Dynamic Epoch Resampling
-                    </span>
-                    <span className="inline-flex items-center gap-1 rounded-md bg-purple-500/10 border border-purple-500/20 px-2 py-0.5 text-purple-500 font-medium">
-                      ✓ Lesion-Focus Mix (50% BME / 35% Bone / 15% Random)
-                    </span>
-                  </div>
-
-                  {/* Metric Summary Cards - Clinical Standard Split (Positive vs Negative) */}
-                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
-                    <div className="rounded-lg border border-border bg-muted/30 p-3 space-y-1">
-                      <span className="text-[10px] font-bold uppercase tracking-wider text-muted-foreground">Bone Dice</span>
-                      <div className="text-lg font-bold text-foreground">
-                        {runMetrics.summary?.bone_dice?.mean != null
-                          ? `${runMetrics.summary.bone_dice.mean.toFixed(3)} ± ${runMetrics.summary.bone_dice.std.toFixed(3)}`
-                          : "N/A"}
-                      </div>
-                      <p className="text-[10px] text-muted-foreground">Overlap with bone cortex</p>
-                    </div>
-
-                    <div className="rounded-lg border border-emerald-500/30 bg-emerald-500/5 p-3 space-y-1">
-                      <span className="text-[10px] font-bold uppercase tracking-wider text-emerald-400">
-                        {runMetrics.summary?.bme_dice_pos?.mean != null ? "BME Dice (Positives Only)" : "BME (Edema) Dice"}
-                      </span>
-                      <div className="text-lg font-bold text-emerald-400">
-                        {runMetrics.summary?.bme_dice_pos?.mean != null
-                          ? `${runMetrics.summary.bme_dice_pos.mean.toFixed(3)} ± ${runMetrics.summary.bme_dice_pos.std.toFixed(3)}`
-                          : runMetrics.summary?.bme_dice?.mean != null
-                          ? `${runMetrics.summary.bme_dice.mean.toFixed(3)} ± ${runMetrics.summary.bme_dice.std.toFixed(3)}`
-                          : "N/A"}
-                      </div>
-                      <p className="text-[10px] text-muted-foreground">
-                        {runMetrics.summary?.bme_dice_pos?.mean != null && runMetrics.summary?.bme_dice?.mean != null
-                          ? `True lesion (Overall: ${runMetrics.summary.bme_dice.mean.toFixed(3)})`
-                          : "Overlap with lesion volume"}
-                      </p>
-                    </div>
-
-                    <div className="rounded-lg border border-sky-500/30 bg-sky-500/5 p-3 space-y-1">
-                      <span className="text-[10px] font-bold uppercase tracking-wider text-sky-400">
-                        {runMetrics.summary?.clean_scan_specificity?.mean != null ? "Scan Specificity (TNR)" : "Lesion Sensitivity"}
-                      </span>
-                      <div className="text-lg font-bold text-sky-400">
-                        {runMetrics.summary?.clean_scan_specificity?.mean != null
-                          ? `${(runMetrics.summary.clean_scan_specificity.mean * 100).toFixed(1)}%`
-                          : runMetrics.summary?.lesion_sensitivity?.mean != null
-                          ? `${(runMetrics.summary.lesion_sensitivity.mean * 100).toFixed(1)}%`
-                          : "N/A"}
-                      </div>
-                      <p className="text-[10px] text-muted-foreground">
-                        {runMetrics.summary?.clean_scan_specificity?.mean != null
-                          ? "Healthy scans 100% clean"
-                          : "Patches touched by model"}
-                      </p>
-                    </div>
-
-                    <div className="rounded-lg border border-border bg-muted/30 p-3 space-y-1">
-                      <span className="text-[10px] font-bold uppercase tracking-wider text-muted-foreground">Presence Accuracy</span>
-                      <div className="text-lg font-bold text-foreground">
-                        {runMetrics.presence_correct != null && runMetrics.presence_n != null
-                          ? `${runMetrics.presence_correct}/${runMetrics.presence_n} (${((runMetrics.presence_correct / Math.max(1, runMetrics.presence_n)) * 100).toFixed(0)}%)`
-                          : "61/61 (100%)"}
-                      </div>
-                      <p className="text-[10px] text-muted-foreground">Edema detection match</p>
-                    </div>
-                  </div>
-
-                  {/* Per-Fold Detail Table */}
-                  {Array.isArray(runMetrics.per_fold) && runMetrics.per_fold.length > 0 && (
-                    <div className="rounded-lg border border-border overflow-hidden">
-                      <div className="bg-muted/50 px-3 py-2 text-xs font-semibold text-muted-foreground flex items-center justify-between">
-                        <span>Per-Fold Cross-Validation Scores</span>
-                        <span className="text-[10px] font-mono">{runMetrics.per_fold.length} Folds Evaluated</span>
-                      </div>
-                      <div className="overflow-x-auto">
-                        <table className="w-full text-xs">
-                          <thead>
-                            <tr className="border-b border-border bg-muted/20 text-muted-foreground text-left font-medium">
-                              <th className="p-2.5">Fold</th>
-                              <th className="p-2.5">Bone Dice</th>
-                              <th className="p-2.5">BME Dice (Pos)</th>
-                              <th className="p-2.5">Overall Dice</th>
-                              <th className="p-2.5">TNR (Specificity)</th>
-                              <th className="p-2.5">Sensitivity</th>
-                              <th className="p-2.5">FP / Case</th>
-                              <th className="p-2.5">Presence Match</th>
-                            </tr>
-                          </thead>
-                          <tbody className="divide-y divide-border/60">
-                            {runMetrics.per_fold.map((f: any, idx: number) => (
-                              <tr key={idx} className="hover:bg-muted/30">
-                                <td className="p-2.5 font-semibold font-mono">Fold {f.fold ?? idx}</td>
-                                <td className="p-2.5 font-mono">{f.bone_dice != null ? f.bone_dice.toFixed(3) : "—"}</td>
-                                <td className="p-2.5 font-mono text-emerald-400 font-semibold">
-                                  {f.bme_dice_pos != null ? f.bme_dice_pos.toFixed(3) : f.bme_dice != null ? f.bme_dice.toFixed(3) : "—"}
-                                </td>
-                                <td className="p-2.5 font-mono text-muted-foreground">{f.bme_dice != null ? f.bme_dice.toFixed(3) : "—"}</td>
-                                <td className="p-2.5 font-mono text-sky-400 font-medium">
-                                  {f.clean_scan_specificity != null ? `${(f.clean_scan_specificity * 100).toFixed(1)}%` : "—"}
-                                </td>
-                                <td className="p-2.5 font-mono">{f.lesion_sensitivity != null ? `${(f.lesion_sensitivity * 100).toFixed(1)}%` : "—"}</td>
-                                <td className="p-2.5 font-mono">{f.fp_per_case != null ? f.fp_per_case.toFixed(1) : "—"}</td>
-                                <td className="p-2.5 font-mono">{f.presence_correct != null ? `${f.presence_correct}/${f.presence_n}` : "—"}</td>
-                              </tr>
-                            ))}
-                          </tbody>
-                        </table>
-                      </div>
-                    </div>
-                  )}
-                </div>
-              );
+              return <KaggleRunSummary runMetrics={runMetrics} runState={kaggleState?.runState} />;
             })()}
           </div>
         ) : (
@@ -1292,7 +1242,7 @@ export default function Train3D({
                   className="inline-flex items-center gap-2 rounded-md bg-primary px-4 py-2 text-sm font-medium text-primary-foreground disabled:opacity-40"
                 >
                   {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : <Play className="h-4 w-4" />}
-                  Train {modelArch === "mednext" ? "MedNeXt 3D" : (modelArch === "cnet_dual_unet" || modelArch === "cnet_attention_unet") ? "C-Net + Dual-Channel U-Net" : "3D U-Net"} (Local)
+                  Train {activeArch === "orthogate_mednext" ? "OrthoGate-MedNeXt3D" : activeArch === "mednext" ? "MedNeXt 3D" : (activeArch === "cnet_dual_unet" || activeArch === "cnet_attention_unet") ? "C-Net + Dual-Channel U-Net" : "3D U-Net"} (Local)
                 </button>
               )}
             </div>

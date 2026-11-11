@@ -548,6 +548,7 @@ def run_launch_kernel(
     api: Any,
     username: str,
     model_arch: str = "cnet_attention_unet",
+    accelerator: Optional[str] = None,
 ) -> str:
     """Build kernel with CONFIG_MODE and push to Kaggle GPU."""
     mode_map = {
@@ -592,9 +593,14 @@ def run_launch_kernel(
     code_file.write_text(json.dumps(nb_content, indent=2), encoding="utf-8")
 
     meta_path = staging_dir / "kernel-metadata.json"
+    kernel_title = (
+        "BME 3D UNet Training"
+        if kernel_slug == "bme-3d-unet-training"
+        else kernel_slug.replace("-", " ").title()
+    )
     meta = {
         "id": full_kernel_slug,
-        "title": "BME 3D UNet Training",
+        "title": kernel_title,
         "code_file": "train_3d_colab.ipynb",
         "language": "python",
         "kernel_type": "notebook",
@@ -605,9 +611,19 @@ def run_launch_kernel(
             full_dataset_slug,
         ],
     }
+    if accelerator:
+        meta["machine_shape"] = accelerator
     meta_path.write_text(json.dumps(meta, indent=2), encoding="utf-8")
 
-    api.kernels_push(str(staging_dir))
+    for attempt in range(1, 5):
+        try:
+            api.kernels_push(str(staging_dir))
+            break
+        except Exception as e:
+            if attempt >= 4:
+                raise
+            print(f"[WARNING] Kaggle kernel push attempt {attempt}/4 failed ({type(e).__name__}: {e}). Retrying in {attempt * 4}s...", flush=True)
+            time.sleep(attempt * 4)
     shutil.rmtree(staging_dir, ignore_errors=True)
     return full_kernel_slug
 
@@ -622,6 +638,7 @@ def run_pipeline(
     kernel_slug: str = "bme-3d-unet-training",
     api: Optional[Any] = None,
     model_arch: str = "cnet_attention_unet",
+    accelerator: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Execute end-to-end cloud training run: launch -> watch -> download -> verified import."""
     check_no_in_repo_kaggle_credentials(src_dir)
@@ -758,8 +775,13 @@ def run_pipeline(
         state_file.write_text(json.dumps(run_state, indent=2), encoding="utf-8")
 
         # Push kernel
-        run_launch_kernel(src_dir, mode, kernel_slug, dataset_slug, api, username, model_arch=model_arch)
-        print(f"[OK] Kernel launched on Kaggle GPU: {full_kernel_slug} (Mode: {mode}, Arch: {model_arch})")
+        run_launch_kernel(
+            src_dir, mode, kernel_slug, dataset_slug, api, username,
+            model_arch=model_arch,
+            accelerator=accelerator,
+        )
+        acc_label = f", Acc: {accelerator}" if accelerator else ""
+        print(f"[OK] Kernel launched on Kaggle GPU: {full_kernel_slug} (Mode: {mode}, Arch: {model_arch}{acc_label})")
     else:
         run_id = run_state["run_id"]
         mode = run_state.get("mode", mode)
@@ -1759,8 +1781,10 @@ def build_parser() -> argparse.ArgumentParser:
     p_run.add_argument("--export-dir", type=str, default=os.getenv("BME_EXPORT_DIR", "../bme_colab_export"))
     p_run.add_argument("--dataset-slug", type=str, default=os.getenv("KAGGLE_DATASET_SLUG", "bme-3d-dataset"))
     p_run.add_argument("--kernel-slug", type=str, default=os.getenv("KAGGLE_KERNEL_SLUG", "bme-3d-unet-training"))
-    p_run.add_argument("--model-arch", choices=["unet3d", "cnet_dual_unet", "cnet_attention_unet", "mednext"], default="mednext",
-                       help="Model architecture to train on GPU (default: mednext)")
+    p_run.add_argument("--model-arch", choices=["unet3d", "cnet_dual_unet", "cnet_attention_unet", "mednext", "orthogate_mednext"], default="orthogate_mednext",
+                       help="Model architecture to train on GPU (default: orthogate_mednext)")
+    p_run.add_argument("--accelerator", choices=["NvidiaTeslaT4", "NvidiaTeslaP100"], default=None,
+                       help="Optional Kaggle GPU machine shape (e.g., NvidiaTeslaT4 or NvidiaTeslaP100)")
 
     # onetap
     p_one = subparsers.add_parser("onetap", parents=[common_parser], help="Execute full one-tap automated training pipeline")
@@ -1773,8 +1797,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_one.add_argument("--mapping-file", type=str, default=os.getenv("BME_MAPPING_FILE", "../bme_recovery/export_mapping.json"))
     p_one.add_argument("--dataset-slug", type=str, default=os.getenv("KAGGLE_DATASET_SLUG", "bme-3d-dataset"))
     p_one.add_argument("--kernel-slug", type=str, default=os.getenv("KAGGLE_KERNEL_SLUG", "bme-3d-unet-training"))
-    p_one.add_argument("--model-arch", choices=["unet3d", "cnet_dual_unet", "cnet_attention_unet", "mednext"], default="mednext",
-                       help="Model architecture to train on GPU (default: mednext)")
+    p_one.add_argument("--model-arch", choices=["unet3d", "cnet_dual_unet", "cnet_attention_unet", "mednext", "orthogate_mednext"], default="orthogate_mednext",
+                       help="Model architecture to train on GPU (default: orthogate_mednext)")
 
     # status
     p_st = subparsers.add_parser("status", parents=[common_parser], help="Query kernel execution status on Kaggle")
@@ -1840,6 +1864,7 @@ def main():
                 dataset_slug=args.dataset_slug,
                 kernel_slug=args.kernel_slug,
                 model_arch=getattr(args, "model_arch", "cnet_attention_unet"),
+                accelerator=getattr(args, "accelerator", None),
             )
         elif args.subcommand == "onetap":
             run_onetap(

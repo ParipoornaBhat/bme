@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Boxes, CheckCircle2, ChevronDown, Circle, Info, Layers, Loader2, PenTool, Play, Square, Target, Trash2, Trophy } from "lucide-react";
+import { Boxes, CheckCircle2, ChevronDown, Circle, Info, Layers, Loader2, PenTool, Play, Sparkles, Square, Target, Trash2, Trophy } from "lucide-react";
 import Train3D from "./Train3D";
 import { SystemMonitor, useSystem } from "~/components/SystemMonitor";
 
@@ -244,7 +244,7 @@ export default function TrainingPage() {
   const [tta, setTta] = useState(false);
   const [busy, setBusy] = useState(false);
   const [progress, setProgress] = useState<Prog | null>(null);
-  const [tab, setTab] = useState<"cls" | "seg" | "vol">("cls");
+  const [tab, setTab] = useState<"cls" | "seg" | "vol" | "orthogate">("cls");
   const [volRunning, setVolRunning] = useState(false);
   const [seg, setSeg] = useState<SegState | null>(null);
   const [segEpochs, setSegEpochs] = useState(40);
@@ -262,8 +262,8 @@ export default function TrainingPage() {
   // Restore training tab and options from localStorage
   useEffect(() => {
     try {
-      const savedTab = localStorage.getItem("bme_training_tab") as "cls" | "seg" | "vol" | null;
-      if (savedTab === "cls" || savedTab === "seg" || savedTab === "vol") setTab(savedTab);
+      const savedTab = localStorage.getItem("bme_training_tab") as "cls" | "seg" | "vol" | "orthogate" | null;
+      if (savedTab === "cls" || savedTab === "seg" || savedTab === "vol" || savedTab === "orthogate") setTab(savedTab);
       const savedArch = localStorage.getItem("bme_training_arch");
       if (savedArch) setArch(savedArch);
       const savedFolds = localStorage.getItem("bme_training_folds");
@@ -289,7 +289,7 @@ export default function TrainingPage() {
     } catch { /* ignore */ }
   }, []);
 
-  const handleTabChange = (newTab: "cls" | "seg" | "vol") => {
+  const handleTabChange = (newTab: "cls" | "seg" | "vol" | "orthogate") => {
     setTab(newTab);
     try { localStorage.setItem("bme_training_tab", newTab); } catch { /* ignore */ }
   };
@@ -421,11 +421,12 @@ export default function TrainingPage() {
         </p>
       </div>
 
-      <div className="flex items-center gap-1 border-b border-border">
+      <div className="flex flex-wrap items-center gap-1 border-b border-border">
         {([
           ["cls", "1. Detection (BME Present / Absent)", Layers],
           ["seg", "2. Segmentation (2D U-Net Mark Edema)", Target],
           ["vol", "3. 3D segmentation (bone + edema)", Boxes],
+          ["orthogate", "4. OrthoGate-MedNeXt3D", Sparkles],
         ] as const).map(([id, label, Icon]) => (
           <button key={id} onClick={() => handleTabChange(id)}
             className={`-mb-px inline-flex items-center gap-2 border-b-2 px-4 py-2 text-sm font-medium transition ${
@@ -449,7 +450,10 @@ export default function TrainingPage() {
 
       <SystemMonitor sys={sys} />
 
-      {tab === "vol" ? (
+      {tab === "orthogate" ? (
+        <Train3D sectionMode="orthogate" torch={torch} device={device} onRunning={setVolRunning}
+          onDevice={(v) => { setDevice(v); try { localStorage.setItem("bme_training_device", v); } catch { /* ignore */ } }} />
+      ) : tab === "vol" ? (
         <Train3D torch={torch} device={device} onRunning={setVolRunning}
           onDevice={(v) => { setDevice(v); try { localStorage.setItem("bme_training_device", v); } catch { /* ignore */ } }} />
       ) : tab === "seg" ? (
