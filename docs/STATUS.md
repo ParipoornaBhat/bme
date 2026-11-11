@@ -4,7 +4,7 @@
 If you are picking this project up cold (new chat, new teammate, new machine), read this
 file first, then [SUMMARY.md](SUMMARY.md) for the full picture, then [PRD.md](PRD.md).
 
-Last updated: **2026-10-08**
+Last updated: **2026-11-11**
 
 ---
 
@@ -70,6 +70,20 @@ Phases are defined in [PRD.md](PRD.md) §8.
 
 In order. Each step's output is the next step's input.
 
+0a. **24 new BME cases from the 2026-11-11 Drive download (BME-062 to BME-085).** The
+   re-download holds 132 folders: the 108 audited in [SLICER_EXPORT_AUDIT.md](SLICER_EXPORT_AUDIT.md)
+   are byte-identical to September (none of the requested re-uploads or fixes arrived), plus
+   24 new folders (Drive 67, 69-74, 147-162, one unnumbered = `X3`). All 24: one non-empty
+   edema segment on an axial PD fat-sat scan, exact grid fit, no duplicate scan or study.
+   Every current BME-001..061 traces to a Drive folder by scan voxels and edema overlap.
+   Shared as a name-free `bme_newcases_20261111.zip` (182 MB, Drive) with a manifest pinning
+   each folder to its ID. Each laptop: put the zip in the repo root, `data/` or
+   `data/exports/`, then `pnpm data:import:newcases`. It refuses if the laptop would assign
+   different IDs, and skips cases already imported. Tested on scratch copies only (fresh,
+   re-run, ID mismatch); **not yet run on the hub.** Review before trusting: tiny markings on
+   Drive 67, 71, 154, 157, X3 (X3 is 1 slice, 0.38 ml); Drive 67 may be the same patient as
+   66 (BME-035), and 69 / X3 / 49 share a name word (DICOM demographics blank, unconfirmed);
+   147 and 149 have unnamed series, so fat suppression is not confirmed by name.
 0. **Team annotation split and merge (2026-10-27).** Split by case number, same range for
    `BME-` and `NBME-`: Paripoorna 1-15 · Elvin 16-30 · Aditi 31-45 · Reegan 46-61 (`TEAM` in
    `ml/scripts/team_annotations.py`). Everyone exports with `pnpm zipbme:<name>`; the hub drops

@@ -24,13 +24,25 @@ filename is the patient link, appended to data/deid_map.csv, which is
 gitignored. The source folder is deleted only after that write succeeds.
 Folders with no zip are left untouched. Without --apply, nothing is written
 and nothing is deleted.
+
+A bundle (`bme_newcases_*.zip`, shared on Drive) holds the same per-patient
+folders plus a manifest.json that pins each folder to its case ID:
+
+    pnpm data:import:newcases                 # finds the newest bundle in the repo root, data/ or data/exports/
+    pnpm data:import:newcases path/to/bundle.zip
+
+The import refuses to start if this laptop would hand out different IDs than
+the manifest, so every laptop ends up with the same BME numbers. Re-running it
+skips cases already imported. The bundle itself is never modified.
 """
 
 from __future__ import annotations
 
 import argparse
+import atexit
 import csv
 import json
+import os
 import re
 import shutil
 import sys
@@ -278,17 +290,62 @@ def append_rows(path: Path, fields: list[str], rows: list[dict]):
         writer.writerows(rows)
 
 
+BUNDLE_GLOB = "bme_newcases_*.zip"
+
+
+def find_bundle(base: Path, given: str) -> Path:
+    if given != "auto":
+        p = Path(given)
+        for root in (Path.cwd(), Path(os.environ.get("INIT_CWD", ".")), base):
+            if (root / p).is_file():
+                return (root / p).resolve()
+        sys.exit(f"no such bundle: {given}")
+    hits = []
+    for d in (base, base / "data", base / "data" / "exports"):
+        if d.is_dir():
+            hits += d.glob(BUNDLE_GLOB)
+    if not hits:
+        sys.exit(f"no {BUNDLE_GLOB} in the repo root, data/ or data/exports/. "
+                 "Download it from Drive into the project folder, or pass its path.")
+    return max(hits, key=lambda p: p.name)
+
+
+def open_bundle(bundle: Path, dest: Path) -> dict[str, str]:
+    """Extract the bundle into dest; return folder -> case ID from its manifest."""
+    with zipfile.ZipFile(bundle) as zf:
+        for n in zf.namelist():
+            if n.startswith(("/", "\\")) or ".." in Path(n).parts:
+                sys.exit(f"refusing bundle with unsafe path {n!r}")
+        zf.extractall(dest)
+    manifest = dest / "manifest.json"
+    if not manifest.is_file():
+        sys.exit(f"{bundle.name} has no manifest.json - not a new-cases bundle")
+    raw = json.loads(manifest.read_text(encoding="utf-8"))
+    return {c["folder"]: c["case_id"] for c in raw["cases"]}
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("base")
     ap.add_argument("--src", default="data/newbme", help="folder of one subfolder per patient")
+    ap.add_argument("--bundle", nargs="?", const="auto",
+                    help=f"import a {BUNDLE_GLOB} instead of --src (path, or found automatically)")
     ap.add_argument("--apply", action="store_true")
     ap.add_argument("--keep", "--no-delete", action="store_true", dest="keep",
                     help="leave the source folder or zip in data/newbme")
     args = ap.parse_args()
 
     base = Path(args.base)
-    src = Path(args.src) if Path(args.src).is_absolute() else base / args.src
+    expected: dict[str, str] = {}
+    if args.bundle:
+        bundle = find_bundle(base, args.bundle)
+        src = Path(tempfile.mkdtemp(prefix="bme-bundle-"))
+        atexit.register(shutil.rmtree, src, True)
+        expected = open_bundle(bundle, src)
+        args.keep = True
+        print(f"bundle {bundle} ({len(expected)} cases)")
+    else:
+        src = Path(args.src) if Path(args.src).is_absolute() else base / args.src
     if not src.is_dir():
         sys.exit(f"missing {src}\nPut one folder per patient inside it, then run this again.")
 
@@ -318,6 +375,15 @@ def main():
         print(f"new ids: {ids[0]} .. {ids[-1]}" if len(ids) > 1 else f"new id: {ids[0]}")
     for i, (_, why) in enumerate(skipped, 1):
         print(f"  skip {i:2d}  {why}")
+
+    if expected:
+        wrong = [(e.name, cid, expected.get(e.name)) for (e, _), cid in zip(plan, ids)
+                 if expected.get(e.name) != cid]
+        if wrong:
+            for folder, got, want in wrong:
+                print(f"  {folder}: would become {got}, bundle says {want}")
+            sys.exit("stopped: this laptop's case IDs differ from the bundle's. "
+                     "Sync data/ with the hub first (pnpm data:sync), then run this again.")
 
     if not args.apply:
         print("\ndry run: nothing written and nothing deleted. Add --apply to import.")

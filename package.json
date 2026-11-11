@@ -33,6 +33,7 @@
     "db:sync": "pnpm --filter @bme/db db:sync",
     "data:process": "node scripts/data-menu.js",
     "data:process:bme": "node scripts/import-newbme.js",
+    "data:import:newcases": "node scripts/import-newbme.js --bundle",
     "data:3d:erase": "node scripts/erase-3d.js",
     "data:3d:nonbme:process": "node scripts/nonbme-to-nrrd.js",
     "data:nonbme:process": "node scripts/import-newnonbme.js",
