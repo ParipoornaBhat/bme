@@ -791,7 +791,7 @@ def run_pipeline(
     if phase in ("QUEUED", "RUNNING", "FAILED"):
         last_log_time = 0
         consecutive_network_errors = 0
-        max_network_retries = 8
+        max_network_retries = 120
         while True:
             is_network_err = False
             try:
@@ -808,11 +808,20 @@ def run_pipeline(
             now = time.time()
             if is_network_err:
                 if consecutive_network_errors <= max_network_retries:
-                    print(f"[STATUS] Network blip polling Kaggle ({consecutive_network_errors}/{max_network_retries}), retrying in 10s...")
-                    time.sleep(10)
+                    if consecutive_network_errors % 4 == 1:
+                        print(f"[STATUS] Network blip polling Kaggle ({consecutive_network_errors}/{max_network_retries}), retrying in 15s...")
+                    time.sleep(15)
                     continue
                 else:
-                    status_raw = "error"
+                    run_state["phase"] = "RUNNING"
+                    run_state["status_message"] = "Local polling paused (network offline); Kaggle job continues in cloud — click Fetch Results to resume."
+                    run_state["updated_at"] = int(now)
+                    try:
+                        state_file.write_text(json.dumps(run_state, indent=2), encoding="utf-8")
+                    except Exception:
+                        pass
+                    print("[WARNING] Local network offline too long; paused polling without cancelling Kaggle GPU run.")
+                    return run_state
 
             if now - last_log_time >= 10.0:
                 print(f"[STATUS] Kaggle kernel status: {status_raw.upper()}" + (f" - {failure_msg}" if failure_msg else ""))
