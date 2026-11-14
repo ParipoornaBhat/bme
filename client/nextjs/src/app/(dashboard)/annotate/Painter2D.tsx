@@ -51,10 +51,11 @@ import {
 import { MaskSync, type MaskSyncIO } from "~/lib/mask-sync";
 import {
   useOverlayView,
-  renderLabels,
   isLabelVisible,
   OverlayControls,
+  LABEL_RGBA,
 } from "~/lib/useOverlayView";
+import { renderSmoothLabels, smoothScale } from "~/lib/smooth-labels";
 import {
   dragBox,
   handleAt,
@@ -97,6 +98,12 @@ const LABELS = [
   { id: 2, name: "BME Lesion", color: "rgba(239, 68, 68, 0.55)", stroke: "#ef4444", badge: "bg-red-500/20 text-red-400 border-red-500/40" },
   { id: 3, name: "Uncertain", color: "rgba(245, 158, 11, 0.50)", stroke: "#f59e0b", badge: "bg-amber-500/20 text-amber-400 border-amber-500/40" },
 ] as const;
+
+/** Display pixels per mask pixel: up to 4, keeping the canvas within 2048 px. */
+const displayScale = (w: number, h: number) => smoothScale(w, h, 2048);
+
+/** Smallest pointer movement, in mask pixels, that adds a point to a pencil trace. */
+const PENCIL_STEP = 0.75;
 
 export default function Painter2D({
   collabToken: externalCollabToken,
@@ -288,6 +295,8 @@ export default function Painter2D({
   const bgCanvasRef = useRef<HTMLCanvasElement>(null);
   const maskCanvasRef = useRef<HTMLCanvasElement>(null);
   const overlayCanvasRef = useRef<HTMLCanvasElement>(null);
+  const visibleGridRef = useRef<Uint8Array | null>(null);
+  const maskImageRef = useRef<ImageData | null>(null);
   const viewportRef = useRef<HTMLDivElement>(null);
   const maskDataRef = useRef<Uint8Array | null>(null);
   const sliceLoadingRef = useRef(false);
@@ -418,14 +427,31 @@ export default function Painter2D({
     const { w, h } = imgDimRef.current;
     if (!canvas || !mask || w === 0 || h === 0) return;
 
-    if (canvas.width !== w) canvas.width = w;
-    if (canvas.height !== h) canvas.height = h;
+    // The canvas holds k display pixels per mask pixel so edges can be drawn
+    // smooth; the mask itself stays one label per scan pixel.
+    const k = displayScale(w, h);
+    if (canvas.width !== w * k) canvas.width = w * k;
+    if (canvas.height !== h * k) canvas.height = h * k;
 
     const ctx = canvas.getContext("2d");
     if (!ctx) return;
 
-    const imgData = ctx.createImageData(w, h);
-    const { counts: newCounts } = renderLabels(mask, w, h, viewRef.current, imgData.data);
+    const view = viewRef.current;
+    let grid = visibleGridRef.current;
+    if (!grid || grid.length !== w * h) grid = visibleGridRef.current = new Uint8Array(w * h);
+    const newCounts = { bone: 0, bme: 0, uncertain: 0 };
+    for (let i = 0; i < mask.length; i++) {
+      const v = mask[i];
+      if (v === 1) newCounts.bone++;
+      else if (v === 2) newCounts.bme++;
+      else if (v === 3) newCounts.uncertain++;
+      grid[i] = v && isLabelVisible(v, view) ? v : 0;
+    }
+    let imgData = maskImageRef.current;
+    if (!imgData || imgData.width !== w * k || imgData.height !== h * k) {
+      imgData = maskImageRef.current = ctx.createImageData(w * k, h * k);
+    }
+    renderSmoothLabels(grid, w, h, k, LABEL_RGBA, imgData.data);
     ctx.putImageData(imgData, 0, 0);
     setCounts(newCounts);
     countsRef.current = newCounts;
@@ -673,16 +699,17 @@ export default function Painter2D({
       }
 
       // Initialize mask array
+      const k = displayScale(w, h);
       const maskCanvas = maskCanvasRef.current;
       if (maskCanvas) {
-        maskCanvas.width = w;
-        maskCanvas.height = h;
+        maskCanvas.width = w * k;
+        maskCanvas.height = h * k;
       }
 
       const overlayCanvas = overlayCanvasRef.current;
       if (overlayCanvas) {
-        overlayCanvas.width = w;
-        overlayCanvas.height = h;
+        overlayCanvas.width = w * k;
+        overlayCanvas.height = h * k;
       }
 
       const maskArr = new Uint8Array(w * h);
@@ -763,6 +790,7 @@ export default function Painter2D({
     if (!canvas) return;
     const ctx = canvas.getContext("2d");
     if (!ctx) return;
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
     ctx.clearRect(0, 0, canvas.width, canvas.height);
   }, []);
 
@@ -772,12 +800,16 @@ export default function Painter2D({
     if (!canvas) return;
     const ctx = canvas.getContext("2d");
     if (!ctx) return;
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
     ctx.clearRect(0, 0, canvas.width, canvas.height);
 
     const pts = outlineRef.current;
     if (pts.length < 2) return;
 
     ctx.save();
+    // Points are in mask pixels with pixel centres on whole numbers.
+    const k = canvas.width / (imgDimRef.current.w || canvas.width);
+    ctx.setTransform(k, 0, 0, k, k / 2, k / 2);
     // Erasing shows as a white outline over a darkened area: what will be
     // removed, never mistakable for an edema (red) outline.
     const strokeColor = isErasing
@@ -830,14 +862,16 @@ export default function Painter2D({
     const { w, h } = imgDimRef.current;
     if (!mask || w === 0 || h === 0) return;
 
+    // (cx, cy) is a sub-pixel point; a pixel is painted when its centre is
+    // inside the circle, so the stamp follows the pointer, not a pixel grid.
     const val = isErasing ? 0 : activeLabel;
-    const r = Math.max(1, Math.round(brushSize / 2));
+    const r = Math.max(0.5, brushSize / 2);
     const r2 = r * r;
 
-    const minX = Math.max(0, cx - r);
-    const maxX = Math.min(w - 1, cx + r);
-    const minY = Math.max(0, cy - r);
-    const maxY = Math.min(h - 1, cy + r);
+    const minX = Math.max(0, Math.ceil(cx - r));
+    const maxX = Math.min(w - 1, Math.floor(cx + r));
+    const minY = Math.max(0, Math.ceil(cy - r));
+    const maxY = Math.min(h - 1, Math.floor(cy + r));
     const hasBone = countsRef.current.bone > 0;
 
     for (let y = minY; y <= maxY; y++) {
@@ -854,6 +888,9 @@ export default function Painter2D({
       }
     }
   };
+
+  /** Spacing of brush stamps along a stroke, small enough that the edge stays smooth. */
+  const brushStep = () => Math.min(1, Math.max(0.25, brushSize / 8));
 
   /**
    * Pencil: close the traced outline and fill everything inside it using even-odd scanline fill.
@@ -972,6 +1009,7 @@ export default function Painter2D({
     const canvas = overlayCanvasRef.current;
     const ctx = canvas?.getContext("2d");
     if (!canvas || !ctx) return;
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
     ctx.clearRect(0, 0, canvas.width, canvas.height);
     const sel = moveSelRef.current;
     if (!sel) return;
@@ -980,6 +1018,8 @@ export default function Painter2D({
     const lw = Math.max(1, Math.round(w / 350));
     const hs = Math.max(4, Math.round(w / 70));
     ctx.save();
+    const k = canvas.width / (w || canvas.width);
+    ctx.setTransform(k, 0, 0, k, 0, 0);
     ctx.lineWidth = lw;
     ctx.strokeStyle = "#ffffff";
     ctx.setLineDash([lw * 4, lw * 3]);
@@ -1163,7 +1203,7 @@ export default function Painter2D({
     const x = (clientX - rect.left) * (canvas.offsetWidth / rect.width);
     const y = (clientY - rect.top) * (canvas.offsetHeight / rect.height);
     // Size is a diameter in image pixels, like the brush.
-    const r = (torchSizeRef.current / 2) * (canvas.offsetWidth / canvas.width);
+    const r = (torchSizeRef.current / 2) * (canvas.offsetWidth / (imgDimRef.current.w || canvas.width));
     const hole = `radial-gradient(circle ${r}px at ${x}px ${y}px, transparent ${Math.max(0, r - 1.5)}px, black ${r}px)`;
     canvas.style.maskImage = hole;
     canvas.style.webkitMaskImage = hole;
@@ -1189,14 +1229,20 @@ export default function Painter2D({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [torchActive, torchSize]);
 
-  /** Image pixel under a screen point, clamped to the image. */
+  /**
+   * Image position under a screen point, in mask pixels with pixel centres on
+   * whole numbers, clamped to the image. Not rounded: strokes follow the
+   * pointer between pixels.
+   */
   const coordsAt = (clientX: number, clientY: number) => {
     const canvas = maskCanvasRef.current;
-    if (!canvas) return { x: 0, y: 0 };
+    const { w, h } = imgDimRef.current;
+    if (!canvas || w === 0 || h === 0) return { x: 0, y: 0 };
     const rect = canvas.getBoundingClientRect();
+    if (rect.width === 0 || rect.height === 0) return { x: 0, y: 0 };
     return {
-      x: Math.max(0, Math.min(canvas.width - 1, Math.round((clientX - rect.left) * (canvas.width / rect.width)))),
-      y: Math.max(0, Math.min(canvas.height - 1, Math.round((clientY - rect.top) * (canvas.height / rect.height)))),
+      x: Math.max(0, Math.min(w - 1, (clientX - rect.left) * (w / rect.width) - 0.5)),
+      y: Math.max(0, Math.min(h - 1, (clientY - rect.top) * (h / rect.height) - 0.5)),
     };
   };
 
@@ -1322,7 +1368,7 @@ export default function Painter2D({
     if (tool === "pencil") {
       const pts = outlineRef.current;
       const last = pts[pts.length - 1];
-      if (!last || Math.hypot(pos.x - last[0], pos.y - last[1]) >= 2) {
+      if (!last || Math.hypot(pos.x - last[0], pos.y - last[1]) >= PENCIL_STEP) {
         pts.push([pos.x, pos.y]);
         drawOutlineOverlay();
       }
@@ -1331,10 +1377,10 @@ export default function Painter2D({
 
     const last = lastPosRef.current || pos;
     const dist = Math.hypot(pos.x - last.x, pos.y - last.y);
-    const steps = Math.max(1, Math.ceil(dist / 2));
+    const steps = Math.max(1, Math.ceil(dist / brushStep()));
     for (let i = 0; i <= steps; i++) {
       const t = i / steps;
-      paintAt(Math.round(last.x + (pos.x - last.x) * t), Math.round(last.y + (pos.y - last.y) * t));
+      paintAt(last.x + (pos.x - last.x) * t, last.y + (pos.y - last.y) * t);
     }
 
     lastPosRef.current = pos;
@@ -1428,7 +1474,7 @@ export default function Painter2D({
     if (tool === "pencil") {
       const pts = outlineRef.current;
       const last = pts[pts.length - 1];
-      if (!last || Math.hypot(pos.x - last[0], pos.y - last[1]) >= 2) {
+      if (!last || Math.hypot(pos.x - last[0], pos.y - last[1]) >= PENCIL_STEP) {
         pts.push([pos.x, pos.y]);
         drawOutlineOverlay();
       }
@@ -1437,10 +1483,10 @@ export default function Painter2D({
     const last = lastPosRef.current || pos;
     // Line interpolation between mouse move steps
     const dist = Math.hypot(pos.x - last.x, pos.y - last.y);
-    const steps = Math.max(1, Math.ceil(dist / 2));
+    const steps = Math.max(1, Math.ceil(dist / brushStep()));
     for (let i = 0; i <= steps; i++) {
       const t = i / steps;
-      paintAt(Math.round(last.x + (pos.x - last.x) * t), Math.round(last.y + (pos.y - last.y) * t));
+      paintAt(last.x + (pos.x - last.x) * t, last.y + (pos.y - last.y) * t);
     }
     lastPosRef.current = pos;
     renderMaskToCanvas();
@@ -1476,7 +1522,7 @@ export default function Painter2D({
       const over = sel && pt ? handleAt(sel.to, pt.x, pt.y, pt.tol) : null;
       const pos = getCanvasCoords(e);
       const next = over ? HANDLE_CURSOR[over]
-        : maskDataRef.current?.[pos.y * imgDimRef.current.w + pos.x] ? "pointer" : "crosshair";
+        : maskDataRef.current?.[Math.round(pos.y) * imgDimRef.current.w + Math.round(pos.x)] ? "pointer" : "crosshair";
       if (next !== moveCursor) setMoveCursor(next);
       return;
     }

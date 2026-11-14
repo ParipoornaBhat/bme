@@ -285,6 +285,7 @@ from that file, step by step.
 
 0. **Review and annotation tool suite complete (2026-09-24, branch `collaborative-radiologist-view`).**
    All 5 collaborative review and annotation tasks are implemented:
+   - **Smooth brush, pencil and eraser (2026-11-13):** 2D and 3D draw the labels at up to 4 display pixels per scan pixel (`lib/smooth-labels.ts`): bilinear coverage, edge at one half, one-pixel anti-aliased ramp, so outlines are curves instead of squares. Brush and pencil take sub-pixel pointer positions; a pixel is painted when its centre is inside the brush circle or the traced outline. The 3D brush now joins up fast moves instead of leaving gaps. Display only: masks are still saved one label per scan pixel. Typechecked, the renderer checked on a test grid, and tested in the app by the team (2026-11-14).
    - **Name prompt fix:** The server renders no form until the page has mounted, so a click before the JS loads can't reload the page; storage writes are try-wrapped.
    - **Host lobby, rejoin and leave:** Host admission lobby with messages `JOIN_PENDING` / `JOIN_REQUESTS` / `ADMIT` / `DENY` / `LEAVE` / `HOST_BACK`, 20-guest cap, guest rejoin via session `rejoinKey`, and replacement of older duplicate pending sockets.
    - **Views and opacity:** Label views: Both / Red / Green / None (key V), opacity 0–100%, local to each screen, in 2D painter, 3D multi-planar viewer, and 3D surface render.
