@@ -71,6 +71,7 @@ import { Pinch } from "~/lib/pinch";
 import { usePaintTools, usePencilDottedSetting, type DrawTool } from "~/lib/usePaintTools";
 import { edgePanStep, useAutoPanSetting, useSpaceHeld } from "~/lib/view-pan";
 import { isInTorch, type TorchState } from "~/lib/torch";
+import { renderSmoothLabels, scratchCanvas, smoothScale, type Rgba } from "~/lib/smooth-labels";
 import {
   dragBox,
   handleAt,
@@ -118,6 +119,15 @@ export const SEGMENTS = [
 ] as const;
 
 type Plane = "axial" | "coronal" | "sagittal";
+
+/** Display pixels per voxel in a view: up to 4, keeping each canvas within 1536 px. */
+const displayScale = (w: number, h: number) => smoothScale(w, h, 1536);
+
+/** Smallest pointer movement, in voxels, that adds a point to a pencil trace. */
+const PENCIL_STEP = 0.75;
+
+/** A point in a view, in voxels; `fa`/`fb` keep the sub-voxel position. */
+type Hit = { a: number; b: number; fa?: number; fb?: number };
 const PLANES: Plane[] = ["axial", "coronal", "sagittal"];
 /** A view that can be shown on its own: one of the planes, or the 3D render. */
 export type ViewerView = Plane | "3d";
@@ -863,11 +873,17 @@ export default function Viewer({
     const { data, dims, lo, hi } = vol;
     const { w, h } = planeGeom(p, vol);
     const s = sliceOf(p, vol, cursor);
-    if (cv.width !== w || cv.height !== h) { cv.width = w; cv.height = h; }
+    // The canvas holds k display pixels per voxel: the scan is scaled up
+    // smoothly and the labels are drawn over it with smooth edges. The label
+    // volume itself stays one value per voxel.
+    const k = displayScale(w, h);
+    if (cv.width !== w * k || cv.height !== h * k) { cv.width = w * k; cv.height = h * k; }
 
     const ctx = cv.getContext("2d");
     if (!ctx) return;
-    const img = ctx.createImageData(w, h);
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    const img = new ImageData(w, h);
+    const grid = new Uint8Array(w * h);
     const range = hi - lo || 1;
     const currentTorch = torchRef.current;
 
@@ -875,27 +891,42 @@ export default function Viewer({
       for (let a = 0; a < w; a++) {
         const flat = sampleAt(p, vol, a, b, s);
         const v = data[flat];
-        let g = Math.round(((Math.min(Math.max(v, lo), hi) - lo) / range) * 255);
-        let r = g, bl = g;
+        const g = Math.round(((Math.min(Math.max(v, lo), hi) - lo) / range) * 255);
+        const row = h - 1 - b; // flip so anatomy is upright
         const lv = labels[flat];
-        if (lv && !isInTorch(a, b, p, currentTorch) && isLabelVisible(lv, view)) {
-          const segDef = SEGMENTS.find((x) => x.value === lv);
-          if (segDef) {
-            const c = segDef.color;
-            const cr = parseInt(c.slice(1, 3), 16),
-              cg = parseInt(c.slice(3, 5), 16),
-              cb = parseInt(c.slice(5, 7), 16);
-            [r, g, bl] = blendLabel(g, [cr, cg, cb], opacity);
-          }
-        }
-        const o = ((h - 1 - b) * w + a) * 4; // flip so anatomy is upright
-        img.data[o] = r; img.data[o + 1] = g; img.data[o + 2] = bl; img.data[o + 3] = 255;
+        if (lv && !isInTorch(a, b, p, currentTorch) && isLabelVisible(lv, view)) grid[row * w + a] = lv;
+        const o = (row * w + a) * 4;
+        img.data[o] = g; img.data[o + 1] = g; img.data[o + 2] = g; img.data[o + 3] = 255;
       }
     }
+    const scan = scratchCanvas(`scan-${p}`, w, h);
+    scan.getContext("2d")!.putImageData(img, 0, 0);
+    ctx.imageSmoothingEnabled = true;
+    ctx.imageSmoothingQuality = "high";
+    ctx.drawImage(scan, 0, 0, w * k, h * k);
+
+    // Drawing a label colour at this alpha over the scan gives the same mix
+    // as blendLabel: its colour weight, out of 255.
+    const alpha = blendLabel(0, [255, 255, 255], opacity)[0];
+    const colors: (Rgba | undefined)[] = [];
+    for (const sd of SEGMENTS) {
+      const c = sd.color;
+      colors[sd.value] = [parseInt(c.slice(1, 3), 16), parseInt(c.slice(3, 5), 16), parseInt(c.slice(5, 7), 16), alpha];
+    }
+    if (alpha > 0) {
+      const layer = scratchCanvas(`labels-${p}`, w * k, h * k);
+      const lctx = layer.getContext("2d")!;
+      const limg = lctx.createImageData(w * k, h * k);
+      renderSmoothLabels(grid, w, h, k, colors, limg.data);
+      lctx.putImageData(limg, 0, 0);
+      ctx.drawImage(layer, 0, 0);
+    }
+
     // Pending AI suggestion: dotted outline only, the inside stays as painted.
     if (suggestion && suggestion.caseId === caseId) {
+      const sug = new ImageData(w, h);
       drawSuggestionEdges(
-        img, w, h, suggestion, dims, vol.axes.axial.slice,
+        sug, w, h, suggestion, dims, vol.axes.axial.slice,
         (a, b) => sampleAt(p, vol, a, b, s),
         {
           bone: isLabelVisible(1, view),
@@ -904,8 +935,14 @@ export default function Viewer({
         },
         { bone: SEGMENTS[0].color, edema: SEGMENTS[1].color },
       );
+      const dots = scratchCanvas(`suggest-${p}`, w, h);
+      dots.getContext("2d")!.putImageData(sug, 0, 0);
+      ctx.imageSmoothingEnabled = false;
+      ctx.drawImage(dots, 0, 0, w * k, h * k);
+      ctx.imageSmoothingEnabled = true;
     }
-    ctx.putImageData(img, 0, 0);
+    // Everything below is drawn in voxel units.
+    ctx.setTransform(k, 0, 0, k, 0, 0);
 
     // Crosshair, drawn after the pixels so it sits on top.
     const { a: ca, b: cb } = cursorInPlane(p, vol, cursor);
@@ -933,9 +970,10 @@ export default function Viewer({
       const lw = Math.max(1.5, Math.round(w / 300));
       ctx.save();
       ctx.beginPath();
+      // Trace points sit on voxel centres, half a voxel in from the corner.
       const [x0, y0] = outline.current[0];
-      ctx.moveTo(x0, h - 1 - y0);
-      for (const [x, y] of outline.current.slice(1)) ctx.lineTo(x, h - 1 - y);
+      ctx.moveTo(x0 + 0.5, h - 0.5 - y0);
+      for (const [x, y] of outline.current.slice(1)) ctx.lineTo(x + 0.5, h - 0.5 - y);
       ctx.closePath();
       if (!pencilDotted) {
         ctx.globalAlpha = erasing ? 0.4 : 0.22;
@@ -1305,10 +1343,13 @@ export default function Viewer({
     if (!vol || !cv) return null;
     const rect = cv.getBoundingClientRect();
     const { w, h } = planeGeom(p, vol);
-    const a = Math.floor(((clientX - rect.left) / rect.width) * w);
-    const b = h - 1 - Math.floor(((clientY - rect.top) / rect.height) * h);
+    const x = ((clientX - rect.left) / rect.width) * w;
+    const y = ((clientY - rect.top) / rect.height) * h;
+    const a = Math.floor(x);
+    const b = h - 1 - Math.floor(y);
     if (a < 0 || b < 0 || a >= w || b >= h) return null;
-    return { a, b };
+    // Sub-voxel position with voxel centres on whole numbers, for strokes.
+    return { a, b, fa: x - 0.5, fb: h - 0.5 - y } as Hit;
   }, [vol, planeGeom]);
   const toVoxel = useCallback(
     (p: Plane, ev: React.PointerEvent<HTMLCanvasElement>) => toVoxelAt(p, ev.clientX, ev.clientY),
@@ -1340,20 +1381,36 @@ export default function Viewer({
   }, [vol, labels, cursor, planeGeom, sliceOf, sampleAt]);
   const strokeHasBone = useRef(false);
 
-  const paintAt = useCallback((p: Plane, hit: { a: number; b: number }) => {
+  /** Where the brush was last stamped in this stroke, so moves are joined up. */
+  const brushLast = useRef<{ plane: Plane; x: number; y: number } | null>(null);
+
+  const paintAt = useCallback((p: Plane, hit: Hit) => {
     if (!vol || !labels) return;
     const { w, h } = planeGeom(p, vol);
     const s = sliceOf(p, vol, cursor);
     const r = brush;
+    const r2 = r * r;
+    const tx = hit.fa ?? hit.a, ty = hit.fb ?? hit.b;
+    const from = brushLast.current?.plane === p ? brushLast.current : { x: tx, y: ty };
+    brushLast.current = { plane: p, x: tx, y: ty };
 
-    for (let db = -r; db <= r; db++) {
-      for (let da = -r; da <= r; da++) {
-        if (da * da + db * db > r * r) continue;
-        const a = hit.a + da, b = hit.b + db;
-        if (a < 0 || b < 0 || a >= w || b >= h) continue;
-        const i = sampleAt(p, vol, a, b, s);
-        if (!canPaint(labels[i], seg, { erasing, insideBone: maskInside, hasBone: strokeHasBone.current, protectLesion })) continue;
-        labels[i] = erasing ? 0 : seg;
+    // A voxel is painted when its centre is inside the circle, with stamps
+    // close enough along the move that the edge stays smooth.
+    const step = Math.min(1, Math.max(0.25, r / 4));
+    const steps = Math.max(1, Math.ceil(Math.hypot(tx - from.x, ty - from.y) / step));
+    for (let n = 0; n <= steps; n++) {
+      const cx = from.x + ((tx - from.x) * n) / steps;
+      const cy = from.y + ((ty - from.y) * n) / steps;
+      const a0 = Math.max(0, Math.ceil(cx - r)), a1 = Math.min(w - 1, Math.floor(cx + r));
+      const b0 = Math.max(0, Math.ceil(cy - r)), b1 = Math.min(h - 1, Math.floor(cy + r));
+      for (let b = b0; b <= b1; b++) {
+        const dy2 = (b - cy) * (b - cy);
+        for (let a = a0; a <= a1; a++) {
+          if ((a - cx) * (a - cx) + dy2 > r2) continue;
+          const i = sampleAt(p, vol, a, b, s);
+          if (!canPaint(labels[i], seg, { erasing, insideBone: maskInside, hasBone: strokeHasBone.current, protectLesion })) continue;
+          labels[i] = erasing ? 0 : seg;
+        }
       }
     }
     markEdited();
@@ -1364,10 +1421,11 @@ export default function Viewer({
       planeGeom, sampleAt, sliceOf, drawAll, markEdited]);
 
   /** Add a point to the pencil outline being traced, skipping repeats. */
-  const traceTo = useCallback((hit: { a: number; b: number }) => {
+  const traceTo = useCallback((hit: Hit) => {
+    const x = hit.fa ?? hit.a, y = hit.fb ?? hit.b;
     const last = outline.current[outline.current.length - 1];
-    if (!last || last[0] !== hit.a || last[1] !== hit.b) {
-      outline.current.push([hit.a, hit.b]);
+    if (!last || Math.hypot(x - last[0], y - last[1]) >= PENCIL_STEP) {
+      outline.current.push([x, y]);
       setOutlineTick((n) => n + 1);
     }
   }, []);
@@ -3206,6 +3264,9 @@ export default function Viewer({
                 } rounded`}
                 style={{
                   imageRendering: "auto",
+                  // The bitmap is drawn at several pixels per voxel; the box
+                  // stays one CSS pixel per voxel, as when it was sized by the bitmap.
+                  width: `${g.w}px`,
                   // Fill the square tile while keeping true physical proportions.
                   aspectRatio: `${g.mmW} / ${g.mmH}`,
                   maxWidth: "100%", maxHeight: "100%",
@@ -3243,7 +3304,7 @@ export default function Viewer({
                   if (e.button !== 0 || !canAnnotate) return;
                   if (tool === "pencil") {
                     pencilPlane.current = p;
-                    outline.current = [[hit.a, hit.b]];
+                    outline.current = [[hit.fa ?? hit.a, hit.fb ?? hit.b]];
                     beginStroke(p, e);
                     setOutlineTick((n) => n + 1);
                   } else {
@@ -3254,6 +3315,7 @@ export default function Viewer({
                     ];
                     strokeHasBone.current = sliceHasBone(p);
                     beginStroke(p, e);
+                    brushLast.current = null;
                     paintAt(p, hit);
                     if (!locked && canMoveSlices) moveCursor(p, hit.a, hit.b);
                   }
@@ -3295,6 +3357,9 @@ export default function Viewer({
                 onPointerLeave={() => {
                   // Leaving the image does not end a stroke; releasing the
                   // mouse button or lifting the pen does, wherever it happens.
+                  // Re-entering starts a fresh segment, so the brush does not
+                  // draw a line across from where it left.
+                  brushLast.current = null;
                   if (torchRef.current?.plane === p) {
                     torchRef.current = null;
                     draw(p);

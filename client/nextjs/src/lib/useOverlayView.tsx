@@ -33,6 +33,14 @@ export function hiddenLabelsForView(view: OverlayViewMode): Set<number> {
   return new Set();
 }
 
+/** Overlay colour and alpha of each label in the 2D painter, indexed by label value. */
+export const LABEL_RGBA: readonly (readonly [number, number, number, number] | undefined)[] = [
+  undefined,
+  [16, 185, 129, 165],
+  [239, 68, 68, 185],
+  [245, 158, 11, 175],
+];
+
 /**
  * Pure helper: paints labels onto a RGBA pixel array (e.g. ImageData.data).
  * Always calculates accurate counts for all labels regardless of view mode.
