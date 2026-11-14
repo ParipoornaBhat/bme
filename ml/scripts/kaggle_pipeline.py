@@ -601,13 +601,14 @@ def embed_current_trainer(nb_content: Dict[str, Any], src_dir: Path) -> str:
         raise FileNotFoundError("[ERROR] ml/scripts/train_3d.py not found.")
     data = script.read_bytes()
     b64 = base64.b64encode(data).decode("ascii")
+    pattern = r'^BUNDLED_CODE_B64\s*=\s*(?:"""[\s\S]*?"""|"[A-Za-z0-9+/=\s]*")'
     for cell in nb_content.get("cells", []):
         if cell.get("cell_type") != "code":
             continue
         src = "".join(cell.get("source", []))
-        if 'BUNDLED_CODE_B64 = "' not in src:
+        if 'BUNDLED_CODE_B64' not in src:
             continue
-        new, n = re.subn(r'^BUNDLED_CODE_B64 = "[A-Za-z0-9+/=]*"', lambda _m: f'BUNDLED_CODE_B64 = "{b64}"',
+        new, n = re.subn(pattern, lambda _m: f'BUNDLED_CODE_B64 = "{b64}"',
                          src, count=1, flags=re.M)
         if n != 1:
             raise ValueError("[ERROR] Could not replace BUNDLED_CODE_B64 in the notebook.")

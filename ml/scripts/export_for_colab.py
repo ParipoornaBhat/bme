@@ -53,6 +53,7 @@ import csv
 import hashlib
 import json
 import os
+import shutil
 import random
 import sys
 import zipfile
