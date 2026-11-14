@@ -9,6 +9,7 @@ Team of 4 (CSE, NMAMIT).
 made, known problems. This project spans many sessions; STATUS.md is how continuity is kept.
 
 Then as needed: [docs/SUMMARY.md](docs/SUMMARY.md) (everything implemented, in one place) ·
+[docs/DATA.md](docs/DATA.md) (data flows, inbox tree, team sync, data commands) ·
 [docs/PRD.md](docs/PRD.md) (the plan) ·
 [docs/DATASET.md](docs/DATASET.md) (what the data actually contains) ·
 [docs/ANNOTATION_SOP.md](docs/ANNOTATION_SOP.md) (before touching Slicer).

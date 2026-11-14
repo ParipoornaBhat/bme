@@ -24,12 +24,14 @@ if (!fs.existsSync(python)) {
 const scriptBme = path.join(root, "ml", "scripts", "team_annotations.py");
 const scriptNbme = path.join(root, "ml", "scripts", "export_nbme.py");
 
-// a bare zip name is looked up where it was typed, then in data/exports/
+// a bare zip name is looked up in inbox/team, then where it was typed, then in data/exports/
 function zipPath(arg) {
+  const inTeam = path.join(root, "inbox", "team", arg);
+  if (fs.existsSync(inTeam)) return inTeam;
   const here = path.resolve(process.env.INIT_CWD ?? process.cwd(), arg);
   if (fs.existsSync(here)) return here;
   const exported = path.join(root, "data", "exports", arg);
-  return fs.existsSync(exported) ? exported : here;
+  return fs.existsSync(exported) ? exported : inTeam;
 }
 
 const [first, second, ...extra] = process.argv.slice(2).filter((arg) => arg !== "--");

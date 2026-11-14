@@ -6,11 +6,17 @@ import { useRouter, useSearchParams } from "next/navigation";
 import { Suspense, useState } from "react";
 import { toast } from "sonner";
 import { signIn } from "~/lib/auth-client";
+import { isReviewMode } from "~/lib/app-mode";
+import ReviewLogin from "./ReviewLogin";
 
 const STUDENT_DOMAIN = "student.nitte.edu.in";
 const STAFF_DOMAIN = "nitte.edu.in";
 
 function LoginContent() {
+  if (isReviewMode()) {
+    return <ReviewLogin />;
+  }
+
   const searchParams = useSearchParams();
   const authError = searchParams.get("error");
   const router = useRouter();

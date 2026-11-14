@@ -4,6 +4,7 @@ import { useEffect, useState, useRef } from "react";
 import { DashboardContext, type ProfileData } from "./dashboard-context";
 import { useRouter, usePathname } from "next/navigation";
 import { signOut, useSession } from "~/lib/auth-client";
+import { isReviewMode } from "~/lib/app-mode";
 import { ThemeToggle } from "~/components/theme-toggle";
 import { SiteFooter } from "~/components/layout/SiteFooter";
 import { Breadcrumbs } from "~/components/ui/Breadcrumbs";
@@ -30,6 +31,7 @@ import { motion, AnimatePresence } from "framer-motion";
 
 
 export default function DashboardLayout({ children }: { children: React.ReactNode }) {
+  const isReview = isReviewMode();
   const { data: session, isPending } = useSession();
   const router = useRouter();
   const pathname = usePathname();
@@ -37,12 +39,41 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [isMinimized, setIsMinimized] = useState(false);
   const [profile, setProfile] = useState<ProfileData | null>(null);
+  const [reviewUser, setReviewUser] = useState<{ username: string; displayName: string; role?: string } | null>(null);
+  const [reviewLoading, setReviewLoading] = useState(isReview);
   const [roleDropdownOpen, setRoleDropdownOpen] = useState(false);
   const dropdownRef = useRef<HTMLDivElement>(null);
 
   const isDocsOnly = process.env.NEXT_PUBLIC_IS_DOCS_ONLY === "true";
 
+  // Review mode identity
+  useEffect(() => {
+    if (!isReview) return;
+    let cancelled = false;
+    fetch("/api/review/me", { cache: "no-store" })
+      .then((res) => {
+        if (!res.ok) throw new Error("unauthorized");
+        return res.json();
+      })
+      .then((data) => {
+        if (!cancelled) {
+          setReviewUser(data.user);
+          setReviewLoading(false);
+        }
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setReviewLoading(false);
+          router.replace("/login");
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [isReview, router]);
+
   const fetchProfile = async () => {
+    if (isReview) return;
     try {
       const headers: Record<string, string> = {};
       if (session?.session?.token) {
@@ -65,6 +96,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
   };
 
   useEffect(() => {
+    if (isReview) return;
     if (!isDocsOnly) {
       if (!isPending && !session) {
         router.replace("/login");
@@ -72,7 +104,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
         fetchProfile();
       }
     }
-  }, [session, isPending, isDocsOnly]);
+  }, [session, isPending, isDocsOnly, isReview]);
 
   if (isDocsOnly) {
     return (
@@ -124,6 +156,16 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
   }, []);
 
   const handleSignOut = async () => {
+    if (isReview) {
+      try {
+        await fetch("/api/review/logout", { method: "POST" });
+        toast.success("Logged out successfully");
+        router.push("/login");
+      } catch {
+        toast.error("Failed to sign out");
+      }
+      return;
+    }
     try {
       await signOut();
       toast.success("Logged out successfully");
@@ -161,7 +203,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
     }
   };
 
-  if (isPending || !session) {
+  if (isReview ? reviewLoading || !reviewUser : isPending || !session) {
     return (
       <div className="flex h-screen w-screen items-center justify-center bg-background">
         <Loader2 className="h-8 w-8 animate-spin text-primary" />
@@ -169,25 +211,34 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
     );
   }
 
-  const navigation = [
-    { name: "Dashboard", href: "/dashboard", icon: LayoutDashboard },
-    { name: "Annotate", href: "/annotate", icon: PenTool },
-    { name: "Training", href: "/training", icon: Cpu },
-    { name: "Model Results", href: "/results", icon: Activity },
-    { name: "Storage", href: "/storage", icon: HardDrive },
-    { name: "Users", href: "/users", icon: Users, permission: "users:view" },
-    { name: "Roles & Permissions", href: "/roles", icon: Shield, permission: "roles:manage" },
-    { name: "My Profile", href: "/profile", icon: UserCircle },
-  ];
+  const navigation = isReview
+    ? [{ name: "Annotate", href: "/annotate", icon: PenTool }]
+    : [
+        { name: "Dashboard", href: "/dashboard", icon: LayoutDashboard },
+        { name: "Annotate", href: "/annotate", icon: PenTool },
+        { name: "Training", href: "/training", icon: Cpu },
+        { name: "Model Results", href: "/results", icon: Activity },
+        { name: "Storage", href: "/storage", icon: HardDrive },
+        { name: "Users", href: "/users", icon: Users, permission: "users:view" },
+        { name: "Roles & Permissions", href: "/roles", icon: Shield, permission: "roles:manage" },
+        { name: "My Profile", href: "/profile", icon: UserCircle },
+      ];
 
   const filteredNavigation = navigation.filter((item) => {
+    if (isReview) return true;
     if (!item.permission) return true;
     if (profile?.activeRole?.name === "admin") return true;
     return profile?.permissions.includes(item.permission);
   });
 
   return (
-    <DashboardContext.Provider value={{ profile, loadingProfile: !profile, refreshProfile: fetchProfile }}>
+    <DashboardContext.Provider
+      value={
+        isReview
+          ? { profile: null, loadingProfile: false, refreshProfile: async () => {} }
+          : { profile, loadingProfile: !profile, refreshProfile: fetchProfile }
+      }
+    >
       <div className="h-[100dvh] flex flex-col bg-background overflow-hidden selection:bg-primary/30">
         {/* Top Navbar Header */}
         <header className="sticky top-0 z-40 w-full border-b border-border/40 bg-background/55 backdrop-blur-xl shrink-0">
@@ -201,7 +252,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
                 <Menu className="h-5 w-5" />
               </button>
 
-              <Link href="/dashboard" className="flex items-center gap-2 group">
+              <Link href={isReview ? "/annotate" : "/dashboard"} className="flex items-center gap-2 group">
                 <div className="relative h-9 w-9 shrink-0">
                   <Image
                     src="/logos/bme-mark.svg"
@@ -221,7 +272,9 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
             <div className="flex items-center gap-4">
               <ThemeToggle />
               <div className="hidden sm:inline-block text-xs font-bold text-muted-foreground">
-                {session.user.name}
+                {isReview
+                  ? (reviewUser?.displayName || reviewUser?.username)
+                  : session?.user.name}
               </div>
             </div>
           </div>
@@ -251,7 +304,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
                   className="fixed inset-y-0 left-0 z-50 flex w-72 flex-col bg-background p-6 shadow-2xl border-r border-border/40 md:hidden"
                 >
                   <div className="flex items-center justify-between mb-8">
-                    <Link href="/dashboard" onClick={() => setSidebarOpen(false)} className="flex items-center gap-2">
+                    <Link href={isReview ? "/annotate" : "/dashboard"} onClick={() => setSidebarOpen(false)} className="flex items-center gap-2">
                       <div className="relative h-9 w-9">
                         <Image
                           src="/logos/bme-mark.svg"
@@ -353,7 +406,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
 
             {/* Role Switcher & Sign Out (Desktop Bottom) */}
             <div className="border-t border-border/40 p-3 bg-muted/10 space-y-2 shrink-0">
-              {profile && profile.roles.length > 0 && (
+              {!isReview && profile && profile.roles.length > 0 && (
                 <div className="relative" ref={dropdownRef}>
                   {profile.roles.length > 1 ? (
                     <>

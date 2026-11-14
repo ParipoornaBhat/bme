@@ -56,6 +56,10 @@ from kaggle_pipeline import (
     run_status,
     run_upload,
     validate_path_outside_repo_and_data,
+    apply_notebook_overrides,
+    embed_current_trainer,
+    parse_overrides,
+    run_data_status,
 )
 
 
@@ -155,8 +159,17 @@ def make_test_environment(base: Path):
         "cells": [
             {
                 "cell_type": "code",
-                "source": ['CONFIG_MODE = "quick_test"\n'],
-            }
+                "source": [
+                    'CONFIG_MODE = "quick_test"\n',
+                    'MODEL_ARCH = "unet3d"\n',
+                    "AUG_LEVEL = None\n",
+                    "MAX_RUNTIME_MINUTES = None  # off\n",
+                ],
+            },
+            {
+                "cell_type": "code",
+                "source": ['BUNDLED_CODE_B64 = "c3RhbGU="\n', "print('bundle')\n"],
+            },
         ]
     }
     (repo / "ml" / "notebooks" / "train_3d_colab.ipynb").write_text(json.dumps(nb), encoding="utf-8")
@@ -851,6 +864,171 @@ class TestKagglePipelineHardened(unittest.TestCase):
         self.assertEqual(len(api.kernels_output_calls), 1)
 
 
+class NotebookCapturingApi(MockKaggleApi):
+    """Also keeps the notebook text that would have been pushed."""
+
+    def __init__(self, *a, **k):
+        super().__init__(*a, **k)
+        self.pushed_notebooks = []
+
+    def kernels_push(self, folder):
+        nb = Path(folder) / "train_3d_colab.ipynb"
+        self.pushed_notebooks.append(json.loads(nb.read_text(encoding="utf-8")))
+        return super().kernels_push(folder)
+
+
+class TestMethodRuns(unittest.TestCase):
+    """Per-method Kaggle runs: notebook overrides, current trainer, no-wait, own import folder."""
+
+    setUp = TestKagglePipelineHardened.setUp
+    tearDown = TestKagglePipelineHardened.tearDown
+
+    def _approved_api(self):
+        rec = run_approve_dataset(
+            src_dir=self.repo, export_dir=self.export_dir, mapping_file=self.mapping_file,
+            confirm_approve=True, dataset_slug="bme-3d-dataset",
+        )
+        return NotebookCapturingApi(existing_datasets=[
+            MockKaggleDataset("test_researcher/bme-3d-dataset", is_private=True, description=rec["export_combined_sha256"])
+        ])
+
+    def test_parse_overrides(self):
+        self.assertEqual(
+            parse_overrides(['AUG_LEVEL="med"', "MAX_RUNTIME_MINUTES=660", "ENABLE_AUG_SPATIAL=False"]),
+            {"AUG_LEVEL": "med", "MAX_RUNTIME_MINUTES": 660, "ENABLE_AUG_SPATIAL": False},
+        )
+        with self.assertRaises(ValueError):
+            parse_overrides(["CONFIG_MODE='full'"])
+        with self.assertRaises(ValueError):
+            parse_overrides(["AUG_LEVEL=med"])
+        with self.assertRaises(ValueError):
+            parse_overrides(["aug_level=1"])
+
+    def test_unknown_setting_fails(self):
+        nb = json.loads((self.repo / "ml" / "notebooks" / "train_3d_colab.ipynb").read_text(encoding="utf-8"))
+        with self.assertRaises(ValueError):
+            apply_notebook_overrides(nb, {"NOT_A_SETTING": 1})
+
+    def test_bundle_is_current_trainer(self):
+        import base64
+        nb = json.loads((self.repo / "ml" / "notebooks" / "train_3d_colab.ipynb").read_text(encoding="utf-8"))
+        embed_current_trainer(nb, self.repo)
+        src = "".join(nb["cells"][1]["source"])
+        b64 = src.split('BUNDLED_CODE_B64 = "', 1)[1].split('"', 1)[0]
+        self.assertEqual(base64.b64decode(b64), (self.repo / "ml" / "scripts" / "train_3d.py").read_bytes())
+        self.assertIn("print('bundle')", src)
+
+    def test_no_wait_launch_then_resume_imports_to_method_folder(self):
+        api = self._approved_api()
+        state = run_pipeline(
+            src_dir=self.repo, mode="full", confirm_launch=True, export_dir=self.export_dir, api=api,
+            overrides={"AUG_LEVEL": "med", "MAX_RUNTIME_MINUTES": 660}, wait=False, import_name="k-unet3d",
+        )
+        self.assertEqual(state["phase"], "QUEUED")
+        self.assertEqual(api.kernels_status_calls, [])
+        cfg = "".join(api.pushed_notebooks[0]["cells"][0]["source"])
+        self.assertIn("AUG_LEVEL = 'med'", cfg)
+        self.assertIn("MAX_RUNTIME_MINUTES = 660", cfg)
+        self.assertNotIn("kernel_sources", api.kernels_push_calls[0]["metadata"])
+
+        done = run_pipeline(src_dir=self.repo, resume=True, export_dir=self.export_dir, api=api)
+        self.assertEqual(done["phase"], "COMPLETED")
+        dest = Path(done["dest_dir"])
+        self.assertEqual(dest, (self.repo / "data" / "results3d_experiments" / "k-unet3d").resolve())
+        self.assertTrue((dest / "fold_0.pt").exists())
+        self.assertEqual(list((self.repo / "data" / "results3d").iterdir()), [])
+
+    def test_incomplete_run_is_not_imported(self):
+        api = self._approved_api()
+        real_output = api.kernels_output
+
+        def stopped_early(kernel, path, file_pattern=None):
+            res = real_output(kernel, path, file_pattern)
+            (Path(path) / "run_status.json").write_text(json.dumps(
+                {"mode": "full", "complete": False, "completed_folds": [0, 1]}), encoding="utf-8")
+            return res
+
+        api.kernels_output = stopped_early
+        run_pipeline(src_dir=self.repo, mode="full", confirm_launch=True, export_dir=self.export_dir, api=api,
+                     wait=False, import_name="k-cnet-dual")
+        st = run_pipeline(src_dir=self.repo, resume=True, export_dir=self.export_dir, api=api)
+        self.assertEqual(st["phase"], "INCOMPLETE")
+        self.assertIn("[0, 1]", st["status_message"])
+        self.assertFalse((self.repo / "data" / "results3d_experiments" / "k-cnet-dual").exists())
+        again = run_pipeline(src_dir=self.repo, resume=True, export_dir=self.export_dir, api=api)
+        self.assertEqual(again["phase"], "INCOMPLETE")
+        self.assertEqual(len(api.kernels_push_calls), 1)
+
+    def _teammate_api(self, can_see: bool):
+        """A second account, own staging folder; the owner's approval stays in self.staging_dir."""
+        self._approved_api()
+        mate = self.base / "staging_mate"
+        mate.mkdir()
+        os.environ["KAGGLE_STAGING_DIR"] = str(mate)
+
+        class Mate(NotebookCapturingApi):
+            def dataset_status(self, ref):
+                if not can_see:
+                    raise PermissionError("403")
+                return "ready"
+
+        return Mate(username="teammate"), mate
+
+    def test_shared_dataset_attaches_owner_copy(self):
+        api, mate = self._teammate_api(can_see=True)
+        st = run_pipeline(src_dir=self.repo, mode="full", confirm_launch=True, export_dir=self.export_dir, api=api,
+                          wait=False, import_name="k-mednext", dataset_owner="test_researcher",
+                          approval_dir=self.staging_dir)
+        meta = api.kernels_push_calls[0]["metadata"]
+        self.assertEqual(meta["dataset_sources"], ["test_researcher/bme-3d-dataset"])
+        self.assertEqual(meta["id"], "teammate/bme-3d-unet-training")
+        self.assertTrue(meta["is_private"])
+        self.assertTrue((mate / "run_state.json").exists())
+        self.assertFalse((mate / "dataset_approval.json").exists())
+        self.assertEqual(st["dataset"], "test_researcher/bme-3d-dataset")
+
+    def test_shared_dataset_not_visible_stops_with_fix(self):
+        api, _ = self._teammate_api(can_see=False)
+        with self.assertRaises(RuntimeError) as ctx:
+            run_pipeline(src_dir=self.repo, mode="full", confirm_launch=True, export_dir=self.export_dir, api=api,
+                         wait=False, import_name="k-mednext", dataset_owner="test_researcher",
+                         approval_dir=self.staging_dir)
+        self.assertIn("Sharing", str(ctx.exception))
+        self.assertIn("teammate", str(ctx.exception))
+        self.assertEqual(api.kernels_push_calls, [])
+
+    def test_continue_previous_attaches_own_output(self):
+        api = self._approved_api()
+        run_pipeline(
+            src_dir=self.repo, mode="full", confirm_launch=True, export_dir=self.export_dir, api=api,
+            wait=False, import_name="k-mednext", continue_previous=True,
+        )
+        meta = api.kernels_push_calls[0]["metadata"]
+        self.assertEqual(meta["kernel_sources"], [meta["id"]])
+
+    def test_bad_import_name_refused(self):
+        with self.assertRaises(ValueError):
+            run_pipeline(src_dir=self.repo, mode="full", confirm_launch=True, export_dir=self.export_dir,
+                         api=MockKaggleApi(), import_name="../results3d")
+
+    def test_data_status(self):
+        st = run_data_status(self.repo, self.export_dir, "bme-3d-dataset")
+        self.assertTrue(st["needs_upload"])
+        self.assertIn("never uploaded", st["reason"])
+        api = MockKaggleApi()
+        run_approve_dataset(src_dir=self.repo, export_dir=self.export_dir, mapping_file=self.mapping_file,
+                            confirm_approve=True, dataset_slug="bme-3d-dataset")
+        run_upload(src_dir=self.repo, export_dir=self.export_dir, mapping_file=self.mapping_file,
+                   confirm_upload=True, dataset_slug="bme-3d-dataset", api=api)
+        st = run_data_status(self.repo, self.export_dir, "bme-3d-dataset")
+        self.assertFalse(st["needs_upload"])
+        self.assertEqual(st["export"]["cases"], 1)
+        (self.export_dir / "nifti" / "case_001.nii.gz").write_bytes(b"changed")
+        st = run_data_status(self.repo, self.export_dir, "bme-3d-dataset")
+        self.assertTrue(st["needs_upload"])
+        self.assertIn("changed", st["reason"])
+        self.assertNotIn("case_001", json.dumps(st))
+
+
 if __name__ == "__main__":
     unittest.main()
-

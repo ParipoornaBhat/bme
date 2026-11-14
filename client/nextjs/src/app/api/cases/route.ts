@@ -1,6 +1,10 @@
 import { NextResponse } from "next/server";
 import fs from "node:fs";
 import path from "node:path";
+import { eq } from "drizzle-orm";
+import { db, caseAnnotation } from "@bme/db";
+import { isReviewMode } from "~/lib/app-mode";
+import { reviewScan } from "~/lib/review-auth";
 import { readFlags } from "~/lib/flag-store";
 
 /**
@@ -17,6 +21,51 @@ import { readFlags } from "~/lib/flag-store";
 export const dynamic = "force-dynamic";
 
 const SHOW_NAMES = process.env.SHOW_SOURCE_NAMES === "true";
+
+async function reviewHandler() {
+  const scans = await db.select().from(reviewScan);
+  const mainAnnotations = await db
+    .select()
+    .from(caseAnnotation)
+    .where(eq(caseAnnotation.annotator, "_main"));
+
+  const mainMap = new Map(mainAnnotations.map((m) => [m.caseId, m]));
+
+  const cases = scans.map((s) => {
+    const id = s.caseId;
+    const isBme = id.startsWith("BME-");
+    const main = mainMap.get(id);
+    const annotated = Boolean(main);
+    const savedAt = main ? (main.updatedAt || main.createdAt || new Date()).toISOString() : null;
+
+    return {
+      id,
+      cls: isBme ? "bme" : "non_bme",
+      assignedTo: "",
+      isOverlap: false,
+      isotropic: false,
+      slices: 0,
+      thickness: 0,
+      plane: "",
+      hasT1: false,
+      annotated,
+      savedAt,
+      flag: null,
+      sourceName: null,
+    };
+  });
+
+  return NextResponse.json({
+    cases,
+    showSourceNames: false,
+    annotators: [],
+    counts: {
+      total: cases.length,
+      annotated: cases.filter((c) => c.annotated).length,
+      bme: cases.filter((c) => c.cls === "bme").length,
+    },
+  });
+}
 
 function projectRoot() {
   return path.resolve(process.cwd(), "..", "..");
@@ -39,6 +88,8 @@ function parseCsv(rel: string): Record<string, string>[] {
 }
 
 export async function GET() {
+  if (isReviewMode()) return reviewHandler();
+
   const root = projectRoot();
   const worklist = parseCsv("data/worklist.csv");
   const deid = SHOW_NAMES ? parseCsv("data/deid_map.csv") : [];

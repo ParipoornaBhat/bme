@@ -412,3 +412,78 @@ export const modelBenchmarkRun = pgTable(
     index("benchmark_status_idx").on(t.status),
   ],
 );
+
+// ---------------------------------------------------------------- case_annotation
+// Cloud annotation sync table storing .seg.nrrd files base64-encoded.
+
+export const caseAnnotation = pgTable(
+  "case_annotation",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    caseId: varchar("case_id", { length: 32 }).notNull(),
+    annotator: varchar("annotator", { length: 64 }).notNull(),
+    contentB64: text("content_b64").notNull(),
+    sha256: varchar("sha256", { length: 64 }).notNull(),
+    bytes: integer("bytes").notNull(),
+    scanFingerprint: varchar("scan_fingerprint", { length: 64 }),
+    hasBone: boolean("has_bone").notNull().default(false),
+    savedBy: varchar("saved_by", { length: 64 }),
+    labelsGzB64: text("labels_gz_b64"),
+    createdAt: timestamp("created_at").defaultNow().notNull(),
+    updatedAt: timestamp("updated_at").defaultNow().notNull().$onUpdate(() => new Date()),
+  },
+  (t) => [
+    uniqueIndex("case_annotation_case_annotator_idx").on(t.caseId, t.annotator),
+    index("case_annotation_updated_at_idx").on(t.updatedAt),
+  ],
+);
+
+// ---------------------------------------------------------------- review_scan
+
+export const reviewScan = pgTable(
+  "review_scan",
+  {
+    caseId: varchar("case_id", { length: 32 }).primaryKey(),
+    driveFileId: varchar("drive_file_id", { length: 128 }).notNull(),
+    updatedAt: timestamp("updated_at").defaultNow().notNull().$onUpdate(() => new Date()),
+  },
+);
+
+// ---------------------------------------------------------------- review_account
+
+export const reviewAccount = pgTable(
+  "review_account",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    username: varchar("username", { length: 40 }).notNull().unique(),
+    displayName: varchar("display_name", { length: 64 }).notNull(),
+    passwordHash: text("password_hash").notNull(),
+    role: varchar("role", { length: 16 }).notNull().default("reviewer"),
+    createdAt: timestamp("created_at").defaultNow().notNull(),
+  },
+);
+
+// ---------------------------------------------------------------- review_edit
+
+export const reviewEdit = pgTable(
+  "review_edit",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    caseId: varchar("case_id", { length: 32 }).notNull(),
+    reviewer: varchar("reviewer", { length: 40 }).notNull(),
+    baseAnnotator: varchar("base_annotator", { length: 64 }),
+    labelsGzB64: text("labels_gz_b64").notNull(),
+    note: text("note"),
+    status: varchar("status", { length: 16 }).notNull().default("open"),
+    kind: varchar("kind", { length: 16 }).notNull().default("review"),
+    createdAt: timestamp("created_at").defaultNow().notNull(),
+    updatedAt: timestamp("updated_at").defaultNow().notNull().$onUpdate(() => new Date()),
+    appliedAt: timestamp("applied_at"),
+  },
+  (t) => [
+    uniqueIndex("review_edit_case_reviewer_open_idx")
+      .on(t.caseId, t.reviewer)
+      .where(sql`${t.status} = 'open'`),
+  ],
+);
+

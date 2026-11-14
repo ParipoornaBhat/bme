@@ -1,6 +1,6 @@
 """Write a Slicer-compatible .seg.nrrd from a raw labelmap produced by the web editor.
 
-    python ml/scripts/write_seg.py <base> <CASE_ID> <raw_file>
+    python ml/scripts/write_seg.py <base> <CASE_ID> <raw_file> [--series <series>] [--main] [<annotator>]
 
 `raw_file` is a flat uint8 buffer, one byte per voxel, in the SAME index order as
 the case's `_primary.nii.gz` (x fastest). Values: 0 background, 1 bone_marrow,
@@ -18,7 +18,9 @@ Called by the web editor's save endpoint. Safe to run by hand.
 from __future__ import annotations
 
 import json
+import shutil
 import sys
+from datetime import datetime
 from pathlib import Path
 
 import nibabel as nib
@@ -60,10 +62,21 @@ def main():
         sys.exit(__doc__)
     base, case_id, raw_path = Path(sys.argv[1]), sys.argv[2], Path(sys.argv[3])
     series, annotator = "", ""
-    rest = sys.argv[4:]
-    if rest[:1] == ["--series"] and len(rest) >= 2:
-        series, rest = rest[1], rest[2:]
-    annotator = rest[0] if rest else ""
+    force_main = False
+    args = sys.argv[4:]
+    i = 0
+    positional = []
+    while i < len(args):
+        if args[i] == "--main":
+            force_main = True
+            i += 1
+        elif args[i] == "--series" and i + 1 < len(args):
+            series = args[i + 1]
+            i += 2
+        else:
+            positional.append(args[i])
+            i += 1
+    annotator = positional[0] if positional else ""
 
     vol_path = volume_path(base, case_id, series)
     if not vol_path.exists():
@@ -123,20 +136,58 @@ def main():
     # save would erase the first, and the comparison would be impossible. Keeping
     # a per-annotator copy costs ~10 KB and preserves it.
     written = []
+    out = out_dir / f"{case_id}.seg.nrrd"
+
     if annotator:
         safe = "".join(c if (c.isalnum() or c in "-_") else "_" for c in annotator)[:40]
         per = out_dir / f"{case_id}__{safe}.seg.nrrd"
+
+        not_exists = not out.exists()
+        other_copies = [
+            p for p in out_dir.glob(f"{case_id}__*.seg.nrrd")
+            if p.is_file() and p.name != per.name
+        ]
+        no_other = len(other_copies) == 0
+
+        owns_main = False
+        if out.exists() and per.exists():
+            try:
+                prev_data, _ = nrrd.read(str(per))
+                main_data, _ = nrrd.read(str(out))
+                owns_main = np.array_equal(main_data, prev_data)
+            except Exception:
+                owns_main = False
+
+        should_write_main = force_main or not_exists or no_other or owns_main
+
         nrrd.write(str(per), lab, header)
         written.append(per)
 
-    out = out_dir / f"{case_id}.seg.nrrd"
-    nrrd.write(str(out), lab, header)
-    written.append(out)
+        if force_main and out.exists():
+            stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+            backup_dir = base / "data" / "annotations_backup" / f"{stamp}-review" / case_id
+            backup_dir.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(str(out), str(backup_dir / out.name))
+
+        if should_write_main:
+            nrrd.write(str(out), lab, header)
+            written.append(out)
+    else:
+        should_write_main = True
+        if force_main and out.exists():
+            stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+            backup_dir = base / "data" / "annotations_backup" / f"{stamp}-review" / case_id
+            backup_dir.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(str(out), str(backup_dir / out.name))
+        nrrd.write(str(out), lab, header)
+        written.append(out)
 
     remember_series(base, case_id, series)
     counts = "  ".join(f"{n}={present[v]}" for n, v, _ in SEGMENTS if present[v])
     for w in written:
         print(f"wrote {w}")
+    if annotator and not should_write_main:
+        print("main file kept (first annotation by another person)")
     print(f"  {counts}")
 
 

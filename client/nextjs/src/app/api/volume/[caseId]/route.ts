@@ -1,6 +1,10 @@
 import { NextRequest, NextResponse } from "next/server";
 import fs from "node:fs";
 import path from "node:path";
+import { eq } from "drizzle-orm";
+import { db } from "@bme/db";
+import { isReviewMode } from "~/lib/app-mode";
+import { reviewScan } from "~/lib/review-auth";
 
 /**
  * Streams a case's primary NIfTI volume to the browser viewer.
@@ -13,6 +17,62 @@ import path from "node:path";
 export const dynamic = "force-dynamic";
 
 const ID = /^(BME|NBME)-\d{3}$/;
+
+async function reviewHandler(req: NextRequest, caseId: string) {
+  if (!ID.test(caseId)) {
+    return NextResponse.json({ error: "bad case id" }, { status: 400 });
+  }
+
+  const listOnly = req.nextUrl.searchParams.get("list") === "1";
+  if (listOnly) {
+    return NextResponse.json({
+      annotated: "primary",
+      series: [{ id: "primary", label: caseId }],
+    });
+  }
+
+  const [scan] = await db
+    .select()
+    .from(reviewScan)
+    .where(eq(reviewScan.caseId, caseId))
+    .limit(1);
+
+  if (!scan) {
+    return NextResponse.json({ error: `no volume for ${caseId}` }, { status: 404 });
+  }
+
+  const driveUrl = `https://drive.usercontent.google.com/download?id=${encodeURIComponent(scan.driveFileId)}&export=download&confirm=t`;
+  try {
+    const upstream = await fetch(driveUrl, {
+      redirect: "follow",
+    });
+
+    if (!upstream.ok || !upstream.body) {
+      return NextResponse.json(
+        { error: `failed to load volume for ${caseId}` },
+        { status: upstream.status >= 400 && upstream.status < 500 ? 404 : 502 },
+      );
+    }
+
+    const headers = new Headers();
+    headers.set("Content-Type", "application/gzip");
+    const contentLength = upstream.headers.get("content-length");
+    if (contentLength) {
+      headers.set("Content-Length", contentLength);
+    }
+    headers.set("Cache-Control", "private, max-age=3600");
+
+    return new NextResponse(upstream.body, {
+      status: 200,
+      headers,
+    });
+  } catch {
+    return NextResponse.json(
+      { error: "failed to stream volume from storage" },
+      { status: 502 },
+    );
+  }
+}
 
 function seriesList(dir: string, caseId: string) {
   const primary = path.join(dir, `${caseId}_primary.nii.gz`);
@@ -45,6 +105,7 @@ export async function GET(
   { params }: { params: Promise<{ caseId: string }> },
 ) {
   const { caseId } = await params;
+  if (isReviewMode()) return reviewHandler(_req, caseId);
 
   // Path traversal guard: only our own generated IDs are ever valid.
   if (!ID.test(caseId)) {

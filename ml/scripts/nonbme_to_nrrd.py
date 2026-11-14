@@ -27,6 +27,11 @@ import zipfile
 from pathlib import Path
 
 try:
+    from ml.scripts import inbox
+except ImportError:
+    import inbox
+
+try:
     import SimpleITK as sitk
 except ImportError:
     sys.exit("SimpleITK missing.  pip install SimpleITK")
@@ -178,26 +183,53 @@ def main():
     ap.add_argument("base")
     ap.add_argument("--apply", action="store_true")
     ap.add_argument("--keep", "--no-delete", action="store_true", dest="keep",
-                    help="leave the DICOM zip in Non BME/3d")
-    ap.add_argument("--relabel", action="store_true", help="rename nrrds already written in Non BME/new")
+                    help="leave the DICOM zip in source folder")
+    ap.add_argument("--relabel", action="store_true", help="rename nrrds already written")
     args = ap.parse_args()
 
-    root = Path(args.base) / "Non BME" / "3d"
-    dest_root = Path(args.base) / "Non BME" / "new"
+    base = Path(args.base)
+    sources = inbox.drop_dirs(base, "nonbme-dicom")
+    root = sources[0]
+    for candidate in sources:
+        if candidate.is_dir() and any(p.suffix.lower() == ".zip" for p in candidate.glob("*.zip")):
+            root = candidate
+            break
+
+    legacy_dest = base / "Non BME" / "new"
+    has_numbered = False
+    if legacy_dest.is_dir():
+        has_numbered = any(child.is_dir() and child.name.isdigit() for child in legacy_dest.iterdir())
+
+    if has_numbered:
+        dest_root = legacy_dest
+    else:
+        dest_root = base / inbox.INBOX / inbox.SUBDIRS["nonbme"]
+
+    try:
+        root_rel = str(root.relative_to(base))
+    except ValueError:
+        root_rel = str(root)
+    try:
+        dest_rel = str(dest_root.relative_to(base))
+    except ValueError:
+        dest_rel = str(dest_root)
+
+    print(f"reading DICOM zips from {root_rel}, writing NRRD to {dest_rel}")
+
     if not root.is_dir():
         sys.exit(f"missing {root}")
     zips = sorted(p for p in root.iterdir() if p.is_file() and p.suffix.lower() == ".zip")
     if not zips:
         sys.exit(f"no zip files in {root}")
 
-    print(f"{len(zips)} zip(s) in Non BME/3d")
+    print(f"{len(zips)} zip(s) in {root_rel}")
     if args.relabel:
         n = relabel_existing(dest_root)
         print(f"renamed {n} folder(s)")
         if not args.apply:
             return
     if not args.apply:
-        print(f"would write Non BME/new/{next_number(dest_root)} onward, then delete each zip")
+        print(f"would write {dest_rel}/{next_number(dest_root)} onward, then delete each zip")
         print("dry run: nothing written and nothing deleted. Add --apply to convert.")
         return
 
@@ -208,14 +240,14 @@ def main():
         try:
             count = convert_zip(zip_path, out)
         except (zipfile.BadZipFile, RuntimeError, OSError) as e:
-            print(f"  new/{number}  skipped: {e}")
+            print(f"  {dest_rel}/{number}  skipped: {e}")
             continue
         if not args.keep:
             zip_path.unlink()
-        print(f"  new/{number}  {count} nrrd" + ("" if args.keep else ", zip removed"))
+        print(f"  {dest_rel}/{number}  {count} nrrd" + ("" if args.keep else ", zip removed"))
         done += 1
         number += 1
-    print(f"\nconverted {done}. Names stay in Non BME/new/<n>/name.json only.")
+    print(f"\nconverted {done}. Names stay in {dest_rel}/<n>/name.json only.")
 
 
 if __name__ == "__main__":

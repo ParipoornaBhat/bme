@@ -21,7 +21,8 @@
     "db:push": "tsx node_modules/drizzle-kit/bin.cjs push",
     "db:studio": "tsx node_modules/drizzle-kit/bin.cjs studio",
     "db:sync": "node --import tsx src/scripts/sync.ts",
-    "db:seed-benchmarks": "node --import tsx src/scripts/sync-benchmarks.ts"
+    "db:seed-benchmarks": "node --import tsx src/scripts/sync-benchmarks.ts",
+    "review:setup": "node --import tsx src/scripts/review-setup.ts"
   },
   "dependencies": {
     "@neondatabase/serverless": "0.10.4",

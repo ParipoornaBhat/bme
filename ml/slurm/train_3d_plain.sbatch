@@ -22,8 +22,8 @@ PY="$HOME/bme/env/bin/python3"
 cd "$HOME/bme"
 nvidia-smi -L
 export BME_GPU_FRACTION=0.95
-"$PY" ml/scripts/train_3d.py . --model unet --device cuda --out results3d-h200-plain \
+"$PY" ml/scripts/train_3d.py . --model unet --model-arch unet3d --device cuda --out results3d-h200-plain \
   --folds 5 --epochs 400 --hours 3.3 --max-runtime-minutes 225 --checkpoint-every-epoch \
-  --spacing 1.0 --aniso --width 32 --patch 160,160,16 --patches-per-case 24 --batch 4 \
+  --spacing 1.0,1.0,3.0 --aniso --width 32 --patch 160,160,16 --patches-per-case 24 --batch 4 \
   --resample --sampling-mix lesion=0.33,bone=0.33,random=0.34 \
   --allow-case-level-folds --amp --cosine "$@"

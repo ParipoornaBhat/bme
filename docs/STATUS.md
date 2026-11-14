@@ -70,6 +70,8 @@ Phases are defined in [PRD.md](PRD.md) §8.
 
 In order. Each step's output is the next step's input.
 
+- **2026-11-13 (Data pipeline & documentation):** Unified data menu (`pnpm data`, `scripts/data-menu.js`), `inbox/` staging tree, and single data document in [docs/DATA.md](DATA.md). Team decision needed on whether the 24 new BME cases (BME-062..BME-085, edema only) are included in training before locking `pnpm train:split`.
+
 0a. **24 new BME cases from the 2026-11-11 Drive download (BME-062 to BME-085).** The
    re-download holds 132 folders: the 108 audited in [SLICER_EXPORT_AUDIT.md](SLICER_EXPORT_AUDIT.md)
    are byte-identical to September (none of the requested re-uploads or fixes arrived), plus
@@ -86,6 +88,13 @@ In order. Each step's output is the next step's input.
    Drive 67, 71, 154, 157, X3 (X3 is 1 slice, 0.38 ml); Drive 67 may be the same patient as
    66 (BME-035), and 69 / X3 / 49 share a name word (DICOM demographics blank, unconfirmed);
    147 and 149 have unnamed series, so fat suppression is not confirmed by name.
+
+**Planned, not built (2026-11-11): [PLAN_TRAINING_MENUS.md](PLAN_TRAINING_MENUS.md).**
+4 H200 + 4 Kaggle accounts keyed by USN in `.env`, 8 training methods to compare, a data
+check with an internet-data warning before every upload, `pnpm train` / `runs` / `accounts`
+menus, one `inbox/` folder for everything dropped in, and `docs/COMMANDS.md`. Build it
+from that file, step by step.
+
 0. **Team annotation split and merge (2026-10-27).** Split by case number, same range for
    `BME-` and `NBME-`: Paripoorna 1-15 · Elvin 16-30 · Aditi 31-45 · Reegan 46-61 (`TEAM` in
    `ml/scripts/team_annotations.py`). Everyone exports with `pnpm zipbme:<name>`; the hub drops
@@ -112,7 +121,30 @@ In order. Each step's output is the next step's input.
    `ml/slurm/nnunet.sbatch`, data under `data/nnunet/`, scores via `ml/scripts/nnunet_prep.py
    metrics` into `data/results-nnunet-<config>/`). New accounts first run `pnpm h200 setup --as
    <roll>`. Every op takes `--as <roll>`; `log --as <roll>` live-tails that account's newest job.
-   nnU-Net folds may need several 4 h submissions; resubmitting continues. Old split (2026-10-07) was
+   nnU-Net folds may need several 4 h submissions; resubmitting continues.
+   **2026-11-11:** none of the four H200 runs has results yet. Kaggle results so far (121 cases,
+   Reegan's runs, `docs/benchmark_runs.json`): the model in the app (`cnet_dual_unet`) scores bone
+   0.817, edema Dice on BME scans only 0.229, clean-scan specificity 0.967, presence 107/121. Its
+   all-scan edema Dice of 0.595 is inflated by the 60 clean scans (an empty prediction on a clean
+   scan scores 1.0); quote the BME-only number. Literature for knee BME is edema Dice 0.60-0.75,
+   bone 0.93, volume correlation 0.94-0.98; 0.95 edema Dice is not a reachable target.
+   **Plan agreed 2026-11-11:** (1) run plain nnU-Net 2D and 3D on the H200 as the baseline
+   (`pnpm model:train:menu` -> 1, or `pnpm h200 best 2d|3d --as <roll>`; shows epochs done and a
+   time estimate from the server's own logs; choosing it again continues). (2) Only then build the
+   edema-inside-bone cascade, which takes stage 1's out-of-fold bone masks as an input channel.
+   nnU-Net now uses `nnUNetTrainer_BME100` (`ml/scripts/nnunet_trainer_bme.py`, 100 epochs,
+   checkpoint every 5; the stock trainer saves every 50 and a 4 h kill could lose 49). It needs
+   about 9 GB of GPU memory, so the 6 GB laptop cannot train it.
+   **Augmentation levels (2026-11-11):** `--aug-level low|med|max` in `train_3d.py` (`AUG_LEVELS`;
+   med follows nnU-Net's probabilities; adds in-plane blur and low-resolution simulation).
+   `pnpm h200 aug <level> --as <roll>` runs `ml/slurm/train_3d_aug.sbatch` into
+   `data/results3d-aug-<level>`, continuing by itself if started; `train3dplain` is the
+   no-augmentation control. Not yet run. Epochs are fitted to 3.3 h, so the levels may get
+   different epoch counts (max costs more CPU per patch); compare with the epoch counts in view.
+   The H200 sbatch files now name `--model-arch unet3d --spacing 1.0,1.0,3.0`: after the 9 Nov
+   merge the trainer's defaults (mednext, z resampled to 3 mm) would otherwise have applied
+   silently. In-plane rotation/zoom now uses `grid_sample` (about 8x faster, identical inside the
+   scan, differs on 0.06% of voxels at the scan edge). Old split (2026-10-07) was
    Aditi 6-26, 46-47 · Paripoorna 1-5, 54-59 · Reegan 27-45, 60-61 · Elvin 48-53. Elvin's laptop is the hub.
    Every laptop runs `team_annotations.py assign . --apply` once, to fill `assigned_to` in
    the worklist. A teammate runs `export . --who <name>`, which zips only their cases with bone
@@ -253,6 +285,7 @@ In order. Each step's output is the next step's input.
 
 0. **Review and annotation tool suite complete (2026-09-24, branch `collaborative-radiologist-view`).**
    All 5 collaborative review and annotation tasks are implemented:
+   - **Smooth brush, pencil and eraser (2026-11-13):** 2D and 3D draw the labels at up to 4 display pixels per scan pixel (`lib/smooth-labels.ts`): bilinear coverage, edge at one half, one-pixel anti-aliased ramp, so outlines are curves instead of squares. Brush and pencil take sub-pixel pointer positions; a pixel is painted when its centre is inside the brush circle or the traced outline. The 3D brush now joins up fast moves instead of leaving gaps. Display only: masks are still saved one label per scan pixel. Typechecked, the renderer checked on a test grid, and tested in the app by the team (2026-11-14).
    - **Name prompt fix:** The server renders no form until the page has mounted, so a click before the JS loads can't reload the page; storage writes are try-wrapped.
    - **Host lobby, rejoin and leave:** Host admission lobby with messages `JOIN_PENDING` / `JOIN_REQUESTS` / `ADMIT` / `DENY` / `LEAVE` / `HOST_BACK`, 20-guest cap, guest rejoin via session `rejoinKey`, and replacement of older duplicate pending sockets.
    - **Views and opacity:** Label views: Both / Red / Green / None (key V), opacity 0–100%, local to each screen, in 2D painter, 3D multi-planar viewer, and 3D surface render.
@@ -418,6 +451,8 @@ Carried from [PRD.md](PRD.md) §10, updated with what the data answered.
 | **2D case-level AUC jumped 0.658 → 0.961 when the dataset was rebuilt** | A number that good on this task, from 18 positive patients, is more likely a dataset shortcut than a modelling win | Two leaks measured on 2026-09-04. **(a)** `BME-2D-005` and `BME-2D-008` carry a **red ellipse drawn around the lesion**, burned into the pixels — 2/25 BME files, 0/69 non-BME. **(b)** A burned-in yellow A/P orientation overlay appears in **19/69 non-BME (28%)** but **1/25 BME (4%)**, and the two folders are framed and cropped differently — different exporters. Neither alone explains 0.96, but together they make it indefensible. **Before quoting anything: retrain on a centre crop excluding the borders, and drop or repair the two ellipse images.** |
 | Two non-BME cases (`NBME-005`, `NBME-058`) were light-marrow T1/PD, not fat-suppressed | Edema not visible on them; they looked opposite to every other case | Fixed 2026-10-27: `pnpm data:nonbme:fix-fs` swaps in the same case's fat-suppressed axial series and resamples existing annotations onto it (backup in `data/_backup_fs_*`). Teammates: `fs_fix.zip` in repo root, then `pnpm data:nonbme:fix-fs:install`. A grainy dark-marrow group (gradient echo: NBME-002/004/006/007/008/012/019/051) was left as is — flag to the guide. `Non BME/new/new/8` is empty, so source folder N maps to NBME-(N-1) from 9 on. |
 | **`nf` merged into this branch (uncommitted at time of writing); flag overlaps resolved in favour of this branch** | `train_3d.py` now has both flag sets. Where names collide, this branch wins: `--amp` is bfloat16 autocast (nf's was fp16), `--augment` is the in-plane flip + gamma set (nf's flip/intensity/noise are `--aug-flip/--aug-intensity/--aug-noise`), `--resample`, `--batch` and `--out NAME` keep their meaning, with `--resample-patches-each-epoch`, `--batch-size` and `--out-dir` as nf spellings. The nf experiment guard now lets `--out NAME` through unless NAME is `results3d` or `results3d-attn`. Training page: Local/Kaggle toggle, Kaggle panel in `Train3DKaggle.tsx`. nf's `--amp` skipped-step counter now only counts non-finite losses. GPU bf16 path not run yet (CPU smoke only). | Run `ml/tests/test_train_3d_speedups.py` and the two `ml/scripts/test_train_3d_*.py` before trusting a long H200 run. Two stray nf files (`tatus`, `test_uni.txt`) were left out; `tatus` is a terminal capture that names imaging files, so ask its author before it enters history. |
+| Two ML test scripts fail on this branch (seen 2026-11-11, not caused by that day's changes) | `ml/tests/test_train_3d_speedups.py` asserts the log text `case_level folds`, which the trainer no longer prints; `ml/tests/test_cnet_attention_unet.py` imports `AttentionGate3D`, the class is `AttentionGate3d` | Fix the two tests so `pnpm test:ml` is trustworthy again |
+| 90 of 244 painted edema blobs are under 0.05 ml (76 local cases, 2026-11-11) | Likely stray brush marks; each counts as a missed lesion and drags lesion sensitivity down | Agree a minimum size with the guide, then filter in the generated labelmap, never in the `.seg.nrrd` |
 | 18 BME patients is the whole 2D positive pool | 3–4 positives per validation fold; the per-fold spread is wider than most effects | Always report mean ± std with n stated. Never quote one fold. |
 | **3D set is 55 BME-positive cases, no negatives** | A segmenter trained only on positives has never seen a knee without edema; FP rate on normal scans is unmeasured | Get non-BME scans into the Slicer export, or keep the old NBME cases' volumes |
 | **Same patient imported twice in the 3D set** | BME-032/033 and BME-052/054 are one patient each; a patient-level split can put one copy in train and the other in validation | Merge each pair's markings into one case ([SLICER_EXPORT_AUDIT.md](SLICER_EXPORT_AUDIT.md) §1) |

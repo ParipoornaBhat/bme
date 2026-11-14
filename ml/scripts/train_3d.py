@@ -39,7 +39,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from scipy.ndimage import affine_transform, zoom
+from scipy.ndimage import affine_transform, gaussian_filter, zoom
 from scipy.ndimage import label as cc_label
 import scipy.ndimage as ndi
 
@@ -58,7 +58,7 @@ PATCHES_PER_CASE = 8
 def resolve_device(choice: str) -> str:
     if choice == "cpu":
         return "cpu"
-    if torch.cuda.is_available():
+    if choice in ("auto", "cuda") and torch.cuda.is_available():
         return "cuda"
     if choice == "cuda":
         why = (
@@ -67,6 +67,11 @@ def resolve_device(choice: str) -> str:
             else "no CUDA device is visible to PyTorch"
         )
         raise SystemExit(f"--device cuda requested but unavailable: {why}")
+    mps = getattr(torch.backends, "mps", None)
+    if choice in ("auto", "mps") and mps is not None and mps.is_available():
+        return "mps"
+    if choice == "mps":
+        raise SystemExit("--device mps requested but this PyTorch has no Apple GPU (MPS) support")
     return "cpu"
 
 
@@ -274,23 +279,33 @@ def _mri_intensity_augment(
     apply_gamma: bool = True,
     apply_scale_shift: bool = True,
     apply_noise: bool = False,
+    p_gamma: float = 0.5,
+    p_contrast: float = 0.5,
+    p_shading: float = 0.5,
+    p_scale_shift: float = 1.0,
+    p_blur: float = 0.0,
+    p_lowres: float = 0.0,
 ) -> np.ndarray:
-    """Scanner-invariant MRI intensity transforms: gamma, contrast, synthetic 3D coil shading, scale/shift."""
+    """Scanner-invariant MRI intensity transforms: gamma, contrast, synthetic 3D coil shading, scale/shift.
+
+    Blur and low-resolution simulation are off by default (p=0 draws nothing
+    from rng, so runs that do not ask for them keep their random stream).
+    """
     out = np.asarray(img, dtype=np.float32).copy()
 
     # 1. Non-linear gamma (simulates STIR / T2-FS receiver LUT differences)
-    if apply_gamma and rng.random() < 0.5:
+    if apply_gamma and rng.random() < p_gamma:
         gamma = float(rng.uniform(0.75, 1.35))
         out = np.power(np.clip(out, 0.0, 1.0), gamma, dtype=np.float32)
 
     # 2. Local dynamic contrast stretch around volume mean
-    if apply_contrast and rng.random() < 0.5:
+    if apply_contrast and rng.random() < p_contrast:
         c_alpha = float(rng.uniform(0.82, 1.22))
         mu = float(out.mean())
         out = mu + c_alpha * (out - mu)
 
     # 3. Smooth 3D synthetic coil-shading bias field (models B1 receiver drop-off)
-    if apply_shading and rng.random() < 0.5:
+    if apply_shading and rng.random() < p_shading:
         sx, sy, sz = out.shape
         gx = np.linspace(-1.0, 1.0, sx, dtype=np.float32)[:, None, None]
         gy = np.linspace(-1.0, 1.0, sy, dtype=np.float32)[None, :, None]
@@ -300,8 +315,17 @@ def _mri_intensity_augment(
         bias = np.clip(1.0 + cx * gx + cy * gy + cz * gz + qx * (gx ** 2 - 0.33) + qy * (gy ** 2 - 0.33), 0.70, 1.30)
         out = out * bias.astype(np.float32)
 
+    # 3b. In-plane Gaussian blur (a softer scan). Slices are left unmixed.
+    if p_blur > 0 and rng.random() < p_blur:
+        sigma = float(rng.uniform(0.5, 1.0))
+        out = gaussian_filter(out, sigma=(sigma, sigma, 0.0)).astype(np.float32)
+
+    # 3c. In-plane low-resolution simulation (a coarser scanner): shrink, enlarge back.
+    if p_lowres > 0 and rng.random() < p_lowres:
+        out = _lowres_inplane(out, float(rng.uniform(1.0, 2.0)))
+
     # 4. Affine scale and shift
-    if apply_scale_shift:
+    if apply_scale_shift and (p_scale_shift >= 1.0 or rng.random() < p_scale_shift):
         scale = float(rng.uniform(0.9, 1.1))
         shift = float(rng.uniform(-0.05, 0.05))
         out = out * scale + shift
@@ -312,6 +336,51 @@ def _mri_intensity_augment(
         out = out + noise
 
     return np.clip(out, 0.0, 1.0).astype(np.float32)
+
+
+def _lowres_inplane(img: np.ndarray, factor: float) -> np.ndarray:
+    """Shrink each slice by `factor` (nearest) and enlarge it back (bicubic)."""
+    x, y, _ = img.shape
+    small = (max(8, int(round(x / factor))), max(8, int(round(y / factor))))
+    if small == (x, y):
+        return img
+    t = torch.from_numpy(np.ascontiguousarray(img, dtype=np.float32)).permute(2, 0, 1).unsqueeze(1)
+    t = F.interpolate(t, size=small, mode="nearest")
+    t = F.interpolate(t, size=(x, y), mode="bicubic", align_corners=False)
+    return t.squeeze(1).permute(1, 2, 0).numpy()
+
+
+# Three fixed augmentation strengths for --aug-level. "med" follows nnU-Net's
+# default probabilities; "low" and "max" sit either side of it. Every spatial
+# step is in-plane only, because slices are 3-6 mm apart. The whole preset goes
+# into the run's data_config, so editing a number here invalidates old resumes.
+AUG_LEVELS = {
+    "low": dict(p_rot=0.1, p_zoom=0.1, max_deg=15.0, zoom=(0.85, 1.2), flip_axes=(1,),
+                p_gamma=0.3, p_contrast=0.0, p_shading=0.0, p_bright=0.0,
+                p_blur=0.0, p_lowres=0.0, p_noise=0.0),
+    "med": dict(p_rot=0.2, p_zoom=0.2, max_deg=30.0, zoom=(0.7, 1.4), flip_axes=(0, 1),
+                p_gamma=0.3, p_contrast=0.15, p_shading=0.15, p_bright=0.15,
+                p_blur=0.2, p_lowres=0.25, p_noise=0.0),
+    "max": dict(p_rot=0.5, p_zoom=0.5, max_deg=30.0, zoom=(0.7, 1.4), flip_axes=(0, 1),
+                p_gamma=0.5, p_contrast=0.5, p_shading=0.5, p_bright=0.5,
+                p_blur=0.3, p_lowres=0.3, p_noise=0.1),
+}
+
+
+def augment_level(image: np.ndarray, labels: np.ndarray, rng: np.random.Generator, lv: dict):
+    """Flips and intensity steps of one AUG_LEVELS preset. Rotation and zoom are
+    applied earlier, when the patch is cut (spatial_crop)."""
+    for ax in lv["flip_axes"]:
+        if rng.random() < 0.5:
+            image = np.flip(image, ax)
+            labels = np.flip(labels, ax)
+    image = _mri_intensity_augment(
+        image, rng,
+        apply_noise=(lv["p_noise"] > 0 and rng.random() < lv["p_noise"]),
+        p_gamma=lv["p_gamma"], p_contrast=lv["p_contrast"], p_shading=lv["p_shading"],
+        p_scale_shift=lv["p_bright"], p_blur=lv["p_blur"], p_lowres=lv["p_lowres"],
+    )
+    return np.ascontiguousarray(image, dtype=np.float32), np.ascontiguousarray(labels)
 
 
 def apply_augmentation(
@@ -489,8 +558,22 @@ def spatial_crop(image: np.ndarray, labels: np.ndarray, origin, patch, rng: np.r
     sub_lab = np.asarray(labels[lo[0]:hi[0], lo[1]:hi[1], z0:z1])
     centre = c_in - np.array([lo[0], lo[1], z0], dtype=float)
     offset = centre - mat @ c_out
-    img = affine_transform(sub_img, mat, offset=offset, output_shape=tuple(patch), order=1, mode="constant", cval=0.0)
-    lab = affine_transform(sub_lab, mat, offset=offset, output_shape=tuple(patch), order=0, mode="constant", cval=0)
+    # Same mapping as scipy's affine_transform (out -> in = m2 @ out + offset),
+    # done slice-wise with grid_sample because it is ~10x faster on CPU.
+    px, py = int(patch[0]), int(patch[1])
+    ii, jj = np.meshgrid(np.arange(px, dtype=np.float64), np.arange(py, dtype=np.float64), indexing="ij")
+    src_i = m2[0, 0] * ii + m2[0, 1] * jj + offset[0]
+    src_j = m2[1, 0] * ii + m2[1, 1] * jj + offset[1]
+    h, w = sub_img.shape[:2]
+    grid = np.stack([2.0 * src_j / max(w - 1, 1) - 1.0, 2.0 * src_i / max(h - 1, 1) - 1.0], axis=-1)
+    nz = sub_img.shape[2]
+    g = torch.from_numpy(grid.astype(np.float32)).unsqueeze(0).expand(nz, px, py, 2)
+    t_img = torch.from_numpy(np.ascontiguousarray(sub_img)).permute(2, 0, 1).unsqueeze(1)
+    t_lab = torch.from_numpy(np.ascontiguousarray(sub_lab, dtype=np.float32)).permute(2, 0, 1).unsqueeze(1)
+    img = F.grid_sample(t_img, g, mode="bilinear", padding_mode="zeros", align_corners=True)
+    lab = F.grid_sample(t_lab, g, mode="nearest", padding_mode="zeros", align_corners=True)
+    img = img.squeeze(1).permute(1, 2, 0).numpy()
+    lab = lab.squeeze(1).permute(1, 2, 0).numpy()
     return np.clip(img, 0, 1).astype(np.float32), lab.astype(np.uint8)
 
 
@@ -1736,6 +1819,99 @@ def compute_dataset_fingerprint(
     return fingerprint, payload
 
 
+def stratified_patient_groups(cases: list[dict], folds_n: int, seed: int) -> list[list[dict]]:
+    """Patient-level folds: a patient's scans always land in one group.
+
+    Patients are split into negative controls and three lesion-size tertiles,
+    shuffled with `seed` inside each stratum and dealt round-robin. Needs
+    "id", "patient_id" and "bme_voxels" on every case.
+    """
+    # 1. Group cases by patient so same-patient scans never leak across train and val
+    patient_to_cases: dict[str, list[dict]] = {}
+    for case in cases:
+        pid = case["patient_id"]
+        if pid not in patient_to_cases:
+            patient_to_cases[pid] = []
+        patient_to_cases[pid].append(case)
+
+    # Sort cases within each patient group by case ID for determinism
+    for pid in patient_to_cases:
+        patient_to_cases[pid].sort(key=lambda c: c["id"])
+
+    # 2. Stratify unique patients into negative controls + 3 lesion-size tertile bins
+    unique_patient_ids = sorted(patient_to_cases.keys())
+    rng_patients = random.Random(seed)
+    neg_pids = [
+        pid for pid in unique_patient_ids
+        if sum(c["bme_voxels"] for c in patient_to_cases[pid]) == 0
+    ]
+    pos_pids = sorted(
+        [
+            pid for pid in unique_patient_ids
+            if sum(c["bme_voxels"] for c in patient_to_cases[pid]) > 0
+        ],
+        key=lambda pid: (sum(c["bme_voxels"] for c in patient_to_cases[pid]), pid),
+    )
+    n_pos = len(pos_pids)
+    b1, b2 = n_pos // 3, (2 * n_pos) // 3
+    strata = [neg_pids, pos_pids[:b1], pos_pids[b1:b2], pos_pids[b2:]]
+
+    # 3. Shuffle within each stratum with the seed and distribute evenly across folds
+    groups: list[list[dict]] = [[] for _ in range(folds_n)]
+    fold_cursor = 0
+    for stratum in strata:
+        s_pids = list(stratum)
+        rng_patients.shuffle(s_pids)
+        for pid in s_pids:
+            groups[fold_cursor % folds_n].extend(patient_to_cases[pid])
+            fold_cursor += 1
+    return groups
+
+
+HOLDOUT_FILE = "data/splits/holdout_80_20.json"
+
+
+def fixed_holdout(path: Path, cases: list[dict]) -> tuple[list[dict], list[dict]]:
+    """(validation, training) from a saved 80/20 split, made by ml/scripts/holdout_split.py.
+
+    The validation list never changes. A case newer than the file goes to
+    training, unless its patient is in validation; then it is left out, so one
+    patient is never on both sides.
+    """
+    if not path.is_file():
+        raise SystemExit(
+            f"[ERROR] No fixed split at {path}. Make it first on the laptop with "
+            "`pnpm train:split` (it shows which cases go where), then push."
+        )
+    split = json.loads(path.read_text(encoding="utf-8"))
+    val_ids, train_ids = set(split["val"]), set(split["train"])
+    here = {c["id"] for c in cases}
+    val = [c for c in cases if c["id"] in val_ids]
+    val_patients = {c["patient_id"] for c in val}
+    train, left_out, new = [], [], []
+    for c in cases:
+        if c["id"] in val_ids:
+            continue
+        if c["id"] not in train_ids:
+            if c["patient_id"] in val_patients:
+                left_out.append(c["id"])
+                continue
+            new.append(c["id"])
+        train.append(c)
+    missing = sorted((val_ids | train_ids) - here)
+    print(f"Fixed 80/20 split from {path.name} (made {split.get('created', '?')}): "
+          f"training {len(train)} scans, validation {len(val)} scans.", flush=True)
+    if new:
+        print(f"  {len(new)} scan(s) newer than the split went to training: {', '.join(new)}", flush=True)
+    if left_out:
+        print(f"  {len(left_out)} newer scan(s) left out, same patient as a validation scan: {', '.join(left_out)}", flush=True)
+    if missing:
+        print(f"  {len(missing)} scan(s) in the split are not here and were skipped: {', '.join(missing)}", flush=True)
+    if not val or not train:
+        raise SystemExit("[ERROR] The fixed split leaves no training or no validation scans here.")
+    return val, train
+
+
 def merge_metrics_files(out_dir: Path, folds_n: int = 5) -> dict | None:
     """Merge per-fold metric files into final metrics.json (for parallel fold training)."""
     fold_files = sorted(out_dir.glob("metrics_fold_*.json"))
@@ -1869,7 +2045,7 @@ def main():
     ap.add_argument("--folds", type=int, default=5)
     ap.add_argument("--model", choices=("unet", "attention-unet"), default="unet")
     ap.add_argument("--out", default="", help="folder under data/. Default depends on the model.")
-    ap.add_argument("--device", choices=("auto", "cuda", "cpu"), default="auto")
+    ap.add_argument("--device", choices=("auto", "cuda", "mps", "cpu"), default="auto")
     # Defaults reproduce the laptop run. The H200 job (ml/slurm/train_3d.sbatch) raises them.
     ap.add_argument("--width", type=int, default=16, help="channels in the first layer")
     ap.add_argument("--patch", default="96,96,12", help="x,y,z, each divisible by 4")
@@ -1892,6 +2068,8 @@ def main():
     ap.add_argument("--checkpoint-every-epoch", action="store_true", help="Save latest checkpoint per epoch")
     ap.add_argument("--quick-test", action="store_true", help="Run fast 2-epoch 2-fold test")
     ap.add_argument("--fold", type=int, default=None, help="Train only a specific fold index")
+    ap.add_argument("--holdout", nargs="?", const=HOLDOUT_FILE, default=None, metavar="SPLIT_JSON",
+                    help=f"one round on a fixed 80/20 split instead of folds (default file {HOLDOUT_FILE})")
     ap.add_argument("--show-ids", action="store_true", help="Print patient/case IDs in logs (default: anonymized counts)")
     ap.add_argument("--profile", action="store_true", help="Profile per-epoch time breakdown (data, train, save, val)")
     ap.add_argument("--cudnn-benchmark", action="store_true", help="Enable cuDNN auto-tuner (fast on static patch sizes)")
@@ -1958,6 +2136,8 @@ def main():
                     help="first pooling level in-plane only, for thick-slice stacks")
     ap.add_argument("--aug-spatial", action="store_true",
                     help="in-plane rotation +-30 deg and zoom 0.7-1.4, slice-wise (needs --resample)")
+    ap.add_argument("--aug-level", choices=tuple(AUG_LEVELS), default=None,
+                    help="one fixed augmentation preset (low, med, max) instead of the other --aug flags; needs --resample")
     ap.add_argument("--aug-p-rot", type=float, default=0.5,
                     help="probability of in-plane rotation per patch (default: 0.5)")
     ap.add_argument("--aug-p-scale", type=float, default=0.5,
@@ -1975,6 +2155,15 @@ def main():
     args = ap.parse_args()
     if args.aug_spatial and not args.resample:
         raise SystemExit("--aug-spatial cuts fresh rotated patches each epoch; add --resample")
+    aug_level = AUG_LEVELS[args.aug_level] if args.aug_level else None
+    if args.holdout and (args.fold is not None or args.run_folds is not None or args.legacy_case_folds):
+        raise SystemExit("--holdout is one fixed split; drop --fold, --run-folds and --legacy-case-folds")
+    if aug_level:
+        if not args.resample:
+            raise SystemExit("--aug-level cuts fresh patches each epoch; add --resample")
+        if args.augment or args.aug_flip or args.aug_intensity or args.aug_noise or args.aug_spatial:
+            raise SystemExit("--aug-level is a complete preset; drop --augment, --aug-flip, "
+                             "--aug-intensity, --aug-noise and --aug-spatial")
     patch = tuple(int(v) for v in args.patch.split(","))
     if len(patch) != 3 or any(p % 4 for p in patch):
         raise SystemExit(f"--patch must be three numbers divisible by 4, got {args.patch}")
@@ -1994,7 +2183,7 @@ def main():
         raise SystemExit(f"[ERROR] {e}")
 
     is_data_experiment = bool(
-        args.resample or args.augment or
+        args.resample or args.augment or args.aug_level or
         args.aug_flip or args.aug_intensity or args.aug_noise or
         args.spacing or args.aniso or args.aug_spatial or
         args.n4 or (args.norm_type != "instance") or
@@ -2038,6 +2227,9 @@ def main():
         data_config["aniso"] = True
     if args.aug_spatial:
         data_config["aug_spatial"] = True
+    if aug_level:
+        data_config["aug_level"] = {"name": args.aug_level,
+                                    **{k: (list(v) if isinstance(v, tuple) else v) for k, v in aug_level.items()}}
     if args.n4:
         data_config["n4"] = True
     eff_norm_type = "group" if (args.model_arch == "orthogate_mednext" and args.norm_type == "instance") else args.norm_type
@@ -2168,47 +2360,15 @@ def main():
         else:
             fold_mode = "patient_grouped_stratified"
 
-        # 1. Group cases by patient so same-patient scans never leak across train and val
-        patient_to_cases: dict[str, list[dict]] = {}
-        for case in cases:
-            pid = case["patient_id"]
-            if pid not in patient_to_cases:
-                patient_to_cases[pid] = []
-            patient_to_cases[pid].append(case)
+        groups = stratified_patient_groups(cases, folds_n, SEED)
+        patient_count = len({c["patient_id"] for c in cases})
 
-        # Sort cases within each patient group by case ID for determinism
-        for pid in patient_to_cases:
-            patient_to_cases[pid].sort(key=lambda c: c["id"])
-
-        # 2. Stratify unique patients into negative controls + 3 lesion-size tertile bins
-        unique_patient_ids = sorted(patient_to_cases.keys())
-        rng_patients = random.Random(SEED)
-        neg_pids = [
-            pid for pid in unique_patient_ids
-            if sum(c["bme_voxels"] for c in patient_to_cases[pid]) == 0
-        ]
-        pos_pids = sorted(
-            [
-                pid for pid in unique_patient_ids
-                if sum(c["bme_voxels"] for c in patient_to_cases[pid]) > 0
-            ],
-            key=lambda pid: (sum(c["bme_voxels"] for c in patient_to_cases[pid]), pid),
-        )
-        n_pos = len(pos_pids)
-        b1, b2 = n_pos // 3, (2 * n_pos) // 3
-        strata = [neg_pids, pos_pids[:b1], pos_pids[b1:b2], pos_pids[b2:]]
-
-        # 3. Shuffle within each stratum with SEED and distribute evenly across folds
-        groups = [[] for _ in range(folds_n)]
-        fold_cursor = 0
-        for stratum in strata:
-            s_pids = list(stratum)
-            rng_patients.shuffle(s_pids)
-            for pid in s_pids:
-                groups[fold_cursor % folds_n].extend(patient_to_cases[pid])
-                fold_cursor += 1
-
-        patient_count = len(unique_patient_ids)
+    if args.holdout:
+        # One round: a fixed validation fifth, the rest trains. Not cross-validation.
+        val_cases, train_cases = fixed_holdout(base / args.holdout, cases)
+        groups = [val_cases, train_cases]
+        folds_n = 1
+        fold_mode = "fixed_holdout_80_20"
 
     print(
         f"{len(cases)} volumes across {patient_count} patients ({n_bme} with edema, {n_neg} without). "
@@ -2219,7 +2379,8 @@ def main():
         f"Patch {patch[0]}×{patch[1]}×{patch[2]} on "
         f"{f'a {args.spacing} mm in-plane grid' if args.spacing else 'the original voxel grid'}"
         f"{', in-plane-first pooling' if args.aniso else ''}"
-        f"{', rotation/zoom' if args.aug_spatial else ''}, "
+        f"{', rotation/zoom' if args.aug_spatial else ''}"
+        f"{f', augmentation level {args.aug_level}' if args.aug_level else ''}, "
         f"{args.patches_per_case} patches per case per epoch"
         f"{' (fresh every epoch)' if args.resample else ''}, width {args.width}, batch {args.batch}"
         f"{', augmented' if args.augment else ''}. "
@@ -2468,9 +2629,10 @@ def main():
             fold_budget = max(60.0, left / (len(folds_to_run) - fold_pos))
         fold_start = time.monotonic()
 
-        do_flip = bool(args.aug_flip)
-        do_intensity = bool(args.aug_intensity)
-        do_noise = bool(args.aug_noise)
+        # --augment already flips and changes intensity; never do either twice.
+        do_flip = bool(args.aug_flip) and not args.augment
+        do_intensity = bool(args.aug_intensity) and not args.augment
+        do_noise = bool(args.aug_noise) and not args.augment
         has_aug3d = do_flip or do_intensity or do_noise
 
         epoch = start_epoch - 1
@@ -2499,7 +2661,11 @@ def main():
                     for _ in range(args.patches_per_case):
                         origin = sample_origin(case["image"].shape, case["labels"], rng_epoch_data,
                                                sampling_mix_dict, patch, case["lesion_pts"])
-                        if args.aug_spatial:
+                        if aug_level:
+                            items.append(spatial_crop(case["image"], case["labels"], origin, patch, rng_epoch_data,
+                                                      p_rot=aug_level["p_rot"], p_scale=aug_level["p_zoom"],
+                                                      max_deg=aug_level["max_deg"], scale_range=aug_level["zoom"]))
+                        elif args.aug_spatial:
                             items.append(spatial_crop(case["image"], case["labels"], origin, patch, rng_epoch_data, p_rot=args.aug_p_rot, p_scale=args.aug_p_scale))
                         else:
                             items.append((crop(case["image"], origin, patch).astype(np.float32),
@@ -2515,6 +2681,8 @@ def main():
                 ]
             if args.augment:
                 items = [augment(im, lb, rng_epoch_data) for im, lb in items]
+            if aug_level:
+                items = [augment_level(im, lb, rng_epoch_data, aug_level) for im, lb in items]
             t_data_total += (time.time() - t_d0)
 
             for i in range(0, len(items), args.batch):

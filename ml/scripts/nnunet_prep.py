@@ -41,7 +41,7 @@ from train_3d import SEED, dice, lesion_stats, load_case, rates, summarise  # no
 DATASET = "Dataset501_BMEKnee"
 DATASET_ID = 501
 PLANS = "nnUNetResEncUNetMPlans"
-TRAINER = "nnUNetTrainer_100epochs"
+TRAINER = "nnUNetTrainer_BME100"
 
 
 def nn_id(case_id: str) -> str:

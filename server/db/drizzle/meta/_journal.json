@@ -22,6 +22,20 @@
       "when": 1794380881518,
       "tag": "0002_model_benchmark_runs",
       "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "7",
+      "when": 1794665026712,
+      "tag": "0003_case_annotation",
+      "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1794668071406,
+      "tag": "0004_review_site",
+      "breakpoints": true
     }
   ]
 }

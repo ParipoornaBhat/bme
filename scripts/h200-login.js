@@ -1,93 +1,56 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import readline from "node:readline/promises";
-import { stdin as input, stdout as output } from "node:process";
+import { ask, h200Route, loadDotEnv, pickAccount, UNREACHABLE } from "./lib/accounts.js";
 
 /**
- * Who logs in to the H200. Passwords live in .env, either as
- *   H200_PASS_<roll>=...      or      NNM23CS<roll>_H200=...
- * One password found: that account is used without asking. Several: a menu.
- * The password is never printed.
+ * Who logs in to the H200, and by which route. Passwords live in .env as
+ * NNM23CS<roll>_H200=... (see scripts/lib/accounts.js). The password is never
+ * printed, and the helper ssh calls only answers the H200's own password
+ * prompt, never the jump host's.
  */
 
-export function loadDotEnv(root) {
-  const file = path.join(root, ".env");
-  const env = {};
-  if (!fs.existsSync(file)) return env;
-  for (const line of fs.readFileSync(file, "utf8").split(/\r?\n/)) {
-    const match = line.match(/^([A-Za-z0-9_]+)=(.*)$/);
-    if (!match) continue;
-    env[match[1]] = match[2].trim().replace(/^["']|["']$/g, "");
+export { loadDotEnv, ask };
+
+function writeAskpass() {
+  if (process.platform === "win32") {
+    const file = path.join(os.tmpdir(), `bme-ssh-askpass-${process.pid}.cmd`);
+    fs.writeFileSync(
+      file,
+      '@echo off\r\necho(%~1| findstr /L /C:"%BME_SSH_USER%@" >nul && echo(%BME_SSH_PASS%\r\n',
+    );
+    return file;
   }
-  return env;
+  const file = path.join(os.tmpdir(), `bme-ssh-askpass-${process.pid}.sh`);
+  fs.writeFileSync(file, '#!/bin/sh\ncase "$1" in *"$BME_SSH_USER@"*) printf \'%s\\n\' "$BME_SSH_PASS" ;; esac\n', { mode: 0o700 });
+  return file;
 }
 
-function accountsIn(env) {
-  const found = new Map();
-  for (const [key, value] of Object.entries(env)) {
-    if (!value) continue;
-    const m = key.match(/^H200_PASS_(\d{3})$/i) || key.match(/^NNM23CS(\d{3})_H200$/i);
-    if (m) found.set(m[1], { roll: m[1], user: `nnm23cs${m[1]}_stu_cse`, password: value });
-  }
-  return [...found.values()].sort((a, b) => a.roll.localeCompare(b.roll));
-}
-
-async function ask(question) {
-  const rl = readline.createInterface({ input, output });
-  try {
-    return (await rl.question(question)).trim();
-  } finally {
-    rl.close();
-  }
-}
-
-/** want: a roll number ("149") to skip the menu, as `pnpm h200 <op> --as 149` does. */
+/** want: a roll number or name ("149", "reegan") to skip the menu, as `--as 149` does. */
 export async function chooseH200(root, want = "") {
-  const env = { ...process.env, ...loadDotEnv(root) };
-  const host = env.H200_HOST || "172.18.0.83";
-  const accounts = accountsIn(env);
-  if (!accounts.length) {
-    console.error("No H200 password in .env.");
-    console.error("Add one line, for example:  NNM23CS124_H200=<password>");
-    process.exit(1);
-  }
-  let account = accounts[0];
-  if (want) {
-    account = accounts.find((a) => a.roll === want || a.user === want);
-    if (!account) {
-      console.error(`No password for account ${want} in .env. Have: ${accounts.map((a) => a.roll).join(", ")}`);
-      process.exit(1);
-    }
-    console.log(`Using ${account.user}.`);
-  } else if (accounts.length > 1) {
-    console.log("\nWhich college account?");
-    accounts.forEach((a, i) => console.log(`  ${i + 1}. ${a.user}`));
-    account = accounts[Number(await ask(`Account [1-${accounts.length}]: `)) - 1];
-    if (!account) {
-      console.error("No account chosen.");
-      process.exit(1);
-    }
-  } else {
-    console.log(`Using ${account.user} (the only H200 password in .env).`);
-  }
-
-  const askpass = path.join(os.tmpdir(), `bme-ssh-askpass-${process.pid}.cmd`);
-  fs.writeFileSync(askpass, "@echo off\r\necho %BME_SSH_PASS%\r\n");
+  const account = await pickAccount("h200", want);
+  const route = await h200Route();
+  console.log(`H200 as ${account.label}: ${route.label}.`);
+  if (route.remote) console.log("Copies over this route use your internet data; each one asks first.");
+  const askpass = writeAskpass();
   return {
-    user: account.user,
-    target: `${account.user}@${host}`,
+    user: account.h200.user,
+    label: account.label,
+    roll: account.roll,
+    target: `${account.h200.user}@${route.host}`,
+    remote: route.remote,
+    sshOpts: route.sshOpts,
+    unreachable: UNREACHABLE,
     env: {
       ...process.env,
       SSH_ASKPASS: askpass,
       SSH_ASKPASS_REQUIRE: "force",
-      DISPLAY: "localhost:0",
-      BME_SSH_PASS: account.password,
+      DISPLAY: process.env.DISPLAY || "localhost:0",
+      BME_SSH_USER: account.h200.user,
+      BME_SSH_PASS: account.h200.password,
     },
     close() {
       try { fs.unlinkSync(askpass); } catch { /* already gone */ }
     },
   };
 }
-
-export { ask };
