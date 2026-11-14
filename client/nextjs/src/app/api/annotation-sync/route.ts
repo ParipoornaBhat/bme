@@ -19,7 +19,9 @@ export async function POST(req: NextRequest) {
   }
 
   const dryRun = searchParams.get("dry") === "1";
-  const report = await runAnnotationSync({ me, dryRun });
+  const caseId = searchParams.get("case");
+  const only = caseId ? [caseId] : undefined;
+  const report = await runAnnotationSync({ me, dryRun, only });
   return NextResponse.json(report);
 }
 

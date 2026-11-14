@@ -31,6 +31,7 @@ export function useCloudSync({
   enabled?: boolean;
 }) {
   const [syncStatus, setSyncStatus] = useState<string>("");
+  const [isSyncing, setIsSyncing] = useState<boolean>(false);
   const [teamNotice, setTeamNotice] = useState<string | null>(null);
   const inFlightRef = useRef(false);
   const dirtyRef = useRef(dirty);
@@ -38,33 +39,38 @@ export function useCloudSync({
   const onReloadRef = useRef(onReloadCase);
   onReloadRef.current = onReloadCase;
 
-  const runSync = useCallback(async () => {
-    if (!enabled || !caseId || inFlightRef.current) return;
+  const runSync = useCallback(async (opts?: { all?: boolean }) => {
+    if (!enabled || inFlightRef.current) return null;
     inFlightRef.current = true;
+    setIsSyncing(true);
     setSyncStatus("Syncing...");
 
     try {
-      const q = me ? `?by=${encodeURIComponent(me)}` : "";
+      const params = new URLSearchParams();
+      if (me) params.set("by", me);
+      if (!opts?.all && caseId) params.set("case", caseId);
+      const q = params.toString() ? `?${params.toString()}` : "";
+
       const res = await fetch(`/api/annotation-sync${q}`, {
         method: "POST",
       });
 
       if (!res.ok) {
         setSyncStatus("Sync off (database unreachable)");
-        return;
+        return null;
       }
 
       const report: SyncReport = await res.json().catch(() => ({ ok: false }));
       if (!report.ok) {
         setSyncStatus("Sync off (database unreachable)");
-        return;
+        return report;
       }
 
       const now = new Date();
       const timeStr = now.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", hour12: false });
       setSyncStatus(`Synced ${timeStr}`);
 
-      if (report.changedCases && report.changedCases.includes(caseId)) {
+      if (caseId && report.changedCases && report.changedCases.includes(caseId)) {
         if (!dirtyRef.current) {
           setTeamNotice(null);
           await onReloadRef.current();
@@ -72,41 +78,15 @@ export function useCloudSync({
           setTeamNotice("New annotations from the team for this case. Save, then reload.");
         }
       }
+      return report;
     } catch {
       setSyncStatus("Sync off (database unreachable)");
+      return null;
     } finally {
       inFlightRef.current = false;
+      setIsSyncing(false);
     }
   }, [enabled, caseId, me]);
-
-  // Sync on open
-  useEffect(() => {
-    if (!enabled || !caseId) return;
-    void runSync();
-  }, [enabled, caseId, runSync]);
-
-  // Sync every 60s while visible
-  useEffect(() => {
-    if (!enabled || !caseId) return;
-    const interval = setInterval(() => {
-      if (typeof document !== "undefined" && document.visibilityState !== "visible") {
-        return;
-      }
-      void runSync();
-    }, 60_000);
-
-    const handleVisibilityChange = () => {
-      if (document.visibilityState === "visible") {
-        void runSync();
-      }
-    };
-    document.addEventListener("visibilitychange", handleVisibilityChange);
-
-    return () => {
-      clearInterval(interval);
-      document.removeEventListener("visibilitychange", handleVisibilityChange);
-    };
-  }, [enabled, caseId, runSync]);
 
   const clearTeamNotice = useCallback(() => {
     setTeamNotice(null);
@@ -114,6 +94,7 @@ export function useCloudSync({
 
   return {
     syncStatus,
+    isSyncing,
     teamNotice,
     clearTeamNotice,
     triggerSync: runSync,

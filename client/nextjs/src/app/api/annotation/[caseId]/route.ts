@@ -203,14 +203,11 @@ export async function GET(
   const seg = path.join(caseDir, `${caseId}.seg.nrrd`);
   const mainExists = fs.existsSync(seg);
 
-  let mainBytes: Buffer | null = null;
   let mainStat: fs.Stats | null = null;
   if (mainExists) {
     try {
       mainStat = fs.statSync(seg);
-      mainBytes = fs.readFileSync(seg);
     } catch {
-      mainBytes = null;
       mainStat = null;
     }
   }
@@ -219,7 +216,7 @@ export async function GET(
     name: string;
     savedAt: string;
     mtimeMs: number;
-    fileBytes: Buffer;
+    size: number;
   }[] = [];
 
   if (fs.existsSync(caseDir)) {
@@ -232,12 +229,11 @@ export async function GET(
         const filePath = path.join(caseDir, f.name);
         try {
           const st = fs.statSync(filePath);
-          const buf = fs.readFileSync(filePath);
           annotatorsList.push({
             name: m[1],
             savedAt: st.mtime.toISOString(),
             mtimeMs: st.mtimeMs,
-            fileBytes: buf,
+            size: st.size,
           });
         } catch {
           // Skip unreadable file
@@ -254,7 +250,7 @@ export async function GET(
   let matchedMain = false;
   const annotators = annotatorsList.map((item) => {
     let isMain = false;
-    if (mainBytes && !matchedMain && mainBytes.equals(item.fileBytes)) {
+    if (mainStat && !matchedMain && mainStat.size === item.size) {
       isMain = true;
       matchedMain = true;
     }

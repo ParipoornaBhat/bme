@@ -10,6 +10,7 @@ import {
   ChevronLeft,
   ChevronRight,
   ChevronUp,
+  Cloud,
   Ellipsis,
   Eraser,
   Flag,
@@ -1892,7 +1893,7 @@ export default function Viewer({
     } catch { /* ignore */ }
   }, [caseId, seriesId, vol, pickedAnnotator, drawAll]);
 
-  const { syncStatus, teamNotice, clearTeamNotice, triggerSync } = useCloudSync({
+  const { syncStatus, isSyncing, teamNotice, clearTeamNotice, triggerSync } = useCloudSync({
     caseId,
     me: isReview ? null : (session?.user?.name || session?.user?.email || null),
     dirty,
@@ -2768,6 +2769,37 @@ export default function Viewer({
               userRole={reviewUser?.role === "team" ? "team" : "reviewer"}
               disabled={busy}
             />
+            {!isReview && (
+              <button
+                type="button"
+                onClick={async () => {
+                  const report = await triggerSync();
+                  if (report?.ok) {
+                    toast.success(
+                      report.changedCases?.length
+                        ? `Synced: updated ${report.changedCases.length} case(s)`
+                        : "Annotations in sync with cloud database"
+                    );
+                  } else {
+                    toast.error("Could not sync with cloud database");
+                  }
+                }}
+                disabled={isSyncing || busy}
+                title={syncStatus ? `Cloud Database Sync (${syncStatus})` : "Sync annotations with cloud database"}
+                className={`p-1.5 rounded border transition cursor-pointer flex items-center gap-1 ${
+                  teamNotice
+                    ? "border-sky-500/50 bg-sky-500/15 text-sky-400"
+                    : "border-border bg-background text-muted-foreground hover:text-foreground"
+                } disabled:opacity-50`}
+              >
+                {isSyncing ? (
+                  <Loader2 className="h-3.5 w-3.5 animate-spin text-sky-400" />
+                ) : (
+                  <Cloud className="h-3.5 w-3.5" />
+                )}
+                {teamNotice && <span className="h-1.5 w-1.5 rounded-full bg-sky-400 animate-pulse" />}
+              </button>
+            )}
             {!isReview && canAnnotate && (
               <button
                 type="button"
