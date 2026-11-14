@@ -5,8 +5,9 @@
 #   sbatch ml/slurm/nnunet.sbatch 2d              (or pnpm h200 nnunet2d --as <roll>)
 #
 # Submit the same command again after it stops: finished folds are skipped and
-# an unfinished fold continues from its last checkpoint (--c). Five folds of
-# 100 epochs may need more than one 4 h job; each job stops itself at 3 h 45.
+# an unfinished fold continues from its last checkpoint (--c), saved every 5
+# epochs. Five folds of 100 epochs need several 4 h jobs; each job stops itself
+# at 3 h 45.
 #
 # Needs nnunetv2==2.5.1 in ~/bme/env (pnpm h200 setup). Converting, planning
 # and preprocessing happen here, inside the job, never on the login node.
@@ -36,9 +37,13 @@ export nnUNet_n_proc_DA=3
 export nnUNet_compile=f
 DS=501
 PLANS=nnUNetResEncUNetMPlans
-TRAINER=nnUNetTrainer_100epochs
+TRAINER=nnUNetTrainer_BME100
 RUN="$nnUNet_results/Dataset501_BMEKnee/${TRAINER}__${PLANS}__${CONFIG}"
 STOP_AT=$(( $(date +%s) + 225 * 60 ))
+
+# Our trainer (checkpoint every 5 epochs) has to sit inside the nnunetv2 package.
+TR_DIR="$("$ENV/python3" -c 'import nnunetv2, os; print(os.path.join(os.path.dirname(nnunetv2.__file__), "training", "nnUNetTrainer", "variants", "training_length"))')"
+cp ml/scripts/nnunet_trainer_bme.py "$TR_DIR/nnUNetTrainer_BME100.py"
 
 echo "== convert"
 "$ENV/python3" ml/scripts/nnunet_prep.py convert .

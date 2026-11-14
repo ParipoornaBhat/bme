@@ -13,6 +13,7 @@
 /BME/
 /Non BME/
 /data/
+/inbox/
 /datasets/
 /raw/
 /interim/
@@ -239,3 +240,6 @@ notebooks/scratch/
 # stray copy of the teammate 2D batch, dropped in the repo root (PHI)
 /labled_data_bme/
 /Annotated/
+.env*
+
+/.claude/

@@ -236,7 +236,7 @@ def resolve_device(choice: str) -> str:
     """
     if choice == "cpu":
         return "cpu"
-    if torch.cuda.is_available():
+    if choice in ("auto", "cuda") and torch.cuda.is_available():
         return "cuda"
     if choice == "cuda":
         why = (
@@ -246,6 +246,11 @@ def resolve_device(choice: str) -> str:
             else "no CUDA device is visible to PyTorch"
         )
         raise SystemExit(f"--device cuda requested but unavailable: {why}")
+    mps = getattr(torch.backends, "mps", None)
+    if choice in ("auto", "mps") and mps is not None and mps.is_available():
+        return "mps"
+    if choice == "mps":
+        raise SystemExit("--device mps requested but this PyTorch has no Apple GPU (MPS) support")
     return "cpu"
 
 
@@ -297,7 +302,7 @@ def main():
     ap.add_argument("--epochs", type=int, default=40)
     ap.add_argument("--batch", type=int, default=8)
     ap.add_argument("--lr", type=float, default=1e-3)
-    ap.add_argument("--device", choices=("auto", "cuda", "cpu"), default="auto",
+    ap.add_argument("--device", choices=("auto", "cuda", "mps", "cpu"), default="auto",
                     help="where to train. 'auto' uses the GPU when one is "
                          "usable and falls back to CPU; 'cuda' fails loudly "
                          "rather than training slowly by accident")

@@ -73,6 +73,11 @@ import zipfile
 from datetime import datetime
 from pathlib import Path
 
+try:
+    from ml.scripts import inbox
+except ImportError:
+    import inbox
+
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import nibabel as nib  # noqa: E402
@@ -179,11 +184,19 @@ def cmd_assign(base: Path, apply: bool):
     print("written")
 
 
+def _can_rel(p: Path, base: Path) -> bool:
+    try:
+        p.relative_to(base)
+        return True
+    except ValueError:
+        return False
+
+
 def cmd_export(base: Path, who: str):
     if who not in TEAM:
         sys.exit(f"unknown name {who!r}; expected one of {sorted(TEAM)}")
     ann = base / "data" / "annotations"
-    out_dir = base / "data" / "exports"
+    out_dir = inbox.outgoing(base)
     stamp = datetime.now().strftime("%Y%m%d-%H%M")
     out = out_dir / f"annotations_{who}_{stamp}.zip"
 
@@ -218,7 +231,7 @@ def cmd_export(base: Path, who: str):
 
 
 def find_team_zips(base: Path) -> list[Path]:
-    """Teammate zips in the repo root and data/exports/, newest per person and kind.
+    """Teammate zips in inbox/team, the repo root and data/exports/, newest per person and kind.
 
     Picks up annotations_<who>_<stamp>.zip (pnpm zipbme:<who>) and
     nbme_annotations_<who>.zip (pnpm zipnbme:<who>); the combined
@@ -228,14 +241,23 @@ def find_team_zips(base: Path) -> list[Path]:
     never race each other.
     """
     seen: dict[str, Path] = {}
-    for folder in (base, base / "data" / "exports"):
+    search_dirs = inbox.drop_dirs(base, "team")
+    scanned_folders: list[Path] = []
+    for folder in search_dirs:
         if not folder.is_dir():
             continue
+        scanned_folders.append(folder)
         for pattern in ("annotations_*.zip", "nbme_annotations_*.zip"):
             for zp in sorted(folder.glob(pattern)):
                 if zp.name.startswith("nbme_annotations_all"):
                     continue
                 seen.setdefault(hashlib.sha256(zp.read_bytes()).hexdigest(), zp)
+    if scanned_folders:
+        names = ", ".join(
+            str(f.relative_to(base)) if _can_rel(f, base) else str(f)
+            for f in scanned_folders
+        )
+        print(f"searching for teammate zips in: {names}")
     newest: dict[tuple[str, str], tuple[str, Path]] = {}
     for zp in seen.values():
         try:
@@ -333,7 +355,7 @@ def cmd_share(base: Path):
     with open(data / "worklist.csv", newline="", encoding="utf-8") as fh:
         cases = [r["case_id"] for r in csv.DictReader(fh)]
     stamp = datetime.now().strftime("%Y%m%d-%H%M")
-    out_dir = data / "exports"
+    out_dir = inbox.outgoing(base)
     mri_zip = out_dir / f"hub_mri_{stamp}.zip"
     ann_zip = out_dir / f"hub_annotations_{stamp}.zip"
 

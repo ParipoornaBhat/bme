@@ -2,8 +2,13 @@ import { NextRequest, NextResponse } from "next/server";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import zlib from "node:zlib";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
+import { eq, and } from "drizzle-orm";
+import { db, caseAnnotation } from "@bme/db";
+import { isReviewMode } from "~/lib/app-mode";
+import { getReviewUser, reviewEdit, safeAnnotator } from "~/lib/review-auth";
 
 /**
  * The saved annotation for a case, as the raw uint8 labelmap the 3D editor
@@ -17,6 +22,88 @@ import { promisify } from "node:util";
 export const dynamic = "force-dynamic";
 const exec = promisify(execFile);
 const ID = /^(BME|NBME)-\d{3}$/;
+const ANNOTATOR_RE = /^[A-Za-z0-9_-]{1,40}$/;
+
+async function reviewHandler(
+  req: NextRequest,
+  caseId: string,
+) {
+  if (!ID.test(caseId)) return NextResponse.json({ error: "bad case id" }, { status: 400 });
+
+  const by = req.nextUrl.searchParams.get("by");
+
+  if (by === "_review" || by === "_mine") {
+    const user = await getReviewUser(req);
+    if (!user) {
+      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+    }
+    const safeMe = safeAnnotator(user.displayName) || safeAnnotator(user.username);
+    const [openEdit] = await db
+      .select()
+      .from(reviewEdit)
+      .where(
+        and(
+          eq(reviewEdit.caseId, caseId),
+          eq(reviewEdit.reviewer, safeMe),
+          eq(reviewEdit.status, "open"),
+        ),
+      )
+      .limit(1);
+
+    if (!openEdit || !openEdit.labelsGzB64) {
+      return NextResponse.json({ exists: false, error: "no open review edit" }, { status: 404 });
+    }
+
+    try {
+      const rawBuf = zlib.gunzipSync(Buffer.from(openEdit.labelsGzB64, "base64"));
+      return new NextResponse(new Uint8Array(rawBuf), {
+        headers: {
+          "Content-Type": "application/octet-stream",
+          "Content-Length": String(rawBuf.length),
+          "Cache-Control": "no-store",
+        },
+      });
+    } catch {
+      return NextResponse.json({ error: "failed to decompress labelmap" }, { status: 500 });
+    }
+  }
+
+  let annotatorToFind = "_main";
+  if (by !== null && by !== "") {
+    if (!ANNOTATOR_RE.test(by)) {
+      return NextResponse.json({ error: "bad annotator name" }, { status: 400 });
+    }
+    annotatorToFind = by;
+  }
+
+  const [row] = await db
+    .select()
+    .from(caseAnnotation)
+    .where(
+      and(
+        eq(caseAnnotation.caseId, caseId),
+        eq(caseAnnotation.annotator, annotatorToFind),
+      ),
+    )
+    .limit(1);
+
+  if (!row || !(row as any).labelsGzB64) {
+    return NextResponse.json({ exists: false, error: "annotation labels not found" }, { status: 404 });
+  }
+
+  try {
+    const rawBuf = zlib.gunzipSync(Buffer.from((row as any).labelsGzB64, "base64"));
+    return new NextResponse(new Uint8Array(rawBuf), {
+      headers: {
+        "Content-Type": "application/octet-stream",
+        "Content-Length": String(rawBuf.length),
+        "Cache-Control": "no-store",
+      },
+    });
+  } catch {
+    return NextResponse.json({ error: "failed to decompress labelmap" }, { status: 500 });
+  }
+}
 
 function root() {
   return path.resolve(process.cwd(), "..", "..");
@@ -36,12 +123,26 @@ export async function GET(
   { params }: { params: Promise<{ caseId: string }> },
 ) {
   const { caseId } = await params;
+  if (isReviewMode()) return reviewHandler(_req, caseId);
+
   if (!ID.test(caseId)) return NextResponse.json({ error: "bad case id" }, { status: 400 });
   const series = _req.nextUrl.searchParams.get("series") ?? "";
   const seriesArg = /^[a-z0-9-]{1,32}$/.test(series) ? [series] : [];
 
-  const seg = path.join(root(), "data", "annotations", caseId, `${caseId}.seg.nrrd`);
-  if (!fs.existsSync(seg)) return NextResponse.json({ exists: false }, { status: 404 });
+  const by = _req.nextUrl.searchParams.get("by");
+  let seg = path.join(root(), "data", "annotations", caseId, `${caseId}.seg.nrrd`);
+
+  if (by !== null) {
+    if (!ANNOTATOR_RE.test(by)) {
+      return NextResponse.json({ error: "bad annotator name" }, { status: 400 });
+    }
+    seg = path.join(root(), "data", "annotations", caseId, `${caseId}__${by}.seg.nrrd`);
+    if (!fs.existsSync(seg)) {
+      return NextResponse.json({ exists: false, error: "annotator copy not found" }, { status: 404 });
+    }
+  } else {
+    if (!fs.existsSync(seg)) return NextResponse.json({ exists: false }, { status: 404 });
+  }
 
   const tmp = path.join(os.tmpdir(), `bme-${caseId}-${Date.now()}.labels`);
   try {

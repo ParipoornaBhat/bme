@@ -4,10 +4,11 @@ import path from "node:path";
 import readline from "node:readline/promises";
 import { stdin as input, stdout as output } from "node:process";
 import { fileURLToPath } from "node:url";
+import { describeDevice, detectDevice } from "./lib/device.js";
 
 /**
  * pnpm train:2d / pnpm train:3d
- * Asks which model, then trains on this PC's GPU with a 90% VRAM cap.
+ * Asks which model, then trains on this PC's GPU (CUDA, or Apple MPS) with a 90% VRAM cap.
  * One run at a time. Metrics go to that run's metrics.json and to
  * data/training_log.csv.
  */
@@ -61,6 +62,7 @@ function run(args) {
       OPENBLAS_NUM_THREADS: "1",
       NUMEXPR_NUM_THREADS: "1",
       PYTORCH_CUDA_ALLOC_CONF: "max_split_size_mb:128",
+      PYTORCH_ENABLE_MPS_FALLBACK: "1",
     },
   });
   if (result.status !== 0) process.exit(result.status ?? 1);
@@ -78,6 +80,14 @@ if (!fs.existsSync(python)) {
 const choices = MODELS[task];
 const rl = readline.createInterface({ input, output });
 console.log("");
+const dev = process.env.BME_DEVICE ? { kind: process.env.BME_DEVICE } : detectDevice();
+if (!process.env.BME_DEVICE) {
+  console.log(`Device: ${describeDevice(dev)}`);
+  if (dev.kind === "cpu") {
+    console.log("No usable GPU, so this would run on the CPU (20-40x slower). Use pnpm train:local, which asks first.");
+    process.exit(1);
+  }
+}
 console.log(task === "2d" ? "Train 2D segmentation on this PC's GPU." : "Train 3D segmentation on this PC's GPU.");
 console.log("GPU memory is capped at 90%. Run one training at a time.");
 console.log("Times are for this RTX 4050, 5 folds, 40 epochs. 3D is the short run.");
@@ -96,7 +106,7 @@ if (!picked) {
 }
 
 console.log("");
-console.log(`Starting ${picked.label} on CUDA. Do not start another train until this finishes.`);
+console.log(`Starting ${picked.label} on ${dev.kind.toUpperCase()}. Do not start another train until this finishes.`);
 console.log("");
 
 if (task === "2d") {
@@ -110,7 +120,7 @@ if (task === "2d") {
     "--data", "seg2d3d",
     "--out", picked.out,
     "--model", picked.id,
-    "--device", "cuda",
+    "--device", dev.kind,
     "--batch", "4",
     "--folds", "5",
     "--epochs", "40",
@@ -121,7 +131,7 @@ if (task === "2d") {
     path.join(root, "ml", "scripts", "train_3d.py"), root,
     "--model", picked.id,
     "--out", picked.out,
-    "--device", "cuda",
+    "--device", dev.kind,
     "--folds", "5",
     "--epochs", "40",
   ]);

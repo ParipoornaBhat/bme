@@ -51,6 +51,11 @@ from import_slicer_all import DEID_FIELDS  # noqa: E402
 from rename_segments import segments_in  # noqa: E402
 from seg2nifti import canonical, seg_affine_ras  # noqa: E402
 
+try:
+    from ml.scripts import inbox
+except ImportError:
+    import inbox
+
 
 def next_ids(used: set[str], n: int) -> list[str]:
     highest = 0
@@ -66,15 +71,32 @@ def sort_key(path: Path):
 
 def collect(base: Path) -> list[Path]:
     found = []
-    for root in (base / "Non BME" / "new", base / "data" / "newnonbme"):
+    roots = inbox.drop_dirs(base, "nonbme")
+    scanned_roots: list[Path] = []
+    for root in roots:
         if not root.is_dir():
             continue
+        scanned_roots.append(root)
         for child in root.iterdir():
             if child.name.startswith("."):
                 continue
             if child.is_dir() or (child.is_file() and child.suffix.lower() == ".zip"):
                 found.append(child)
+    if scanned_roots:
+        names = ", ".join(
+            str(r.relative_to(base)) if _can_rel(r, base) else str(r)
+            for r in scanned_roots
+        )
+        print(f"reading non-BME cases from: {names}")
     return sorted(found, key=sort_key)
+
+
+def _can_rel(p: Path, base: Path) -> bool:
+    try:
+        p.relative_to(base)
+        return True
+    except ValueError:
+        return False
 
 
 def folder_parts(folder: Path):

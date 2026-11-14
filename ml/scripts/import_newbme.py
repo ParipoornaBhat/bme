@@ -50,6 +50,11 @@ import tempfile
 import zipfile
 from pathlib import Path
 
+try:
+    from ml.scripts import inbox
+except ImportError:
+    import inbox
+
 import nibabel as nib
 import nrrd
 from io import TextIOWrapper
@@ -301,13 +306,19 @@ def find_bundle(base: Path, given: str) -> Path:
                 return (root / p).resolve()
         sys.exit(f"no such bundle: {given}")
     hits = []
-    for d in (base, base / "data", base / "data" / "exports"):
+    for d in inbox.drop_dirs(base, "bundles"):
         if d.is_dir():
-            hits += d.glob(BUNDLE_GLOB)
+            hits += list(d.glob(BUNDLE_GLOB))
     if not hits:
-        sys.exit(f"no {BUNDLE_GLOB} in the repo root, data/ or data/exports/. "
-                 "Download it from Drive into the project folder, or pass its path.")
-    return max(hits, key=lambda p: p.name)
+        sys.exit(f"no {BUNDLE_GLOB} in inbox/bundles/, the repo root, data/ or data/exports/. "
+                 "Download it from Drive into inbox/bundles/ or the project folder, or pass its path.")
+    chosen = max(hits, key=lambda p: p.name)
+    try:
+        rel = chosen.relative_to(base)
+    except ValueError:
+        rel = chosen
+    print(f"using bundle from {rel}")
+    return chosen
 
 
 def open_bundle(bundle: Path, dest: Path) -> dict[str, str]:
@@ -327,7 +338,7 @@ def open_bundle(bundle: Path, dest: Path) -> dict[str, str]:
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("base")
-    ap.add_argument("--src", default="data/newbme", help="folder of one subfolder per patient")
+    ap.add_argument("--src", default=None, help="folder of one subfolder per patient")
     ap.add_argument("--bundle", nargs="?", const="auto",
                     help=f"import a {BUNDLE_GLOB} instead of --src (path, or found automatically)")
     ap.add_argument("--apply", action="store_true")
@@ -345,7 +356,22 @@ def main():
         args.keep = True
         print(f"bundle {bundle} ({len(expected)} cases)")
     else:
-        src = Path(args.src) if Path(args.src).is_absolute() else base / args.src
+        if args.src:
+            src = Path(args.src) if Path(args.src).is_absolute() else base / args.src
+        else:
+            candidates = inbox.drop_dirs(base, "bme")
+            src = candidates[0]
+            for c in candidates:
+                if c.is_dir() and any(c.iterdir()):
+                    src = c
+                    break
+            if not src.is_dir() and (base / "data" / "newbme").is_dir():
+                src = base / "data" / "newbme"
+        try:
+            rel = src.relative_to(base)
+        except ValueError:
+            rel = src
+        print(f"reading BME cases from {rel}")
     if not src.is_dir():
         sys.exit(f"missing {src}\nPut one folder per patient inside it, then run this again.")
 

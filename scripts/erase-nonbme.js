@@ -8,7 +8,7 @@ import { fileURLToPath } from "node:url";
  *
  * Deletes data/nifti/NBME-* and data/annotations/NBME-*, and the matching rows
  * in data/worklist.csv, data/deid_map.csv, and the Postgres patient table.
- * Does not touch Non BME/new, data/newnonbme, BME cases, or 2D data.
+ * Does not touch inbox/nonbme, Non BME/new, data/newnonbme, BME cases, or 2D data.
  */
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");

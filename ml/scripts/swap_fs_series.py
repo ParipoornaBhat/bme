@@ -52,6 +52,11 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from seg2nifti import seg_affine_ras  # noqa: E402
 
+try:
+    from ml.scripts import inbox
+except ImportError:
+    import inbox
+
 # case -> (folder under Non BME/new/new and Non BME/axial, light file, dark file)
 SWAPS = {
     "NBME-005": ("5", "201_series_1.nrrd", "601_series_5.nrrd"),
@@ -182,7 +187,7 @@ def cmd_apply(base: Path, apply: bool):
 
 
 def cmd_zip(base: Path):
-    out = base / ZIP_NAME
+    out = inbox.outgoing(base) / ZIP_NAME
     files = []
     for cid, (folder, light, dark) in SWAPS.items():
         f = base / "Non BME" / "axial" / folder / dark
@@ -193,14 +198,29 @@ def cmd_zip(base: Path):
         z.writestr("manifest.json", json.dumps({"kind": "fs_fix", "swaps": SWAPS}, indent=1))
         for f, arc in files:
             z.write(f, arc)
-    print(f"wrote {out.name}  ({out.stat().st_size / 1e6:.1f} MB, {len(files)} scan(s), no annotations)")
-    print("Share it privately. Teammates put it in the repo root and run: pnpm data:nonbme:fix-fs:install")
+    try:
+        out_rel = str(out.relative_to(base))
+    except ValueError:
+        out_rel = str(out)
+    print(f"wrote {out_rel}  ({out.stat().st_size / 1e6:.1f} MB, {len(files)} scan(s), no annotations)")
+    print("Share it privately. Teammates put it in inbox/fixes/ or the repo root and run: pnpm data:nonbme:fix-fs:install")
 
 
 def cmd_install(base: Path, apply: bool):
-    zp = base / ZIP_NAME
-    if not zp.exists():
-        sys.exit(f"{ZIP_NAME} not found in {base}. Download it and put it in the repo root.")
+    candidates = inbox.drop_dirs(base, "fixes")
+    zp = None
+    for d in candidates:
+        candidate = d / ZIP_NAME
+        if candidate.is_file():
+            zp = candidate
+            break
+    if zp is None:
+        sys.exit(f"{ZIP_NAME} not found in inbox/fixes/ or {base}. Download it and put it in inbox/fixes/.")
+    try:
+        rel = str(zp.relative_to(base))
+    except ValueError:
+        rel = str(zp)
+    print(f"using {ZIP_NAME} from {rel}")
     with tempfile.TemporaryDirectory() as tmp:
         with zipfile.ZipFile(zp) as z:
             man = json.loads(z.read("manifest.json"))

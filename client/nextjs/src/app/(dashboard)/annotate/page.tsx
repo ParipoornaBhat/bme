@@ -4,6 +4,7 @@ import { useEffect, useMemo, useState } from "react";
 import { Boxes, CheckCircle2, ChevronLeft, ChevronRight, Circle, Download, Flag, Layers, Search, Users } from "lucide-react";
 import type { FlagRecord } from "~/lib/flag-store";
 import { useFocusMode } from "~/lib/useFocusMode";
+import { isReviewMode } from "~/lib/app-mode";
 import Viewer, { type ViewerView } from "./Viewer";
 import Painter2D from "./Painter2D";
 
@@ -23,8 +24,8 @@ type Case = {
   flag: FlagRecord | null;
 };
 
-const FILTERS = ["all", "bme", "non_bme", "annotated", "unannotated", "flagged"] as const;
-type Filter = (typeof FILTERS)[number];
+const ALL_FILTERS = ["all", "bme", "non_bme", "annotated", "unannotated", "flagged"] as const;
+type Filter = (typeof ALL_FILTERS)[number];
 
 function matchesFilter(c: Case, f: Filter) {
   if (f === "bme") return c.cls === "bme";
@@ -36,7 +37,12 @@ function matchesFilter(c: Case, f: Filter) {
 }
 
 export default function AnnotatePage() {
-  const [tab, setTab] = useState<"2d" | "3d">("2d");
+  const isReview = isReviewMode();
+  const filters = useMemo(
+    () => (isReview ? (["all", "bme", "non_bme", "annotated", "unannotated"] as const) : ALL_FILTERS),
+    [isReview],
+  );
+  const [tab, setTab] = useState<"2d" | "3d">(isReview ? "3d" : "2d");
   const [cases, setCases] = useState<Case[]>([]);
   const [annotators, setAnnotators] = useState<string[]>([]);
   const [who, setWho] = useState("");
@@ -53,6 +59,10 @@ export default function AnnotatePage() {
 
   // Restore tab and filters from localStorage
   useEffect(() => {
+    if (isReview) {
+      setTab("3d");
+      return;
+    }
     try {
       const savedTab = localStorage.getItem("bme_annotate_tab") as "2d" | "3d" | null;
       if (savedTab === "2d" || savedTab === "3d") setTab(savedTab);
@@ -61,9 +71,9 @@ export default function AnnotatePage() {
       const savedQ = localStorage.getItem("bme_annotate_3d_q");
       if (savedQ) setQ(savedQ);
       const savedFilter = localStorage.getItem("bme_annotate_3d_filter") as Filter | null;
-      if (savedFilter && FILTERS.includes(savedFilter)) setFilter(savedFilter);
+      if (savedFilter && ALL_FILTERS.includes(savedFilter)) setFilter(savedFilter);
     } catch { /* ignore */ }
-  }, []);
+  }, [isReview]);
 
   const handleTabChange = (newTab: "2d" | "3d") => {
     setTab(newTab);
@@ -125,19 +135,18 @@ export default function AnnotatePage() {
       return;
     }
 
-    // The shared ledger says who annotated what. A case recorded here but
-    // missing locally is one a teammate holds — that is the cue to ask them
-    // for the file, since the imaging moves by hand, not through this app.
-    try {
-      const lg = await fetch("/api/annotation-log", { cache: "no-store" });
-      if (lg.ok) {
-        const d = await lg.json();
-        const map: Record<string, { annotator: string | null; at: string; localFile: boolean }> = {};
-        for (const e of d.entries ?? []) map[e.caseId] = e;
-        setLedger(map);
-        setNeedFrom(d.needFromTeammate ?? []);
-      }
-    } catch { /* ledger optional */ }
+    if (!isReview) {
+      try {
+        const lg = await fetch("/api/annotation-log", { cache: "no-store" });
+        if (lg.ok) {
+          const d = await lg.json();
+          const map: Record<string, { annotator: string | null; at: string; localFile: boolean }> = {};
+          for (const e of d.entries ?? []) map[e.caseId] = e;
+          setLedger(map);
+          setNeedFrom(d.needFromTeammate ?? []);
+        }
+      } catch { /* ledger optional */ }
+    }
   };
 
   useEffect(() => { load(); }, []);
@@ -150,10 +159,10 @@ export default function AnnotatePage() {
           matchesFilter(c, filter) &&
           (!q ||
             c.id.toLowerCase().includes(q.toLowerCase()) ||
-            (c.flag?.reason ?? "").toLowerCase().includes(q.toLowerCase()) ||
-            (c.flag?.note ?? "").toLowerCase().includes(q.toLowerCase())),
+            (!isReview && (c.flag?.reason ?? "").toLowerCase().includes(q.toLowerCase())) ||
+            (!isReview && (c.flag?.note ?? "").toLowerCase().includes(q.toLowerCase()))),
       ),
-    [cases, who, q, filter],
+    [cases, who, q, filter, isReview],
   );
 
   const done = cases.filter((c) => c.annotated).length;
@@ -168,30 +177,32 @@ export default function AnnotatePage() {
       <div className="flex flex-wrap items-center justify-between gap-3 border-b border-border pb-1">
         <div className="flex items-center gap-3">
           <h1 className="text-base font-bold tracking-tight">Annotate</h1>
-          <div className="flex gap-1">
-            {([
-              ["2d", "2D slices", Layers],
-              ["3d", "3D volume", Boxes],
-            ] as const).map(([id, label, Icon]) => (
-              <button
-                key={id}
-                onClick={() => handleTabChange(id)}
-                className={`inline-flex items-center gap-1.5 rounded-md px-3 py-1 text-xs font-medium transition ${
-                  tab === id
-                    ? "bg-primary text-primary-foreground font-semibold"
-                    : "text-muted-foreground hover:text-foreground hover:bg-muted"
-                }`}
-              >
-                <Icon className="h-3.5 w-3.5" />
-                {label}
-              </button>
-            ))}
-          </div>
+          {!isReview && (
+            <div className="flex gap-1">
+              {([
+                ["2d", "2D slices", Layers],
+                ["3d", "3D volume", Boxes],
+              ] as const).map(([id, label, Icon]) => (
+                <button
+                  key={id}
+                  onClick={() => handleTabChange(id)}
+                  className={`inline-flex items-center gap-1.5 rounded-md px-3 py-1 text-xs font-medium transition ${
+                    tab === id
+                      ? "bg-primary text-primary-foreground font-semibold"
+                      : "text-muted-foreground hover:text-foreground hover:bg-muted"
+                  }`}
+                >
+                  <Icon className="h-3.5 w-3.5" />
+                  {label}
+                </button>
+              ))}
+            </div>
+          )}
         </div>
 
         <div className="text-xs text-muted-foreground flex items-center gap-2">
           <span>{done} of {cases.length} annotated</span>
-          {needFrom.length > 0 && (
+          {!isReview && needFrom.length > 0 && (
             <span className="text-amber-500 font-medium">
               &middot; {needFrom.length} on teammate machine
             </span>
@@ -199,14 +210,14 @@ export default function AnnotatePage() {
         </div>
       </div>
 
-      {needFrom.length > 0 && (
+      {!isReview && needFrom.length > 0 && (
         <div className="rounded border border-amber-500/40 bg-amber-500/10 px-3 py-1.5 text-xs text-amber-400">
           <strong>Note:</strong> {needFrom.length} annotation files are held by teammates.
         </div>
       )}
 
       <div className="flex min-h-0 flex-1 flex-col">
-        {tab === "2d" && <Painter2D />}
+        {!isReview && tab === "2d" && <Painter2D />}
 
       {/* Mobile/Tablet Case List Toggle for 3D */}
       {tab === "3d" && (
@@ -269,7 +280,7 @@ export default function AnnotatePage() {
               </div>
 
               <div className="flex flex-wrap gap-1 text-xs">
-                {FILTERS.map((f) => {
+                {filters.map((f) => {
                   const count = f === "all" ? undefined : cases.filter((c) => matchesFilter(c, f)).length;
                   return (
                     <button
@@ -306,20 +317,20 @@ export default function AnnotatePage() {
                   >
                     {c.annotated ? (
                       <CheckCircle2 className="h-4 w-4 shrink-0 text-emerald-500" />
-                    ) : ledger[c.id] ? (
+                    ) : !isReview && ledger[c.id] ? (
                       <Download className="h-4 w-4 shrink-0 text-amber-500" />
                     ) : (
                       <Circle className="h-4 w-4 shrink-0 text-muted-foreground/40" />
                     )}
                     <span className="flex-1">
                       <span className="font-medium tabular-nums">{c.id}</span>
-                      {ledger[c.id]?.annotator && (
+                      {!isReview && ledger[c.id]?.annotator && (
                         <span className="block text-[10px] leading-tight text-muted-foreground">
                           {c.annotated ? "by " : "ask "}{ledger[c.id].annotator}
                         </span>
                       )}
                     </span>
-                    {c.flag && (
+                    {!isReview && c.flag && (
                       <span title={`Flagged: ${c.flag.reason || "Not Sure"}`}>
                         <Flag className="h-3.5 w-3.5 shrink-0 fill-amber-400 text-amber-400" />
                       </span>
@@ -360,9 +371,13 @@ export default function AnnotatePage() {
                 <span className="ml-3 mr-2 inline-block h-2 w-2 rounded-full bg-slate-400" />No BME
                 <br />
                 <strong>Iso</strong> = thin slices, best for 3D. Annotate these first.
-                <br />
-                <Download className="mr-1 inline h-3 w-3 text-amber-500" />
-                means a teammate annotated it — ask them to send the file.
+                {!isReview && (
+                  <>
+                    <br />
+                    <Download className="mr-1 inline h-3 w-3 text-amber-500" />
+                    means a teammate annotated it — ask them to send the file.
+                  </>
+                )}
               </p>
             </div>
           )}

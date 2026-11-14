@@ -49,6 +49,11 @@ import zipfile
 from datetime import datetime
 from pathlib import Path
 
+try:
+    from ml.scripts import inbox
+except ImportError:
+    import inbox
+
 # Add ml/scripts directory to path
 script_dir = Path(__file__).resolve().parent
 if str(script_dir) not in sys.path:
@@ -144,7 +149,7 @@ def export_annotator(base: Path, who: str, force: bool = False) -> Path:
     start, end = NBME_TEAM[who_clean]
     assigned_cases = case_range_ids(start, end)
     ann_dir = base / "data" / "annotations"
-    out_dir = base / "data" / "exports"
+    out_dir = inbox.outgoing(base)
     stamp = datetime.now().strftime("%Y%m%d-%H%M")
     out_zip = out_dir / f"nbme_annotations_{who_clean}_{stamp}.zip"
     latest_zip = out_dir / f"nbme_annotations_{who_clean}.zip"
@@ -226,13 +231,15 @@ def export_annotator(base: Path, who: str, force: bool = False) -> Path:
 
 def find_nbme_zips(base: Path) -> list[Path]:
     """Find all incoming NBME annotation zips (newest per person)."""
-    search_dirs = [base, base / "data" / "exports"]
+    search_dirs = inbox.drop_dirs(base, "team")
+    scanned_folders: list[Path] = []
     seen: dict[str, Path] = {}
     newest: dict[str, tuple[str, Path]] = {}
 
     for d in search_dirs:
         if not d.is_dir():
             continue
+        scanned_folders.append(d)
         for zp in sorted(d.glob("nbme_annotations_*.zip")):
             if "all" in zp.name.lower():
                 continue
@@ -249,6 +256,18 @@ def find_nbme_zips(base: Path) -> list[Path]:
                         newest[who] = (created, zp)
             except Exception:
                 continue
+    if scanned_folders:
+        def _can_rel(p: Path, b: Path) -> bool:
+            try:
+                p.relative_to(b)
+                return True
+            except ValueError:
+                return False
+        names = ", ".join(
+            str(f.relative_to(base)) if _can_rel(f, base) else str(f)
+            for f in scanned_folders
+        )
+        print(f"searching for teammate NBME zips in: {names}")
     return [zp for _, zp in sorted(newest.values(), key=lambda t: t[1].name)]
 
 
@@ -277,7 +296,7 @@ def import_teammate_zips(base: Path, zips: list[Path]) -> int:
 
 def combine_all_nbme(base: Path, force: bool = False) -> Path:
     ann_dir = base / "data" / "annotations"
-    out_dir = base / "data" / "exports"
+    out_dir = inbox.outgoing(base)
     stamp = datetime.now().strftime("%Y%m%d-%H%M")
     out_zip = out_dir / f"nbme_annotations_all_{stamp}.zip"
     latest_zip = out_dir / "nbme_annotations_all.zip"

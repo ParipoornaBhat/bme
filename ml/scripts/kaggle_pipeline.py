@@ -9,6 +9,13 @@ Subcommands:
     status           - Query kernel execution status on Kaggle.
     download         - Download trained weights and metrics into staging folder outside repo.
     import           - Validate and import weights under strict import safety policy.
+    export           - Refresh the local de-identified export only (no internet).
+    data-status      - Is this account's Kaggle dataset current? Plus its last run (JSON).
+    whoami           - The Kaggle user these credentials belong to.
+    logs             - Kernel status, and its log once the run has ended.
+
+Several accounts: the caller sets KAGGLE_USERNAME / KAGGLE_KEY and a separate
+KAGGLE_STAGING_DIR per account, so approval, upload and run state never mix.
 
 Security & Integrity Safeguards:
 1. Subcommands only: NO legacy action, NO default action, NO import-time side effects.
@@ -23,6 +30,8 @@ Security & Integrity Safeguards:
 from __future__ import annotations
 
 import argparse
+import ast
+import base64
 import csv
 import datetime
 import hashlib
@@ -540,6 +549,75 @@ def run_upload(
     }
 
 
+_CONFIG_LINE = re.compile(r"^([A-Z][A-Z0-9_]*)\s*=")
+_METHOD_NAME = re.compile(r"^[a-z0-9][a-z0-9-]{1,40}$")
+
+
+def parse_overrides(pairs: Optional[List[str]]) -> Dict[str, Any]:
+    """--set NAME=VALUE pairs; VALUE is a Python literal (True, 660, "med", None)."""
+    out: Dict[str, Any] = {}
+    for pair in pairs or []:
+        name, sep, raw = pair.partition("=")
+        name = name.strip()
+        if not sep or not re.match(r"^[A-Z][A-Z0-9_]*$", name):
+            raise ValueError(f"[ERROR] --set needs NAME=VALUE with an upper-case notebook setting, got {pair!r}")
+        if name in ("CONFIG_MODE", "MODEL_ARCH"):
+            raise ValueError(f"[ERROR] Set {name} with --mode / --model-arch, not --set.")
+        try:
+            out[name] = ast.literal_eval(raw.strip())
+        except (ValueError, SyntaxError):
+            raise ValueError(f"[ERROR] --set {name}: {raw!r} is not a Python literal (strings need quotes).")
+    return out
+
+
+def apply_notebook_overrides(nb_content: Dict[str, Any], overrides: Dict[str, Any]) -> None:
+    """Rewrite top-level NAME = value lines of the configuration cell. Unknown names fail."""
+    if not overrides:
+        return
+    cell = next(
+        (c for c in nb_content.get("cells", [])
+         if c.get("cell_type") == "code" and "CONFIG_MODE =" in "".join(c.get("source", []))),
+        None,
+    )
+    if cell is None:
+        raise ValueError("[ERROR] Notebook has no configuration cell (CONFIG_MODE =).")
+    left = dict(overrides)
+    new_src = []
+    for line in cell.get("source", []):
+        m = _CONFIG_LINE.match(line)
+        if m and m.group(1) in left:
+            new_src.append(f"{m.group(1)} = {left.pop(m.group(1))!r}  # Configured by launch\n")
+        else:
+            new_src.append(line)
+    if left:
+        raise ValueError(f"[ERROR] Not a setting in the notebook's configuration cell: {', '.join(sorted(left))}")
+    cell["source"] = new_src
+
+
+def embed_current_trainer(nb_content: Dict[str, Any], src_dir: Path) -> str:
+    """Put the current ml/scripts/train_3d.py into the kernel, so it never runs a stale copy."""
+    script = src_dir / "ml" / "scripts" / "train_3d.py"
+    if not script.is_file():
+        raise FileNotFoundError("[ERROR] ml/scripts/train_3d.py not found.")
+    data = script.read_bytes()
+    b64 = base64.b64encode(data).decode("ascii")
+    for cell in nb_content.get("cells", []):
+        if cell.get("cell_type") != "code":
+            continue
+        src = "".join(cell.get("source", []))
+        if 'BUNDLED_CODE_B64 = "' not in src:
+            continue
+        new, n = re.subn(r'^BUNDLED_CODE_B64 = "[A-Za-z0-9+/=]*"', lambda _m: f'BUNDLED_CODE_B64 = "{b64}"',
+                         src, count=1, flags=re.M)
+        if n != 1:
+            raise ValueError("[ERROR] Could not replace BUNDLED_CODE_B64 in the notebook.")
+        cell["source"] = new.splitlines(keepends=True)
+        digest = hashlib.sha256(data).hexdigest()
+        print(f"[OK] Kernel carries the current train_3d.py (sha256 {digest[:12]}).")
+        return digest
+    raise ValueError("[ERROR] Notebook has no BUNDLED_CODE_B64 line.")
+
+
 def run_launch_kernel(
     src_dir: Path,
     mode: str,
@@ -549,8 +627,15 @@ def run_launch_kernel(
     username: str,
     model_arch: str = "cnet_attention_unet",
     accelerator: Optional[str] = None,
+    overrides: Optional[Dict[str, Any]] = None,
+    continue_previous: bool = False,
+    dataset_owner: Optional[str] = None,
 ) -> str:
-    """Build kernel with CONFIG_MODE and push to Kaggle GPU."""
+    """Build kernel with CONFIG_MODE and push to Kaggle GPU.
+
+    continue_previous attaches this kernel's own last output as an input; the
+    notebook copies its checkpoints in and training continues from them.
+    """
     mode_map = {
         "quick": "quick_test",
         "bench": "bench",
@@ -559,7 +644,7 @@ def run_launch_kernel(
         "eval_suite": "eval_suite",
     }
     config_mode = mode_map.get(mode, "quick_test")
-    full_dataset_slug = f"{username}/{dataset_slug}"
+    full_dataset_slug = f"{dataset_owner or username}/{dataset_slug}"
     full_kernel_slug = f"{username}/{kernel_slug}"
 
     nb_path = src_dir / "ml" / "notebooks" / "train_3d_colab.ipynb"
@@ -583,6 +668,9 @@ def run_launch_kernel(
                         new_src.append(line)
                 cell["source"] = new_src
                 break
+
+    apply_notebook_overrides(nb_content, overrides or {})
+    embed_current_trainer(nb_content, src_dir)
 
     staging_dir = get_staging_dir(src_dir) / "kernel_staging"
     if staging_dir.exists():
@@ -613,6 +701,8 @@ def run_launch_kernel(
     }
     if accelerator:
         meta["machine_shape"] = accelerator
+    if continue_previous:
+        meta["kernel_sources"] = [full_kernel_slug]
     meta_path.write_text(json.dumps(meta, indent=2), encoding="utf-8")
 
     for attempt in range(1, 5):
@@ -639,12 +729,29 @@ def run_pipeline(
     api: Optional[Any] = None,
     model_arch: str = "cnet_attention_unet",
     accelerator: Optional[str] = None,
+    overrides: Optional[Dict[str, Any]] = None,
+    wait: bool = True,
+    import_name: Optional[str] = None,
+    continue_previous: bool = False,
+    dataset_owner: Optional[str] = None,
+    approval_dir: Optional[Path] = None,
 ) -> Dict[str, Any]:
-    """Execute end-to-end cloud training run: launch -> watch -> download -> verified import."""
+    """Execute end-to-end cloud training run: launch -> watch -> download -> verified import.
+
+    wait=False launches and returns; `run --resume` later watches, downloads and imports.
+    import_name puts the result in data/results3d_experiments/<import_name>, never data/results3d.
+    continue_previous starts a new session that continues the last one's checkpoints.
+    dataset_owner trains on the private dataset another account uploaded and shared
+    with this one; approval_dir is that account's staging folder (its approval record).
+    """
     check_no_in_repo_kaggle_credentials(src_dir)
+    if import_name is not None and not _METHOD_NAME.match(import_name):
+        raise ValueError(f"[ERROR] --import-name must be lower-case letters, digits and dashes, got {import_name!r}")
     staging_dir = get_staging_dir(src_dir)
     state_file = staging_dir / "run_state.json"
     approval_file = staging_dir / "dataset_approval.json"
+    if approval_dir is not None:
+        approval_file = validate_path_outside_repo_and_data(Path(approval_dir), src_dir) / "dataset_approval.json"
 
     if not approval_file.exists():
         raise RuntimeError(
@@ -661,6 +768,9 @@ def run_pipeline(
         run_state = json.loads(state_file.read_text(encoding="utf-8"))
         if run_state.get("phase") == "COMPLETED":
             print(f"[OK] Run {run_state.get('run_id')} already completed.")
+            return run_state
+        if run_state.get("phase") == "INCOMPLETE":
+            print(f"[INCOMPLETE] {run_state.get('status_message')}")
             return run_state
         if run_state.get("phase") in ("FAILED", "CANCELLED"):
             print(f"[NOTICE] Persisted run {run_state.get('run_id')} was {run_state.get('phase')}. Resetting and launching clean new run with latest code...")
@@ -692,16 +802,29 @@ def run_pipeline(
             raise RuntimeError(f"[ERROR] Failed to authenticate with Kaggle: {type(e).__name__}")
 
     username = get_kaggle_username(api)
-    full_dataset_slug = f"{username}/{dataset_slug}"
+    if dataset_owner == username:
+        dataset_owner = None
+    full_dataset_slug = f"{dataset_owner or username}/{dataset_slug}"
     full_kernel_slug = f"{username}/{kernel_slug}"
+
+    if not resume and dataset_owner:
+        # The owner's dataset must be visible to this account (shared with it, still private).
+        try:
+            api.dataset_status(full_dataset_slug)
+        except Exception as e:
+            raise RuntimeError(
+                f"[ERROR] This Kaggle account ({username}) cannot see {full_dataset_slug} ({type(e).__name__}).\n"
+                f"On kaggle.com, signed in as {dataset_owner}: open the dataset > Settings > Sharing,\n"
+                f"add {username} (can view), and keep the dataset Private."
+            )
 
     if not resume:
         # Read-only check that remote dataset exists, is private, and has approved hash
         try:
-            datasets = api.dataset_list(mine=True) or []
+            datasets = (api.dataset_list(user=dataset_owner) if dataset_owner else api.dataset_list(mine=True)) or []
         except (TypeError, Exception):
             try:
-                datasets = api.dataset_list(user=username) or []
+                datasets = api.dataset_list(user=dataset_owner or username) or []
             except Exception:
                 datasets = []
 
@@ -771,6 +894,11 @@ def run_pipeline(
             "phase": "QUEUED",
             "status_message": "Launching kernel on Kaggle GPU...",
             "updated_at": int(time.time()),
+            "model_arch": model_arch,
+            "overrides": overrides or {},
+            "import_name": import_name,
+            "continued": bool(continue_previous),
+            "dataset": full_dataset_slug,
         }
         state_file.write_text(json.dumps(run_state, indent=2), encoding="utf-8")
 
@@ -779,12 +907,19 @@ def run_pipeline(
             src_dir, mode, kernel_slug, dataset_slug, api, username,
             model_arch=model_arch,
             accelerator=accelerator,
+            overrides=overrides,
+            continue_previous=continue_previous,
+            dataset_owner=dataset_owner,
         )
         acc_label = f", Acc: {accelerator}" if accelerator else ""
         print(f"[OK] Kernel launched on Kaggle GPU: {full_kernel_slug} (Mode: {mode}, Arch: {model_arch}{acc_label})")
+        if not wait:
+            print("[OK] Not waiting. It keeps running on Kaggle; `run --resume` downloads it when it ends.")
+            return run_state
     else:
         run_id = run_state["run_id"]
         mode = run_state.get("mode", mode)
+        import_name = import_name or run_state.get("import_name")
 
     # Polling status with backoff and throttled logging
     phase = run_state.get("phase", "QUEUED")
@@ -938,11 +1073,26 @@ def run_pipeline(
         )
     )
 
+    if import_name and run_status_data and run_status_data.get("complete") is not True:
+        done = run_status_data.get("completed_folds") or []
+        run_state["phase"] = "INCOMPLETE"
+        run_state["status_message"] = (
+            f"Stopped before every fold finished (folds done: {done or 'none'}). "
+            "Continue it with run --continue-previous."
+        )
+        state_file.write_text(json.dumps(run_state, indent=2), encoding="utf-8")
+        print(f"\n[INCOMPLETE] {run_state['status_message']}")
+        return run_state
+
     verify_script = src_dir / "ml" / "scripts" / "verify_and_import_weights.py"
     if not verify_script.exists():
         raise FileNotFoundError("[ERROR] verify_and_import_weights.py not found in ml/scripts.")
 
-    if is_full_complete:
+    if import_name:
+        dest_dir = (src_dir / "data" / "results3d_experiments" / import_name).resolve()
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        print(f"\n[IMPORT POLICY] Method run '{import_name}'. Saving to {dest_dir} (the app's live model is not touched)...")
+    elif is_full_complete:
         dest_dir = (src_dir / "data" / "results3d").resolve()
         print("\n[IMPORT POLICY] Full completed run verified. Importing into production data/results3d...")
     else:
@@ -1504,6 +1654,130 @@ def run_import(
     return {"status": "IMPORT_SUCCESS", "output": proc.stdout.strip()}
 
 
+def _kaggle_api(api: Optional[Any] = None) -> Any:
+    if api is not None:
+        return api
+    try:
+        from kaggle.api.kaggle_api_extended import KaggleApi
+        api = KaggleApi()
+        api.authenticate()
+        return api
+    except Exception as e:
+        raise RuntimeError(f"[ERROR] Failed to authenticate with Kaggle: {type(e).__name__}")
+
+
+def run_data_status(
+    src_dir: Path,
+    export_dir: Path,
+    dataset_slug: str,
+    remote: bool = False,
+    api: Optional[Any] = None,
+) -> Dict[str, Any]:
+    """Is this account's uploaded dataset the same as the local export? Plus its last run.
+
+    Local only unless remote=True, which also checks the dataset still exists on Kaggle.
+    Output carries hashes and counts, never case IDs or local paths.
+    """
+    check_no_in_repo_kaggle_credentials(src_dir)
+    staging_dir = get_staging_dir(src_dir)
+    export_dir = validate_path_outside_repo_and_data(export_dir, src_dir)
+    res: Dict[str, Any] = {"export": None, "needs_upload": True, "reason": "", "remote": None, "run": None}
+
+    fresh_hash = None
+    if export_dir.is_dir() and any(export_dir.iterdir()):
+        fresh_hash, files, size, cases = compute_export_hash_and_stats(export_dir)
+        res["export"] = {"hash": fresh_hash[:12], "files": files, "bytes": size, "cases": cases}
+
+    approval: Dict[str, Any] = {}
+    approval_file = staging_dir / "dataset_approval.json"
+    if approval_file.exists():
+        try:
+            approval = json.loads(approval_file.read_text(encoding="utf-8"))
+        except Exception:
+            approval = {}
+
+    if not fresh_hash:
+        res["reason"] = "no local export yet"
+    elif not approval:
+        res["reason"] = "this account has never uploaded the dataset"
+    elif approval.get("export_combined_sha256") != fresh_hash:
+        res["reason"] = "the local data changed since this account's last upload"
+    elif approval.get("uploaded_hash") != fresh_hash:
+        res["reason"] = "approved but not uploaded yet"
+    else:
+        res["needs_upload"] = False
+        res["reason"] = "up to date"
+
+    if remote:
+        api = _kaggle_api(api)
+        username = get_kaggle_username(api)
+        full_slug = f"{username}/{dataset_slug}"
+        try:
+            datasets = api.dataset_list(mine=True) or []
+        except Exception:
+            datasets = []
+        found = any(getattr(d, "ref", str(d)) in (full_slug, dataset_slug) for d in datasets)
+        res["remote"] = {"user": username, "dataset_found": found}
+        if not found and not res["needs_upload"]:
+            res["needs_upload"] = True
+            res["reason"] = "the dataset is not on Kaggle under this account"
+
+    state_file = staging_dir / "run_state.json"
+    if state_file.exists():
+        try:
+            st = json.loads(state_file.read_text(encoding="utf-8"))
+            res["run"] = {k: st.get(k) for k in (
+                "run_id", "kernel_slug", "mode", "phase", "model_arch", "import_name",
+                "started_at", "updated_at", "continued",
+            )}
+            res["run"]["status_message"] = str(st.get("status_message") or "")[-300:]
+        except Exception:
+            pass
+    print(json.dumps(res))
+    return res
+
+
+def run_whoami(src_dir: Path, api: Optional[Any] = None) -> str:
+    check_no_in_repo_kaggle_credentials(src_dir)
+    username = get_kaggle_username(_kaggle_api(api))
+    print(username)
+    return username
+
+
+def run_logs(kernel_slug: str, src_dir: Path, lines: int = 40, api: Optional[Any] = None) -> Dict[str, Any]:
+    """Status now; the log only once the run has ended (Kaggle does not release it earlier)."""
+    check_no_in_repo_kaggle_credentials(src_dir)
+    api = _kaggle_api(api)
+    res = run_status(kernel_slug, src_dir=src_dir, api=api)
+    status = res["status"]
+    if any(k in status for k in ("running", "queued", "preparing")):
+        print("Kaggle releases a notebook's log only when the run ends. The status above is live;")
+        print("run this again for an update.")
+        return res
+    username = get_kaggle_username(api)
+    out_dir = get_staging_dir(src_dir) / "logs" / datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    out_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        api.kernels_output(f"{username}/{kernel_slug}", path=str(out_dir), file_pattern=r".*\.log$")
+    except TypeError:
+        api.kernels_output(f"{username}/{kernel_slug}", path=str(out_dir))
+    logs = sorted(out_dir.rglob("*.log"))
+    if not logs:
+        print("No log file came back from Kaggle.")
+        return res
+    raw = logs[0].read_text(encoding="utf-8", errors="replace")
+    try:
+        text = "".join(item.get("data", "") for item in json.loads(raw))
+    except Exception:
+        text = raw
+    print(f"--- last {lines} lines of the log ---")
+    print("\n".join(text.splitlines()[-lines:]))
+    for f in out_dir.rglob("*"):
+        if f.is_file() and f.suffix != ".log":
+            f.unlink()
+    return res
+
+
 def run_doctor(
     src_dir: Path,
     remote: bool = False,
@@ -1783,6 +2057,17 @@ def build_parser() -> argparse.ArgumentParser:
     p_run.add_argument("--kernel-slug", type=str, default=os.getenv("KAGGLE_KERNEL_SLUG", "bme-3d-unet-training"))
     p_run.add_argument("--model-arch", choices=["unet3d", "cnet_dual_unet", "cnet_attention_unet", "mednext", "orthogate_mednext"], default="orthogate_mednext",
                        help="Model architecture to train on GPU (default: orthogate_mednext)")
+    p_run.add_argument("--set", action="append", default=[], metavar="NAME=VALUE",
+                       help="override one notebook setting, e.g. --set AUG_LEVEL='\"med\"' (repeatable)")
+    p_run.add_argument("--no-wait", action="store_true", help="launch and return; `run --resume` downloads later")
+    p_run.add_argument("--import-name", type=str, default=None,
+                       help="import into data/results3d_experiments/<name> instead of data/results3d")
+    p_run.add_argument("--dataset-owner", type=str, default=None,
+                       help="Kaggle user whose private dataset (shared with this account) to train on")
+    p_run.add_argument("--approval-dir", type=str, default=None,
+                       help="that owner's staging folder, which holds its dataset approval record")
+    p_run.add_argument("--continue-previous", action="store_true",
+                       help="new session that continues this kernel's last checkpoints (after the 12 h limit)")
     p_run.add_argument("--accelerator", choices=["NvidiaTeslaT4", "NvidiaTeslaP100"], default=None,
                        help="Optional Kaggle GPU machine shape (e.g., NvidiaTeslaT4 or NvidiaTeslaP100)")
 
@@ -1816,6 +2101,22 @@ def build_parser() -> argparse.ArgumentParser:
     p_im.add_argument("--dest", type=str, default="data/results3d")
 
     # update-dataset (one-click)
+    p_exp = subparsers.add_parser("export", parents=[common_parser], help="Refresh the local de-identified export only")
+    p_exp.add_argument("--export-dir", type=str, default=os.getenv("BME_EXPORT_DIR", "../bme_colab_export"))
+    p_exp.add_argument("--mapping-file", type=str, default=os.getenv("BME_MAPPING_FILE", "../bme_recovery/export_mapping.json"))
+    p_exp.add_argument("--force", action="store_true", help="Re-export even if the source looks unchanged")
+
+    p_ds = subparsers.add_parser("data-status", parents=[common_parser], help="Is this account's dataset current? (JSON)")
+    p_ds.add_argument("--export-dir", type=str, default=os.getenv("BME_EXPORT_DIR", "../bme_colab_export"))
+    p_ds.add_argument("--dataset-slug", type=str, default=os.getenv("KAGGLE_DATASET_SLUG", "bme-3d-dataset"))
+    p_ds.add_argument("--remote", action="store_true", help="Also check the dataset exists on Kaggle")
+
+    subparsers.add_parser("whoami", parents=[common_parser], help="Print the Kaggle user name")
+
+    p_lg = subparsers.add_parser("logs", parents=[common_parser], help="Kernel status, and its log once ended")
+    p_lg.add_argument("--kernel-slug", type=str, default=os.getenv("KAGGLE_KERNEL_SLUG", "bme-3d-unet-training"))
+    p_lg.add_argument("--lines", type=int, default=40)
+
     p_upd = subparsers.add_parser("update-dataset", parents=[common_parser], help="One-click dataset update: export, verify, approve, and upload to Kaggle")
     p_upd.add_argument("--export-dir", type=str, default=os.getenv("BME_EXPORT_DIR", "../bme_colab_export"))
     p_upd.add_argument("--mapping-file", type=str, default=os.getenv("BME_MAPPING_FILE", "../bme_recovery/export_mapping.json"))
@@ -1865,6 +2166,12 @@ def main():
                 kernel_slug=args.kernel_slug,
                 model_arch=getattr(args, "model_arch", "cnet_attention_unet"),
                 accelerator=getattr(args, "accelerator", None),
+                overrides=parse_overrides(args.set),
+                wait=not args.no_wait,
+                import_name=args.import_name,
+                continue_previous=args.continue_previous,
+                dataset_owner=args.dataset_owner,
+                approval_dir=Path(args.approval_dir) if args.approval_dir else None,
             )
         elif args.subcommand == "onetap":
             run_onetap(
@@ -1895,6 +2202,16 @@ def main():
                 dest_dir=Path(args.dest),
                 src_dir=src_dir,
             )
+        elif args.subcommand == "export":
+            export_dir = validate_path_outside_repo_and_data(Path(args.export_dir), src_dir)
+            mapping_file = validate_path_outside_repo_and_data(Path(args.mapping_file), src_dir)
+            run_export_with_fingerprint(src_dir, export_dir, mapping_file, force=args.force)
+        elif args.subcommand == "data-status":
+            run_data_status(src_dir, Path(args.export_dir), args.dataset_slug, remote=args.remote)
+        elif args.subcommand == "whoami":
+            run_whoami(src_dir)
+        elif args.subcommand == "logs":
+            run_logs(args.kernel_slug, src_dir=src_dir, lines=args.lines)
         elif args.subcommand == "update-dataset":
             run_update_dataset(
                 src_dir=src_dir,

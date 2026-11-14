@@ -11,7 +11,7 @@ import { fileURLToPath } from "node:url";
  * Deletes matching patient rows in Postgres; studies, series, and annotations
  * cascade with them. Users, roles, and every 2D folder stay.
  *
- * data/newbme is the folder about to be imported, so it is not touched.
+ * inbox/bme and data/newbme are folders about to be imported, so they are not touched.
  */
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");

@@ -10,9 +10,12 @@
 #
 # Why this setup (the 8 Oct laptop run scored bone 0.54, edema 0.18, ~2000 false
 # blobs per scan, while 2D on the same scans reached bone 0.91):
-#   --spacing 1.0       scans are ~0.35 mm in-plane, 3.6-5.8 mm between slices.
-#                       At 1 mm a 160x160 patch covers the whole knee section;
-#                       slices are never interpolated.
+#   --spacing 1.0,1.0,3.0   scans are ~0.35 mm in-plane, 3.6-5.8 mm between
+#                       slices. At 1 mm a 160x160 patch covers the whole knee
+#                       section. Slices are resampled to 3 mm, the trainer's
+#                       standard grid since 9 Nov.
+#   --model-arch unet3d the trainer's default architecture is now mednext, so
+#                       the U-Net has to be named.
 #   --aniso             first pooling in-plane only, so 16 slices are not
 #                       halved before the network has seen them.
 #   --aug-spatial       nnU-Net defaults, slice-wise: rotation +-30 deg and zoom
@@ -45,8 +48,8 @@ PY="$HOME/bme/env/bin/python3"
 cd "$HOME/bme"
 nvidia-smi -L
 export BME_GPU_FRACTION=0.95
-"$PY" ml/scripts/train_3d.py . --model unet --device cuda --out results3d-h200-v2 \
+"$PY" ml/scripts/train_3d.py . --model unet --model-arch unet3d --device cuda --out results3d-h200-v2 \
   --folds 5 --epochs 400 --hours 3.3 --max-runtime-minutes 225 --checkpoint-every-epoch \
-  --spacing 1.0 --aniso --width 32 --patch 160,160,16 --patches-per-case 24 --batch 4 \
+  --spacing 1.0,1.0,3.0 --aniso --width 32 --patch 160,160,16 --patches-per-case 24 --batch 4 \
   --resample --augment --aug-spatial --sampling-mix lesion=0.33,bone=0.33,random=0.34 \
   --allow-case-level-folds --amp --cosine "$@"
