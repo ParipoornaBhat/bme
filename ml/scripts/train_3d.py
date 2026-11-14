@@ -1073,40 +1073,31 @@ class AttentionUNet3D(nn.Module):
 
 
 class _OrthoMedNeXtBlock3D(nn.Module):
-    """5x5x3 Anisotropic Depthwise-Separable MedNeXt residual block with batch-invariant norm."""
+    """Dense Tensor-Core 3x3x3 + dilated 3x3x1 (5x5x3 effective marrow FOV) residual block with GroupNorm."""
 
-    def __init__(self, channels: int, exp_ratio: int = 2, kernel_size: tuple[int, int, int] = (5, 5, 3), norm_type: str = "group"):
+    def __init__(self, channels: int, norm_type: str = "group"):
         super().__init__()
-        pad = tuple(k // 2 for k in kernel_size)
-        self.dw = nn.Conv3d(channels, channels, kernel_size=kernel_size, padding=pad, groups=channels, bias=False)
-        self.norm = _make_norm3d(channels, norm_type)
-        hidden = channels * exp_ratio
-        self.pw1 = nn.Conv3d(channels, hidden, kernel_size=1)
+        self.c1 = nn.Conv3d(channels, channels, kernel_size=(3, 3, 3), padding=1, bias=False)
+        self.n1 = _make_norm3d(channels, norm_type)
         self.act = nn.GELU()
-        self.pw2 = nn.Conv3d(hidden, channels, kernel_size=1)
+        self.c2 = nn.Conv3d(channels, channels, kernel_size=(3, 3, 1), padding=(2, 2, 0), dilation=(2, 2, 1), bias=False)
+        self.n2 = _make_norm3d(channels, norm_type)
         self.gamma = nn.Parameter(torch.full((1, channels, 1, 1, 1), 0.5))
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        y = self.pw2(self.act(self.pw1(self.norm(self.dw(x)))))
-        return x + self.gamma * y
+        return x + self.gamma * self.n2(self.c2(self.act(self.n1(self.c1(x)))))
 
 
 class _ASPP3D(nn.Module):
-    """Lightweight depthwise-separable 3D ASPP for multi-scale focal & diffuse BME context."""
+    """Dense Tensor-Core 3D ASPP for multi-scale focal & diffuse BME context."""
 
     def __init__(self, channels: int, norm_type: str = "group"):
         super().__init__()
         mid = max(8, channels // 4)
         self.b0 = nn.Sequential(nn.Conv3d(channels, mid, 1, bias=False), _make_norm3d(mid, norm_type), nn.GELU())
-        self.b1 = nn.Sequential(
-            nn.Conv3d(channels, channels, 3, padding=1, groups=channels, bias=False),
-            nn.Conv3d(channels, mid, 1, bias=False),
-            _make_norm3d(mid, norm_type),
-            nn.GELU(),
-        )
+        self.b1 = nn.Sequential(nn.Conv3d(channels, mid, 3, padding=1, bias=False), _make_norm3d(mid, norm_type), nn.GELU())
         self.b2 = nn.Sequential(
-            nn.Conv3d(channels, channels, 3, padding=(2, 2, 1), dilation=(2, 2, 1), groups=channels, bias=False),
-            nn.Conv3d(channels, mid, 1, bias=False),
+            nn.Conv3d(channels, mid, 3, padding=(2, 2, 1), dilation=(2, 2, 1), bias=False),
             _make_norm3d(mid, norm_type),
             nn.GELU(),
         )
@@ -1141,8 +1132,7 @@ class _BoneGuidedAttention3D(nn.Module):
             nn.Sigmoid(),
         )
         self.refine = nn.Sequential(
-            nn.Conv3d(channels, channels, 3, padding=1, groups=channels, bias=False),
-            nn.Conv3d(channels, channels, 1, bias=False),
+            nn.Conv3d(channels, channels, (3, 3, 1), padding=(1, 1, 0), bias=False),
             _make_norm3d(channels, norm_type),
             nn.GELU(),
         )
@@ -1158,8 +1148,8 @@ class _BoneGuidedAttention3D(nn.Module):
 
 class OrthoGateMedNeXt3D(nn.Module):
     """OrthoGate-MedNeXt3D:
-    5x5x3 anisotropic MedNeXt blocks + GroupNorm + ASPP3D bottleneck +
-    Bone-Guided Spatial Attention + Deep Supervision + Bottleneck C-Net Gatekeeper (< 2.5 MB/fold).
+    Fast Tensor-Core 5x5x3 effective FOV blocks + GroupNorm + ASPP3D bottleneck +
+    Bone-Guided Spatial Attention + Deep Supervision + Bottleneck C-Net Gatekeeper (< 2.0 MB/fold).
     """
 
     def __init__(
@@ -1168,7 +1158,6 @@ class OrthoGateMedNeXt3D(nn.Module):
         double_conv: bool = True,
         aniso: bool = True,
         norm_type: str = "group",
-        exp_ratio: int = 2,
         **kwargs,
     ):
         super().__init__()
@@ -1182,41 +1171,38 @@ class OrthoGateMedNeXt3D(nn.Module):
         c1 = base_channels
         c2 = base_channels * 2
         c3 = base_channels * 4
-        n_blocks = 2 if double_conv else 1
         k1 = (2, 2, 1) if aniso else (2, 2, 2)
 
-        def stage(ch: int) -> nn.Sequential:
-            return nn.Sequential(
-                *[_OrthoMedNeXtBlock3D(ch, exp_ratio=exp_ratio, kernel_size=(5, 5, 3), norm_type=resolved_norm) for _ in range(n_blocks)]
-            )
+        def stage(ch: int, blocks: int = 1) -> nn.Sequential:
+            return nn.Sequential(*[_OrthoMedNeXtBlock3D(ch, norm_type=resolved_norm) for _ in range(blocks)])
 
         self.stem = nn.Sequential(
             nn.Conv3d(1, c1, kernel_size=3, padding=1, bias=False),
             _make_norm3d(c1, resolved_norm),
             nn.GELU(),
         )
-        self.enc1 = stage(c1)
+        self.enc1 = stage(c1, blocks=1)
         self.down1 = nn.Sequential(
             nn.Conv3d(c1, c2, kernel_size=k1, stride=k1, bias=False),
             _make_norm3d(c2, resolved_norm),
         )
-        self.enc2 = stage(c2)
+        self.enc2 = stage(c2, blocks=1)
         self.down2 = nn.Sequential(
             nn.Conv3d(c2, c3, kernel_size=2, stride=2, bias=False),
             _make_norm3d(c3, resolved_norm),
         )
-        self.enc3 = stage(c3)
+        self.enc3 = stage(c3, blocks=2 if double_conv else 1)
         self.aspp = _ASPP3D(c3, norm_type=resolved_norm)
         self.cnet = CNetHead3D(c3)
 
         self.up2 = nn.ConvTranspose3d(c3, c2, kernel_size=2, stride=2)
         self.fuse2 = nn.Sequential(nn.Conv3d(c2 * 2, c2, 1, bias=False), _make_norm3d(c2, resolved_norm), nn.GELU())
-        self.dec2 = stage(c2)
+        self.dec2 = stage(c2, blocks=1)
         self.ds2 = nn.Conv3d(c2, 2, kernel_size=1)
 
         self.up1 = nn.ConvTranspose3d(c2, c1, kernel_size=k1, stride=k1)
         self.fuse1 = nn.Sequential(nn.Conv3d(c1 * 2, c1, 1, bias=False), _make_norm3d(c1, resolved_norm), nn.GELU())
-        self.dec1 = stage(c1)
+        self.dec1 = stage(c1, blocks=1)
 
         self.out_bone = nn.Conv3d(c1, 1, kernel_size=1)
         self.bone_attn = _BoneGuidedAttention3D(c1, norm_type=resolved_norm)
