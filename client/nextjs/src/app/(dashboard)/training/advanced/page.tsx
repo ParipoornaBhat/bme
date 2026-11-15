@@ -196,7 +196,9 @@ export default function AdvancedTrainingPage() {
     // 1. Account list from .env: instant, shown first.
     const quickP = getJson("/api/training-advanced/accounts?quick=1")
       .then((j) => {
-        if (j?.cards) setCards((prev) => (prev.length > 0 ? prev : j.cards));
+        if (j?.cards && j.cards.length > 0) {
+          setCards((prev) => (prev.length > 0 ? prev : j.cards));
+        }
       })
       .catch(() => {})
       .finally(() => setLoading(false));
@@ -204,7 +206,7 @@ export default function AdvancedTrainingPage() {
     // 2. Full account checks (slow): replace the list when they finish.
     const accP = getJson("/api/training-advanced/accounts")
       .then((j) => {
-        if (j?.cards) {
+        if (j?.cards && j.cards.length > 0) {
           setCards(j.cards);
           if (!selectedTargetId && j.cards.length > 0) setSelectedTargetId(j.cards[0].id);
         }
@@ -213,12 +215,14 @@ export default function AdvancedTrainingPage() {
 
     // 3. Runs, datasets and tasks each fill in on their own.
     const runsP = getJson("/api/training-advanced/runs")
-      .then((j) => { if (j) setRuns(j.runs || []); })
+      .then((j) => { if (j?.runs) setRuns(j.runs); })
       .catch(() => {});
     const dataP = getJson("/api/training-advanced/dataset")
       .then((dataJson) => {
         if (!dataJson) return;
-        setDatasetTargets(dataJson.targets || []);
+        if (dataJson.targets && dataJson.targets.length > 0) {
+          setDatasetTargets(dataJson.targets);
+        }
         const kds = dataJson.kaggleDatasets || [];
         setKaggleDatasets(kds);
         if (!selectedSyncTarget && dataJson.targets?.length > 0) {
@@ -231,7 +235,7 @@ export default function AdvancedTrainingPage() {
       })
       .catch(() => {});
     const tasksP = getJson("/api/training-advanced/tasks")
-      .then((j) => { if (j) setTasks(j.tasks || []); })
+      .then((j) => { if (j?.tasks) setTasks(j.tasks); })
       .catch(() => {});
 
     await Promise.allSettled([quickP, accP, runsP, dataP, tasksP]);
@@ -618,6 +622,39 @@ export default function AdvancedTrainingPage() {
 
   return (
     <div className="space-y-8 pb-12">
+      {/* Top Navigation Tab Bar & Route Status */}
+      <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 rounded-2xl border border-border bg-card/60 p-2.5 backdrop-blur-xs shadow-xs">
+        <div className="flex items-center gap-1.5">
+          <Link
+            href="/training/advanced"
+            className="inline-flex items-center gap-2 rounded-xl bg-primary px-4 py-2 text-xs font-bold text-primary-foreground shadow-xs transition-all"
+          >
+            <Radio className="h-3.5 w-3.5" />
+            Compute &amp; Training
+          </Link>
+          <Link
+            href="/training/advanced/data"
+            className="inline-flex items-center gap-2 rounded-xl px-4 py-2 text-xs font-semibold text-muted-foreground hover:bg-accent hover:text-foreground transition-all"
+          >
+            <Database className="h-3.5 w-3.5 text-primary" />
+            Dataset &amp; Sync Hub
+            {tasks.some((t) => t.status === "running") && (
+              <span className="flex h-2 w-2 relative">
+                <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
+                <span className="relative inline-flex rounded-full h-2 w-2 bg-emerald-500"></span>
+              </span>
+            )}
+          </Link>
+        </div>
+
+        <div className="flex items-center gap-2 px-2">
+          <span className="inline-flex items-center gap-1.5 rounded-full border border-amber-500/30 bg-amber-500/10 px-3 py-1 text-[11px] font-semibold text-amber-700 dark:text-amber-300">
+            <span className="h-1.5 w-1.5 rounded-full bg-amber-500" />
+            Remote Route: <code className="font-mono text-[10px]">pc-server-1</code>
+          </span>
+        </div>
+      </div>
+
       {/* Header */}
       <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
         <div>
@@ -646,7 +683,7 @@ export default function AdvancedTrainingPage() {
             className="inline-flex items-center gap-2 rounded-xl border border-border bg-card px-3.5 py-2 text-xs font-semibold text-muted-foreground transition-all hover:bg-accent hover:text-foreground cursor-pointer"
           >
             <Database className="h-3.5 w-3.5 text-primary" />
-            Data sync
+            Dataset Sync Center
           </Link>
           <button
             onClick={() => loadData(false)}

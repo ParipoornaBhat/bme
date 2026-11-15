@@ -23,9 +23,15 @@ import {
   ChevronUp,
   Loader2,
   HardDrive,
-  ArrowLeft,
   Upload,
   Info,
+  Radio,
+  RotateCcw,
+  Trash2,
+  Copy,
+  Check,
+  Layers,
+  FileCode,
 } from "lucide-react";
 import { toast } from "sonner";
 
@@ -53,6 +59,24 @@ const fmtDate = (isoStr: string | null | undefined): string => {
   }
 };
 
+function parseProgressPercent(message?: string): number | null {
+  if (!message) return null;
+  const m = message.match(/([\d.]+)\s*(MB|GB|KB)\s+of\s+~?([\d.]+)\s*(MB|GB|KB)/i);
+  if (!m) return null;
+  const toMb = (val: number, unit: string) => {
+    const u = unit.toUpperCase();
+    if (u === "GB") return val * 1024;
+    if (u === "KB") return val / 1024;
+    return val;
+  };
+  const currentMb = toMb(parseFloat(m[1]), m[2]);
+  const totalMb = toMb(parseFloat(m[3]), m[4]);
+  if (totalMb > 0) {
+    return Math.min(100, Math.max(0, Math.round((currentMb / totalMb) * 100)));
+  }
+  return null;
+}
+
 export default function DataSyncPage() {
   const inReview = isReviewMode();
 
@@ -77,6 +101,7 @@ export default function DataSyncPage() {
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [syncBusyTarget, setSyncBusyTarget] = useState<string | null>(null);
+  const [copiedHash, setCopiedHash] = useState(false);
 
   // Expanded log view for background tasks
   const [expandedTaskLogs, setExpandedTaskLogs] = useState<Record<string, boolean>>({});
@@ -112,17 +137,17 @@ export default function DataSyncPage() {
     const getJson = (url: string) =>
       fetch(url, { cache: "no-store" }).then((r) => (r.ok ? r.json() : null));
 
-    // 1. Accounts for connectivity and status
+    // 1. Accounts for connectivity and status (quick first)
     const accQuickP = getJson("/api/training-advanced/accounts?quick=1")
       .then((j) => {
-        if (j?.cards) setCards((prev) => (prev.length > 0 ? prev : j.cards));
+        if (j?.cards && j.cards.length > 0) setCards((prev) => (prev.length > 0 ? prev : j.cards));
       })
       .catch(() => {})
       .finally(() => setLoading(false));
 
     const accFullP = getJson("/api/training-advanced/accounts")
       .then((j) => {
-        if (j?.cards) setCards(j.cards);
+        if (j?.cards && j.cards.length > 0) setCards(j.cards);
       })
       .catch(() => {})
       .finally(() => setLoading(false));
@@ -132,7 +157,7 @@ export default function DataSyncPage() {
       .then((j) => {
         if (!j) return;
         setLocalExport(j.localExport || null);
-        setDatasetTargets(j.targets || []);
+        if (j.targets && j.targets.length > 0) setDatasetTargets(j.targets);
         setKaggleDatasets(j.kaggleDatasets || []);
         setDefaultDatasetOwner(j.defaultDatasetOwner || "");
       })
@@ -161,7 +186,7 @@ export default function DataSyncPage() {
     return tasks.filter((t) => t.type === "sync" || t.id.startsWith("sync-"));
   }, [tasks]);
 
-  // Polling: every 3.5s if any sync task is running, otherwise 15s
+  // Polling: every 3.5s if any sync task is running, otherwise 12s
   const isAnySyncRunning = useMemo(() => {
     return syncTasks.some((t) => t.status === "running");
   }, [syncTasks]);
@@ -170,12 +195,20 @@ export default function DataSyncPage() {
     if (inReview) return;
     const interval = setInterval(() => {
       loadData(true);
-    }, isAnySyncRunning ? 3500 : 15000);
+    }, isAnySyncRunning ? 3500 : 12000);
     return () => clearInterval(interval);
   }, [inReview, isAnySyncRunning, loadData]);
 
   const toggleTaskLog = (taskId: string) => {
     setExpandedTaskLogs((prev) => ({ ...prev, [taskId]: !prev[taskId] }));
+  };
+
+  const copyHashToClipboard = (hash?: string) => {
+    if (!hash) return;
+    navigator.clipboard.writeText(hash);
+    setCopiedHash(true);
+    toast.success("Export version hash copied to clipboard");
+    setTimeout(() => setCopiedHash(false), 2000);
   };
 
   // Find last sync task for a specific target
@@ -187,8 +220,8 @@ export default function DataSyncPage() {
     [syncTasks]
   );
 
-  // Execute sync call
-  const executeSync = async (targetId: string, confirmed = false) => {
+  // Execute sync call (supports isFresh)
+  const executeSync = async (targetId: string, confirmed = false, isFresh = false) => {
     const target = datasetTargets.find((t) => t.targetId === targetId);
     if (!target) return;
 
@@ -204,7 +237,7 @@ export default function DataSyncPage() {
       const res = await fetch("/api/training-advanced/dataset", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ targetId, confirmed }),
+        body: JSON.stringify({ targetId, confirmed, isFresh }),
       });
       const json = await res.json();
       if (res.ok) {
@@ -214,10 +247,17 @@ export default function DataSyncPage() {
             open: true,
             title:
               target.platform === "h200"
-                ? "Confirm Internet Data Sync to H200"
-                : "Confirm Kaggle Dataset Upload",
+                ? (isFresh ? "Confirm Fresh Re-upload to H200" : "Confirm Internet Data Sync to H200")
+                : (isFresh ? "Confirm Fresh Re-upload to Kaggle" : "Confirm Kaggle Dataset Upload"),
             description: `Target: ${target.label}`,
             warnings: [
+              ...(isFresh
+                ? [
+                    target.platform === "h200"
+                      ? "This will delete remote annotations, scans, splits, and worklist on H200 and re-upload everything fresh."
+                      : "This will force a full re-export, re-verify de-identification, and publish a new Kaggle version."
+                  ]
+                : []),
               target.platform === "h200"
                 ? "H200 is connected through the Internet via jump host (pc-server-1)."
                 : "Uploading dataset to Kaggle over your internet connection.",
@@ -226,10 +266,10 @@ export default function DataSyncPage() {
                 ? "On direct college Wi-Fi / LAN, no internet data is used and no confirmation is needed."
                 : "On metered connections, wait for high-speed Wi-Fi.",
             ],
-            actionLabel: "Confirm & Proceed",
+            actionLabel: isFresh ? "Confirm & Fresh Re-upload" : "Confirm & Proceed",
             onConfirm: async () => {
               setConfirmModal((prev) => ({ ...prev, open: false }));
-              await executeSync(targetId, true);
+              await executeSync(targetId, true, isFresh);
             },
           });
           return;
@@ -248,7 +288,7 @@ export default function DataSyncPage() {
     }
   };
 
-  // Sync handler for H200 account row
+  // Sync handler for H200 account row (Incremental)
   const handleH200Sync = (target: TargetDatasetStatus) => {
     if (target.runningJobBlocking) {
       toast.error(
@@ -257,14 +297,12 @@ export default function DataSyncPage() {
       return;
     }
 
-    // Direct college network: no prompt needed
     if (!target.isRemoteRoute) {
       toast.info("Syncing directly over local college network (no internet data used)...");
-      executeSync(target.targetId, true);
+      executeSync(target.targetId, true, false);
       return;
     }
 
-    // Remote jump-host route: prompt with size and route
     const sizeStr = target.bytesToSync ? fmtBytes(target.bytesToSync) : "estimated data";
     setConfirmModal({
       open: true,
@@ -272,18 +310,48 @@ export default function DataSyncPage() {
       description: `Target: ${target.label}`,
       warnings: [
         "H200 is connected through the Internet via jump host (pc-server-1).",
-        `Data sync size: ~${sizeStr}. This will consume your mobile / internet data!`,
-        "On direct college Wi-Fi / LAN, no internet data is used and no confirmation is needed.",
+        `Incremental sync size: ~${sizeStr}. This will consume mobile / internet data.`,
+        "Only changed and new files will be pushed.",
       ],
       actionLabel: "Confirm & Sync Over Internet",
       onConfirm: async () => {
         setConfirmModal((prev) => ({ ...prev, open: false }));
-        await executeSync(target.targetId, true);
+        await executeSync(target.targetId, true, false);
       },
     });
   };
 
-  // Sync All Free H200 handler
+  // Fresh Re-upload handler for H200
+  const handleH200FreshUpload = (target: TargetDatasetStatus) => {
+    if (target.runningJobBlocking) {
+      toast.error(
+        `Fresh Upload Refused: ${target.runningJobBlocking.method} is currently running on ${target.label}. Updating data while a run is in progress would corrupt it.`
+      );
+      return;
+    }
+
+    const sizeStr = localExport?.bytes ? fmtBytes(localExport.bytes) : "full dataset";
+    setConfirmModal({
+      open: true,
+      title: `Confirm Fresh Re-upload to H200 (${target.label})`,
+      description: `Target: ${target.label}`,
+      warnings: [
+        "This will DELETE previously uploaded annotations, scans, splits, and worklist on this H200 account.",
+        `Full dataset size: ~${sizeStr}. All files will be transferred fresh from this PC.`,
+        target.isRemoteRoute
+          ? "H200 is connected through Internet (jump host: pc-server-1). This will consume mobile/metered data!"
+          : "Direct college network route will be used.",
+        "Use this option if remote data is corrupted, out-of-sync, or missing files.",
+      ],
+      actionLabel: "Delete Old Data & Fresh Re-upload",
+      onConfirm: async () => {
+        setConfirmModal((prev) => ({ ...prev, open: false }));
+        await executeSync(target.targetId, true, true);
+      },
+    });
+  };
+
+  // Batch Sync All Free H200
   const handleSyncAllFreeH200 = () => {
     const freeTargets = datasetTargets.filter(
       (t) => t.platform === "h200" && !t.runningJobBlocking
@@ -303,7 +371,7 @@ export default function DataSyncPage() {
             await fetch("/api/training-advanced/dataset", {
               method: "POST",
               headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({ targetId: t.targetId, confirmed }),
+              body: JSON.stringify({ targetId: t.targetId, confirmed, isFresh: false }),
             });
             started++;
           } catch {}
@@ -334,7 +402,7 @@ export default function DataSyncPage() {
       warnings: [
         "H200 connection is via Internet (jump host: pc-server-1).",
         `Estimated data transfer: ~${sizeStr} across ${freeTargets.length} account(s).`,
-        "This will consume your mobile / internet data.",
+        "This will consume mobile / internet data.",
       ],
       actionLabel: "Confirm & Sync All Free Accounts",
       onConfirm: async () => {
@@ -344,7 +412,7 @@ export default function DataSyncPage() {
     });
   };
 
-  // Upload handler for Kaggle
+  // Upload handler for Kaggle (Incremental)
   const handleKaggleUpload = (targetId?: string) => {
     const target =
       datasetTargets.find((t) => t.platform === "kaggle" && (!targetId || t.targetId === targetId)) ||
@@ -380,25 +448,82 @@ export default function DataSyncPage() {
       actionLabel: target.hasUploaded ? "Confirm & Update Kaggle Dataset" : "Confirm & Upload to Kaggle",
       onConfirm: async () => {
         setConfirmModal((prev) => ({ ...prev, open: false }));
-        await executeSync(target.targetId, true);
+        await executeSync(target.targetId, true, false);
       },
     });
   };
 
-  // Filtered history tasks
+  // Fresh Re-upload handler for Kaggle
+  const handleKaggleFreshUpload = (targetId?: string) => {
+    const target =
+      datasetTargets.find((t) => t.platform === "kaggle" && (!targetId || t.targetId === targetId)) ||
+      datasetTargets.find((t) => t.platform === "kaggle");
+
+    if (!target) {
+      toast.error("No Kaggle dataset target found");
+      return;
+    }
+
+    if (target.runningJobBlocking) {
+      toast.error(
+        `Upload Refused: ${target.runningJobBlocking.method} is currently running on ${target.label}. Updating data while a run is in progress would corrupt it.`
+      );
+      return;
+    }
+
+    const sizeStr = localExport?.bytes ? fmtBytes(localExport.bytes) : "full dataset";
+
+    setConfirmModal({
+      open: true,
+      title: "Confirm Fresh Re-export & Re-upload to Kaggle",
+      description: `Target: ${target.label}`,
+      warnings: [
+        "This will clear the previous export cache and force a complete re-export from annotations.",
+        "It will re-run full de-identification audits, regenerate hashes, and publish a new version to Kaggle.",
+        `Estimated upload transfer size: ~${sizeStr} over your internet connection.`,
+        "On metered data, ensure you have sufficient bandwidth.",
+      ],
+      actionLabel: "Confirm Fresh Re-upload to Kaggle",
+      onConfirm: async () => {
+        setConfirmModal((prev) => ({ ...prev, open: false }));
+        await executeSync(target.targetId, true, true);
+      },
+    });
+  };
+
+  // Stop sync helper
   const runningSyncFor = (targetId: string) =>
     syncTasks.find((x) => x.status === "running" && x.target === targetId);
 
   const stopSync = async (targetId: string) => {
-    const res = await fetch("/api/training-advanced/cancel-sync", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ targetId }),
-    });
-    const j = await res.json().catch(() => ({}));
-    if (res.ok && j.success) toast.success(j.message || "Sync stopped");
-    else toast.error(j.message || "Could not stop the sync");
-    loadData(true);
+    try {
+      const res = await fetch("/api/training-advanced/cancel-sync", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ targetId }),
+      });
+      const j = await res.json().catch(() => ({}));
+      if (res.ok && j.success) toast.success(j.message || "Sync stopped");
+      else toast.error(j.message || "Could not stop the sync");
+      loadData(true);
+    } catch (err: any) {
+      toast.error(`Stop failed: ${err.message}`);
+    }
+  };
+
+  // Clear all task history
+  const handleClearHistory = async () => {
+    try {
+      const res = await fetch("/api/training-advanced/tasks", { method: "DELETE" });
+      if (res.ok) {
+        setTasks([]);
+        toast.success("Task execution history cleared.");
+      } else {
+        toast.error("Failed to clear task history.");
+      }
+    } catch (err: any) {
+      toast.error(err.message || "Failed to clear tasks");
+    }
   };
 
   const filteredSyncTasks = useMemo(() => {
@@ -425,7 +550,6 @@ export default function DataSyncPage() {
     }).sort((a, b) => (b.startedAt || "").localeCompare(a.startedAt || ""));
   }, [syncTasks, historyTargetFilter, historyStatusFilter]);
 
-  // Unique target IDs from tasks
   const uniqueHistoryTargets = useMemo(() => {
     const set = new Set<string>();
     syncTasks.forEach((t) => {
@@ -434,12 +558,10 @@ export default function DataSyncPage() {
     return Array.from(set).sort();
   }, [syncTasks]);
 
-  // H200 target rows
   const h200Targets = useMemo(() => {
     return datasetTargets.filter((t) => t.platform === "h200");
   }, [datasetTargets]);
 
-  // Kaggle target & options
   const kaggleTarget = useMemo(() => {
     return datasetTargets.find((t) => t.platform === "kaggle") || null;
   }, [datasetTargets]);
@@ -454,9 +576,9 @@ export default function DataSyncPage() {
         <div className="flex items-center gap-3">
           <Link
             href="/training/advanced"
-            className="inline-flex items-center gap-1.5 text-xs font-semibold text-muted-foreground hover:text-foreground transition-colors"
+            className="inline-flex items-center gap-2 rounded-xl bg-primary px-4 py-2 text-xs font-bold text-primary-foreground hover:bg-primary/90 transition-all"
           >
-            <ArrowLeft className="h-4 w-4" />
+            <Radio className="h-4 w-4" />
             Back to Training (Advanced)
           </Link>
         </div>
@@ -466,14 +588,6 @@ export default function DataSyncPage() {
           <p className="max-w-md mx-auto text-xs text-muted-foreground leading-relaxed">
             Data synchronization with College H200 clusters and Kaggle accounts is available only when running the app locally on your machine with direct access to local datasets and credentials.
           </p>
-          <div className="pt-2">
-            <Link
-              href="/training/advanced"
-              className="inline-flex items-center gap-2 rounded-xl bg-primary px-4 py-2 text-xs font-bold text-primary-foreground hover:bg-primary/90 transition-all"
-            >
-              Return to Training
-            </Link>
-          </div>
         </div>
       </div>
     );
@@ -492,100 +606,135 @@ export default function DataSyncPage() {
 
   return (
     <div className="space-y-8 pb-12">
-      {/* 1. HEADER */}
-      <div className="flex flex-col gap-4">
-        <div>
+      {/* Top Navigation Tab Bar & Route Status */}
+      <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 rounded-2xl border border-border bg-card/60 p-2.5 backdrop-blur-xs shadow-xs">
+        <div className="flex items-center gap-1.5">
           <Link
             href="/training/advanced"
-            className="inline-flex items-center gap-1.5 text-xs font-semibold text-muted-foreground hover:text-foreground transition-colors mb-2"
+            className="inline-flex items-center gap-2 rounded-xl px-4 py-2 text-xs font-semibold text-muted-foreground hover:bg-accent hover:text-foreground transition-all"
           >
-            <ArrowLeft className="h-3.5 w-3.5" />
-            Back to Training (Advanced)
+            <Radio className="h-3.5 w-3.5 text-primary" />
+            Compute &amp; Training
           </Link>
-          <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
-            <div>
-              <div className="flex items-center gap-3">
-                <h1 className="text-2xl font-bold tracking-tight text-foreground">Data sync</h1>
-                <span className="rounded-full bg-primary/10 px-2.5 py-0.5 text-xs font-semibold text-primary">
-                  Local Mode
-                </span>
-                {isAnySyncRunning && (
-                  <span className="inline-flex items-center gap-1.5 rounded-full bg-emerald-500/10 px-2.5 py-0.5 text-xs font-semibold text-emerald-600 dark:text-emerald-400">
-                    <span className="h-1.5 w-1.5 rounded-full bg-emerald-500 animate-pulse" />
-                    Sync in Progress
-                  </span>
-                )}
-              </div>
-              <p className="mt-1 text-sm text-muted-foreground">
-                Dedicated management center for synchronizing training datasets to College H200 cluster and Kaggle.
-              </p>
-            </div>
+          <Link
+            href="/training/advanced/data"
+            className="inline-flex items-center gap-2 rounded-xl bg-primary px-4 py-2 text-xs font-bold text-primary-foreground shadow-xs transition-all"
+          >
+            <Database className="h-3.5 w-3.5" />
+            Dataset &amp; Sync Hub
+            {isAnySyncRunning && (
+              <span className="flex h-2 w-2 relative">
+                <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
+                <span className="relative inline-flex rounded-full h-2 w-2 bg-emerald-500"></span>
+              </span>
+            )}
+          </Link>
+        </div>
 
+        <div className="flex items-center gap-2 px-2">
+          <span className="inline-flex items-center gap-1.5 rounded-full border border-amber-500/30 bg-amber-500/10 px-3 py-1 text-[11px] font-semibold text-amber-700 dark:text-amber-300">
+            <span className="h-1.5 w-1.5 rounded-full bg-amber-500" />
+            Remote Route: <code className="font-mono text-[10px]">pc-server-1</code>
+          </span>
+        </div>
+      </div>
+
+      {/* 1. HEADER & LOCAL EXPORT SUMMARY */}
+      <div className="space-y-4">
+        <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
+          <div>
             <div className="flex items-center gap-3">
-              <button
-                onClick={() => loadData(false)}
-                disabled={refreshing}
-                className="inline-flex items-center gap-2 rounded-xl border border-border bg-card px-3.5 py-2 text-xs font-semibold text-muted-foreground transition-all hover:bg-accent hover:text-foreground cursor-pointer disabled:opacity-50"
-              >
-                <RefreshCw className={`h-3.5 w-3.5 ${refreshing ? "animate-spin" : ""}`} />
-                Refresh Status
-              </button>
+              <h1 className="text-2xl font-bold tracking-tight text-foreground">Dataset &amp; Sync Hub</h1>
+              <span className="rounded-full bg-primary/10 px-2.5 py-0.5 text-xs font-semibold text-primary">
+                Local Primary Copy
+              </span>
+              {isAnySyncRunning && (
+                <span className="inline-flex items-center gap-1.5 rounded-full bg-emerald-500/10 px-2.5 py-0.5 text-xs font-semibold text-emerald-600 dark:text-emerald-400">
+                  <span className="h-1.5 w-1.5 rounded-full bg-emerald-500 animate-pulse" />
+                  Sync in Progress
+                </span>
+              )}
             </div>
+            <p className="mt-1 text-sm text-muted-foreground">
+              Manage dataset transfers, incremental synchronization, and fresh re-uploads across College H200 GPU nodes and Kaggle.
+            </p>
+          </div>
+
+          <div className="flex items-center gap-2.5">
+            <button
+              onClick={() => loadData(false)}
+              disabled={refreshing}
+              className="inline-flex items-center gap-2 rounded-xl border border-border bg-card px-3.5 py-2 text-xs font-semibold text-muted-foreground transition-all hover:bg-accent hover:text-foreground cursor-pointer disabled:opacity-50 shadow-xs"
+            >
+              <RefreshCw className={`h-3.5 w-3.5 ${refreshing ? "animate-spin" : ""}`} />
+              Refresh Status
+            </button>
           </div>
         </div>
 
         {/* Local Export Summary Bar */}
-        <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-4 rounded-2xl border border-border bg-card p-4 shadow-sm">
-          <div>
-            <span className="text-[10px] uppercase font-bold tracking-wider text-muted-foreground block">
-              Local Export Version
-            </span>
-            <span className="font-mono text-sm font-semibold text-foreground mt-0.5 block">
-              {localExport?.hash ? localExport.hash : "Not exported yet"}
-            </span>
+        <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-4">
+          <div className="rounded-2xl border border-border bg-card p-4 shadow-xs space-y-1">
+            <div className="flex items-center justify-between text-muted-foreground">
+              <span className="text-[10px] uppercase font-bold tracking-wider">Local Export Version</span>
+              <FileCode className="h-4 w-4 text-primary/70" />
+            </div>
+            <div className="flex items-center justify-between pt-1">
+              <span className="font-mono text-xs font-semibold text-foreground truncate max-w-[190px]" title={localExport?.hash || ""}>
+                {localExport?.hash ? localExport.hash.slice(0, 16) : "Not exported yet"}
+              </span>
+              {localExport?.hash && (
+                <button
+                  type="button"
+                  onClick={() => copyHashToClipboard(localExport.hash)}
+                  className="rounded p-1 text-muted-foreground hover:bg-accent hover:text-foreground transition-colors"
+                  title="Copy full hash"
+                >
+                  {copiedHash ? <Check className="h-3.5 w-3.5 text-emerald-500" /> : <Copy className="h-3.5 w-3.5" />}
+                </button>
+              )}
+            </div>
           </div>
 
-          <div>
-            <span className="text-[10px] uppercase font-bold tracking-wider text-muted-foreground block">
-              Case Count
-            </span>
-            <span className="text-sm font-semibold text-foreground mt-0.5 block">
+          <div className="rounded-2xl border border-border bg-card p-4 shadow-xs space-y-1">
+            <div className="flex items-center justify-between text-muted-foreground">
+              <span className="text-[10px] uppercase font-bold tracking-wider">Annotated Scans</span>
+              <Layers className="h-4 w-4 text-emerald-500/70" />
+            </div>
+            <div className="text-sm font-semibold text-foreground pt-1">
               {localExport?.cases ? (
-                <>
-                  {localExport.cases} total scans
-                  {localExport.bmeCount != null && (
-                    <span className="text-xs text-muted-foreground font-normal ml-1.5">
-                      ({localExport.bmeCount} BME, {localExport.nonBmeCount || 0} non-BME)
+                <div className="flex items-baseline gap-2">
+                  <span>{localExport.cases} total</span>
+                  {(localExport.bmeCount != null || localExport.bmeCases != null) && (
+                    <span className="rounded-full bg-emerald-500/10 px-2 py-0.5 text-[10px] font-bold text-emerald-600 dark:text-emerald-400">
+                      {localExport.bmeCount ?? localExport.bmeCases} BME + {localExport.nonBmeCount ?? localExport.nonBmeCases ?? 0} Control
                     </span>
                   )}
-                  {localExport.bmeCases != null && localExport.bmeCount == null && (
-                    <span className="text-xs text-muted-foreground font-normal ml-1.5">
-                      ({localExport.bmeCases} BME, {localExport.nonBmeCases || 0} non-BME)
-                    </span>
-                  )}
-                </>
+                </div>
               ) : (
                 "0 scans"
               )}
-            </span>
+            </div>
           </div>
 
-          <div>
-            <span className="text-[10px] uppercase font-bold tracking-wider text-muted-foreground block">
-              Files Exported
-            </span>
-            <span className="text-sm font-semibold text-foreground mt-0.5 block">
-              {localExport?.files ? `${localExport.files} files` : "0 files"}
-            </span>
+          <div className="rounded-2xl border border-border bg-card p-4 shadow-xs space-y-1">
+            <div className="flex items-center justify-between text-muted-foreground">
+              <span className="text-[10px] uppercase font-bold tracking-wider">Files in Export</span>
+              <Database className="h-4 w-4 text-purple-500/70" />
+            </div>
+            <div className="text-sm font-semibold text-foreground pt-1">
+              {localExport?.files ? `${localExport.files} files (masks & volumes)` : "0 files"}
+            </div>
           </div>
 
-          <div>
-            <span className="text-[10px] uppercase font-bold tracking-wider text-muted-foreground block">
-              Export Archive Size
-            </span>
-            <span className="text-sm font-semibold text-foreground mt-0.5 block">
+          <div className="rounded-2xl border border-border bg-card p-4 shadow-xs space-y-1">
+            <div className="flex items-center justify-between text-muted-foreground">
+              <span className="text-[10px] uppercase font-bold tracking-wider">Archive Size</span>
+              <HardDrive className="h-4 w-4 text-sky-500/70" />
+            </div>
+            <div className="text-sm font-semibold text-foreground pt-1 font-mono">
               {fmtBytes(localExport?.bytes)}
-            </span>
+            </div>
           </div>
         </div>
       </div>
@@ -596,27 +745,29 @@ export default function DataSyncPage() {
           <div>
             <div className="flex items-center gap-2">
               <Server className="h-5 w-5 text-purple-500" />
-              <h2 className="text-lg font-bold tracking-tight">H200 Accounts (College Cluster)</h2>
+              <h2 className="text-lg font-bold tracking-tight">H200 Cluster Accounts</h2>
             </div>
             <p className="text-xs text-muted-foreground mt-0.5">
-              Account-level synchronization states across student logins on College H200 cluster.
+              Target storage states across student logins on the College H200 cluster.
             </p>
           </div>
 
           {h200Targets.length > 0 && (
-            <button
-              onClick={handleSyncAllFreeH200}
-              disabled={
-                syncBusyTarget === "batch-h200" ||
-                !h200Targets.some((t) => !t.runningJobBlocking)
-              }
-              className="inline-flex items-center gap-1.5 rounded-xl border border-border bg-muted/40 px-3 py-1.5 text-xs font-semibold text-foreground hover:bg-muted transition-all cursor-pointer disabled:opacity-40"
-            >
-              <RefreshCw
-                className={`h-3 w-3 ${syncBusyTarget === "batch-h200" ? "animate-spin" : ""}`}
-              />
-              Sync All Free H200 ({h200Targets.filter((t) => !t.runningJobBlocking).length} idle)
-            </button>
+            <div className="flex items-center gap-2">
+              <button
+                onClick={handleSyncAllFreeH200}
+                disabled={
+                  syncBusyTarget === "batch-h200" ||
+                  !h200Targets.some((t) => !t.runningJobBlocking)
+                }
+                className="inline-flex items-center gap-1.5 rounded-xl border border-border bg-muted/40 px-3 py-1.5 text-xs font-semibold text-foreground hover:bg-muted transition-all cursor-pointer disabled:opacity-40"
+              >
+                <RefreshCw
+                  className={`h-3 w-3 ${syncBusyTarget === "batch-h200" ? "animate-spin" : ""}`}
+                />
+                Sync All Idle ({h200Targets.filter((t) => !t.runningJobBlocking).length})
+              </button>
+            </div>
           )}
         </div>
 
@@ -625,15 +776,14 @@ export default function DataSyncPage() {
             <thead className="bg-muted/40 text-[10px] uppercase tracking-wider font-bold text-muted-foreground border-b border-border">
               <tr>
                 <th className="px-3.5 py-3">Account Label</th>
-                <th className="px-3 py-3">Connection Route</th>
-                <th className="px-3 py-3">Account Version</th>
+                <th className="px-3 py-3">Route</th>
+                <th className="px-3 py-3">Remote Version</th>
                 <th className="px-3 py-3">Local Version</th>
                 <th className="px-3 py-3">Sync Status</th>
-                <th className="px-3 py-3">Cases &amp; Files</th>
-                <th className="px-3 py-3">Size to Send</th>
-                <th className="px-3 py-3">Last Sync Time</th>
-                <th className="px-3 py-3">State</th>
-                <th className="px-3.5 py-3 text-right">Action</th>
+                <th className="px-3 py-3">Data to Send</th>
+                <th className="px-3 py-3">Last Sync</th>
+                <th className="px-3 py-3">Node State</th>
+                <th className="px-3.5 py-3 text-right">Actions</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-border/40 font-medium">
@@ -644,15 +794,16 @@ export default function DataSyncPage() {
                   const isBlocked = Boolean(t.runningJobBlocking);
                   const lastSync = getLastSyncForTarget(t.targetId);
                   const isBusy = syncBusyTarget === t.targetId;
+                  const activeSync = runningSyncFor(t.targetId);
+                  const percent = parseProgressPercent(activeSync?.message);
 
-                  // Determine state label
                   let stateLabel = "Ready";
                   let stateClass = "bg-emerald-500/10 text-emerald-600 dark:text-emerald-400";
                   if (!isConnected) {
-                    stateLabel = "Not connected";
+                    stateLabel = "Offline";
                     stateClass = "bg-destructive/10 text-destructive";
                   } else if (isBlocked) {
-                    stateLabel = `Blocked: ${t.runningJobBlocking?.method || "job"} is running`;
+                    stateLabel = `Busy: ${t.runningJobBlocking?.method || "training"}`;
                     stateClass = "bg-amber-500/10 text-amber-600 dark:text-amber-400";
                   }
 
@@ -673,7 +824,7 @@ export default function DataSyncPage() {
                               : "bg-emerald-500/10 text-emerald-700 dark:text-emerald-300 border border-emerald-500/20"
                           }`}
                         >
-                          {t.isRemoteRoute ? "Jump host (pc-server-1)" : "College Network (Direct)"}
+                          {t.isRemoteRoute ? "pc-server-1" : "College LAN"}
                         </span>
                       </td>
 
@@ -693,12 +844,8 @@ export default function DataSyncPage() {
                               : "bg-amber-500/10 text-amber-600 dark:text-amber-400"
                           }`}
                         >
-                          {t.isUpToDate ? "Up to date" : "Update available"}
+                          {t.isUpToDate ? "Up to date" : "Needs sync"}
                         </span>
-                      </td>
-
-                      <td className="px-3 py-3 whitespace-nowrap text-muted-foreground">
-                        {t.casesCount != null ? `${t.casesCount} scans (${t.filesCount} files)` : "-"}
                       </td>
 
                       <td className="px-3 py-3 font-mono text-[11px] text-muted-foreground whitespace-nowrap">
@@ -708,7 +855,7 @@ export default function DataSyncPage() {
                       <td className="px-3 py-3 whitespace-nowrap text-muted-foreground text-[11px]">
                         {lastSync
                           ? fmtDate(lastSync.endedAt || lastSync.startedAt)
-                          : "Never synced"}
+                          : "Never"}
                       </td>
 
                       <td className="px-3 py-3 whitespace-nowrap">
@@ -727,25 +874,61 @@ export default function DataSyncPage() {
                       </td>
 
                       <td className="px-3.5 py-3 text-right whitespace-nowrap">
-                        <button
-                          onClick={() => handleH200Sync(t)}
-                          disabled={isBlocked || !isConnected || isBusy || Boolean(runningSyncFor(t.targetId))}
-                          className="inline-flex items-center gap-1.5 rounded-xl bg-primary px-3 py-1.5 text-xs font-bold text-primary-foreground hover:bg-primary/90 transition-all cursor-pointer disabled:opacity-40"
-                        >
-                          {isBusy ? (
-                            <Loader2 className="h-3 w-3 animate-spin" />
-                          ) : (
-                            <HardDrive className="h-3 w-3" />
-                          )}
-                          Sync
-                        </button>
-                        {runningSyncFor(t.targetId) && (
-                          <div className="mt-1.5 space-y-1">
-                            <div className="max-w-[260px] truncate text-[10px] text-muted-foreground" title={runningSyncFor(t.targetId)?.message}>
-                              {runningSyncFor(t.targetId)?.message}
+                        <div className="flex items-center justify-end gap-1.5">
+                          {/* Incremental Sync Button */}
+                          <button
+                            onClick={() => handleH200Sync(t)}
+                            disabled={isBlocked || !isConnected || isBusy || Boolean(activeSync)}
+                            className="inline-flex items-center gap-1 rounded-xl bg-primary px-2.5 py-1.5 text-xs font-bold text-primary-foreground hover:bg-primary/90 transition-all cursor-pointer disabled:opacity-40"
+                            title="Incremental sync: transfers changed and new files only"
+                          >
+                            {isBusy ? (
+                              <Loader2 className="h-3 w-3 animate-spin" />
+                            ) : (
+                              <HardDrive className="h-3 w-3" />
+                            )}
+                            Sync
+                          </button>
+
+                          {/* Fresh Re-upload Button */}
+                          <button
+                            onClick={() => handleH200FreshUpload(t)}
+                            disabled={isBlocked || !isConnected || isBusy || Boolean(activeSync)}
+                            className="inline-flex items-center gap-1 rounded-xl border border-amber-500/40 bg-amber-500/10 px-2.5 py-1.5 text-xs font-semibold text-amber-700 dark:text-amber-300 hover:bg-amber-500/20 transition-all cursor-pointer disabled:opacity-40"
+                            title="Fresh Re-upload: deletes remote annotations and scans, then uploads everything fresh"
+                          >
+                            <RotateCcw className="h-3 w-3" />
+                            Fresh Upload
+                          </button>
+                        </div>
+
+                        {/* Running Progress Bar & Stop Button */}
+                        {activeSync && (
+                          <div className="mt-2 space-y-1.5 max-w-[280px] ml-auto text-left">
+                            {percent !== null && (
+                              <div className="w-full bg-muted rounded-full h-1.5 overflow-hidden">
+                                <div
+                                  className="bg-emerald-500 h-1.5 rounded-full transition-all duration-300"
+                                  style={{ width: `${percent}%` }}
+                                />
+                              </div>
+                            )}
+                            <div className="flex items-center justify-between text-[10px] text-muted-foreground gap-2">
+                              <span className="truncate" title={activeSync.message}>
+                                {activeSync.message}
+                              </span>
+                              {percent !== null && (
+                                <span className="font-mono font-bold text-emerald-600 dark:text-emerald-400 shrink-0">
+                                  {percent}%
+                                </span>
+                              )}
                             </div>
-                            <button type="button" onClick={() => { void stopSync(t.targetId); }} className="w-full rounded border border-destructive/50 px-2 py-0.5 text-[11px] text-destructive hover:bg-destructive/10">
-                              Stop
+                            <button
+                              type="button"
+                              onClick={() => { void stopSync(t.targetId); }}
+                              className="w-full rounded border border-destructive/50 px-2 py-0.5 text-[11px] text-destructive hover:bg-destructive/10 cursor-pointer"
+                            >
+                              Stop Sync
                             </button>
                           </div>
                         )}
@@ -755,7 +938,7 @@ export default function DataSyncPage() {
                 })
               ) : (
                 <tr>
-                  <td colSpan={10} className="py-8 text-center text-xs text-muted-foreground">
+                  <td colSpan={9} className="py-8 text-center text-xs text-muted-foreground">
                     No H200 accounts configured in .env.
                   </td>
                 </tr>
@@ -774,26 +957,43 @@ export default function DataSyncPage() {
               <h2 className="text-lg font-bold tracking-tight">Kaggle Datasets &amp; Permissions</h2>
             </div>
             <p className="text-xs text-muted-foreground mt-0.5">
-              Private Kaggle training dataset ownership, upload versions, and shared access.
+              Private Kaggle training dataset ownership, upload versions, and team sharing.
             </p>
           </div>
 
           {kaggleTarget && (
-            <button
-              onClick={() => handleKaggleUpload()}
-              disabled={
-                Boolean(kaggleTarget.runningJobBlocking) ||
-                syncBusyTarget === kaggleTarget.targetId
-              }
-              className="inline-flex items-center gap-1.5 rounded-xl bg-primary px-3.5 py-2 text-xs font-bold text-primary-foreground hover:bg-primary/90 transition-all cursor-pointer disabled:opacity-40"
-            >
-              {syncBusyTarget === kaggleTarget.targetId ? (
-                <Loader2 className="h-3.5 w-3.5 animate-spin" />
-              ) : (
-                <Upload className="h-3.5 w-3.5" />
-              )}
-              {kaggleTarget.hasUploaded ? "Update Kaggle Dataset" : "Upload to Kaggle"}
-            </button>
+            <div className="flex items-center gap-2">
+              <button
+                onClick={() => handleKaggleUpload()}
+                disabled={
+                  Boolean(kaggleTarget.runningJobBlocking) ||
+                  syncBusyTarget === kaggleTarget.targetId ||
+                  Boolean(runningSyncFor(kaggleTarget.targetId))
+                }
+                className="inline-flex items-center gap-1.5 rounded-xl bg-primary px-3 py-1.5 text-xs font-bold text-primary-foreground hover:bg-primary/90 transition-all cursor-pointer disabled:opacity-40"
+              >
+                {syncBusyTarget === kaggleTarget.targetId ? (
+                  <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                ) : (
+                  <Upload className="h-3.5 w-3.5" />
+                )}
+                {kaggleTarget.hasUploaded ? "Update Dataset" : "Upload to Kaggle"}
+              </button>
+
+              <button
+                onClick={() => handleKaggleFreshUpload()}
+                disabled={
+                  Boolean(kaggleTarget.runningJobBlocking) ||
+                  syncBusyTarget === kaggleTarget.targetId ||
+                  Boolean(runningSyncFor(kaggleTarget.targetId))
+                }
+                className="inline-flex items-center gap-1.5 rounded-xl border border-amber-500/40 bg-amber-500/10 px-3 py-1.5 text-xs font-semibold text-amber-700 dark:text-amber-300 hover:bg-amber-500/20 transition-all cursor-pointer disabled:opacity-40"
+                title="Force complete fresh re-export and upload a new dataset version"
+              >
+                <RotateCcw className="h-3.5 w-3.5" />
+                Fresh Re-upload
+              </button>
+            </div>
           )}
         </div>
 
@@ -803,10 +1003,10 @@ export default function DataSyncPage() {
           <div className="space-y-1">
             <p className="font-semibold">Dataset Ownership &amp; Teammate Sharing Policy:</p>
             <p className="text-[11px] leading-relaxed">
-              <strong>Owner:</strong> The designated account (configured via KAGGLE_DATASET_OWNER in .env, defaults to {defaultDatasetOwner ? `roll ${defaultDatasetOwner}` : "first Kaggle slot"}) uploads and updates the private dataset on Kaggle.
+              <strong>Owner:</strong> The designated account (configured via <code className="font-mono text-[10px]">KAGGLE_DATASET_OWNER</code> in .env, defaults to {defaultDatasetOwner ? `roll ${defaultDatasetOwner}` : "first Kaggle slot"}) uploads and updates the private dataset on Kaggle.
             </p>
             <p className="text-[11px] leading-relaxed">
-              <strong>Readers:</strong> Other teammate Kaggle accounts train on this dataset once the owner adds them as collaborators under Dataset Settings on kaggle.com.
+              <strong>Readers:</strong> Teammates train on this dataset once the owner adds them as collaborators under Dataset Settings on kaggle.com.
             </p>
           </div>
         </div>
@@ -820,9 +1020,9 @@ export default function DataSyncPage() {
                 <th className="px-3 py-3">Uploaded Version</th>
                 <th className="px-3 py-3">Local Version</th>
                 <th className="px-3 py-3">Status</th>
-                <th className="px-3 py-3">Size (Scans &amp; Files)</th>
-                <th className="px-3 py-3">Last Upload Time</th>
-                <th className="px-3.5 py-3 text-right">Action</th>
+                <th className="px-3 py-3">Scans &amp; Files</th>
+                <th className="px-3 py-3">Last Upload</th>
+                <th className="px-3.5 py-3 text-right">Actions</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-border/40 font-medium">
@@ -837,6 +1037,8 @@ export default function DataSyncPage() {
                       kd.uploadedHash === localExport.hash
                   );
                   const isBusy = syncBusyTarget === kaggleTarget?.targetId;
+                  const activeSync = kaggleTarget ? runningSyncFor(kaggleTarget.targetId) : null;
+                  const percent = parseProgressPercent(activeSync?.message);
 
                   return (
                     <tr key={kd.roll + (kd.slot || 1)} className="hover:bg-muted/30 transition-colors">
@@ -892,21 +1094,58 @@ export default function DataSyncPage() {
 
                       <td className="px-3.5 py-3 text-right whitespace-nowrap">
                         {isOwner ? (
-                          <button
-                            onClick={() => handleKaggleUpload()}
-                            disabled={isBusy || Boolean(kaggleTarget?.runningJobBlocking)}
-                            className="inline-flex items-center gap-1.5 rounded-xl bg-primary px-3 py-1.5 text-xs font-bold text-primary-foreground hover:bg-primary/90 transition-all cursor-pointer disabled:opacity-40"
-                          >
-                            {isBusy ? (
-                              <Loader2 className="h-3 w-3 animate-spin" />
-                            ) : (
-                              <Upload className="h-3 w-3" />
+                          <div className="space-y-1.5">
+                            <div className="flex items-center justify-end gap-1.5">
+                              <button
+                                onClick={() => handleKaggleUpload()}
+                                disabled={isBusy || Boolean(kaggleTarget?.runningJobBlocking) || Boolean(activeSync)}
+                                className="inline-flex items-center gap-1 rounded-xl bg-primary px-2.5 py-1.5 text-xs font-bold text-primary-foreground hover:bg-primary/90 transition-all cursor-pointer disabled:opacity-40"
+                              >
+                                {isBusy ? (
+                                  <Loader2 className="h-3 w-3 animate-spin" />
+                                ) : (
+                                  <Upload className="h-3 w-3" />
+                                )}
+                                {isUpToDate ? "Update" : "Upload"}
+                              </button>
+
+                              <button
+                                onClick={() => handleKaggleFreshUpload()}
+                                disabled={isBusy || Boolean(kaggleTarget?.runningJobBlocking) || Boolean(activeSync)}
+                                className="inline-flex items-center gap-1 rounded-xl border border-amber-500/40 bg-amber-500/10 px-2.5 py-1.5 text-xs font-semibold text-amber-700 dark:text-amber-300 hover:bg-amber-500/20 transition-all cursor-pointer disabled:opacity-40"
+                                title="Force complete fresh re-export and upload a new dataset version"
+                              >
+                                <RotateCcw className="h-3 w-3" />
+                                Fresh
+                              </button>
+                            </div>
+
+                            {activeSync && (
+                              <div className="space-y-1.5 max-w-[260px] ml-auto text-left">
+                                {percent !== null && (
+                                  <div className="w-full bg-muted rounded-full h-1.5 overflow-hidden">
+                                    <div
+                                      className="bg-emerald-500 h-1.5 rounded-full transition-all duration-300"
+                                      style={{ width: `${percent}%` }}
+                                    />
+                                  </div>
+                                )}
+                                <div className="text-[10px] text-muted-foreground truncate" title={activeSync.message}>
+                                  {activeSync.message}
+                                </div>
+                                <button
+                                  type="button"
+                                  onClick={() => { if (kaggleTarget) void stopSync(kaggleTarget.targetId); }}
+                                  className="w-full rounded border border-destructive/50 px-2 py-0.5 text-[11px] text-destructive hover:bg-destructive/10 cursor-pointer"
+                                >
+                                  Stop Upload
+                                </button>
+                              </div>
                             )}
-                            {isUpToDate ? "Re-upload" : "Upload"}
-                          </button>
+                          </div>
                         ) : (
                           <span className="text-[11px] text-muted-foreground italic">
-                            Shares owner&apos;s dataset
+                            Uses owner&apos;s dataset
                           </span>
                         )}
                       </td>
@@ -951,17 +1190,30 @@ export default function DataSyncPage() {
                   </td>
 
                   <td className="px-3.5 py-3 text-right whitespace-nowrap">
-                    <button
-                      onClick={() => handleKaggleUpload()}
-                      disabled={
-                        Boolean(kaggleTarget.runningJobBlocking) ||
-                        syncBusyTarget === kaggleTarget.targetId
-                      }
-                      className="inline-flex items-center gap-1.5 rounded-xl bg-primary px-3 py-1.5 text-xs font-bold text-primary-foreground hover:bg-primary/90 transition-all cursor-pointer disabled:opacity-40"
-                    >
-                      <Upload className="h-3 w-3" />
-                      Upload to Kaggle
-                    </button>
+                    <div className="flex items-center justify-end gap-1.5">
+                      <button
+                        onClick={() => handleKaggleUpload()}
+                        disabled={
+                          Boolean(kaggleTarget.runningJobBlocking) ||
+                          syncBusyTarget === kaggleTarget.targetId
+                        }
+                        className="inline-flex items-center gap-1 rounded-xl bg-primary px-2.5 py-1.5 text-xs font-bold text-primary-foreground hover:bg-primary/90 transition-all cursor-pointer disabled:opacity-40"
+                      >
+                        <Upload className="h-3 w-3" />
+                        Upload
+                      </button>
+                      <button
+                        onClick={() => handleKaggleFreshUpload()}
+                        disabled={
+                          Boolean(kaggleTarget.runningJobBlocking) ||
+                          syncBusyTarget === kaggleTarget.targetId
+                        }
+                        className="inline-flex items-center gap-1 rounded-xl border border-amber-500/40 bg-amber-500/10 px-2.5 py-1.5 text-xs font-semibold text-amber-700 dark:text-amber-300 hover:bg-amber-500/20 transition-all cursor-pointer disabled:opacity-40"
+                      >
+                        <RotateCcw className="h-3 w-3" />
+                        Fresh
+                      </button>
+                    </div>
                   </td>
                 </tr>
               ) : (
@@ -974,14 +1226,6 @@ export default function DataSyncPage() {
             </tbody>
           </table>
         </div>
-
-        {/* Reader Teammates List */}
-        {kaggleCards.length > 1 && (
-          <div className="pt-2 text-[11px] text-muted-foreground border-t border-border/40">
-            <span className="font-semibold text-foreground">Configured Teammate Accounts: </span>
-            {kaggleCards.map((c) => c.label).join(", ")}
-          </div>
-        )}
       </div>
 
       {/* 4. HISTORY PANEL */}
@@ -993,11 +1237,21 @@ export default function DataSyncPage() {
               <h2 className="text-lg font-bold tracking-tight">Sync &amp; Upload History</h2>
             </div>
             <p className="text-xs text-muted-foreground mt-0.5">
-              Historical record of dataset synchronizations to H200 and Kaggle uploads with logs.
+              Historical record of dataset synchronizations to H200 and Kaggle with live streaming logs.
             </p>
           </div>
 
           <div className="flex items-center gap-2">
+            {syncTasks.length > 0 && (
+              <button
+                onClick={handleClearHistory}
+                className="inline-flex items-center gap-1.5 rounded-xl border border-destructive/30 bg-destructive/5 px-3 py-1.5 text-xs font-semibold text-destructive hover:bg-destructive/10 transition-all cursor-pointer"
+                title="Clear all finished and failed sync task logs"
+              >
+                <Trash2 className="h-3 w-3" />
+                Clear History
+              </button>
+            )}
             <button
               onClick={() => loadData(false)}
               disabled={refreshing}
@@ -1013,7 +1267,7 @@ export default function DataSyncPage() {
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 py-1">
           <div>
             <label className="text-[10px] font-bold uppercase tracking-wider text-muted-foreground block mb-1">
-              Target
+              Filter by Target
             </label>
             <select
               value={historyTargetFilter}
@@ -1031,7 +1285,7 @@ export default function DataSyncPage() {
 
           <div>
             <label className="text-[10px] font-bold uppercase tracking-wider text-muted-foreground block mb-1">
-              Status
+              Filter by Status
             </label>
             <select
               value={historyStatusFilter}
@@ -1040,7 +1294,7 @@ export default function DataSyncPage() {
             >
               <option value="all">All Statuses</option>
               <option value="running">Running</option>
-              <option value="completed">Done / Completed</option>
+              <option value="completed">Completed</option>
               <option value="failed">Failed</option>
               <option value="refused">Refused / Blocked</option>
             </select>
@@ -1056,6 +1310,8 @@ export default function DataSyncPage() {
                 (task.status as string) === "refused" ||
                 task.message?.toLowerCase().includes("refused") ||
                 task.message?.toLowerCase().includes("cannot sync");
+              const isCancelled = task.status === "cancelled";
+              const percent = parseProgressPercent(task.message);
 
               let statusLabel = task.status === "completed" ? "Done" : task.status;
               let statusClass = "bg-emerald-500/10 text-emerald-600 dark:text-emerald-400";
@@ -1066,6 +1322,9 @@ export default function DataSyncPage() {
               } else if (isRefused) {
                 statusLabel = "Refused";
                 statusClass = "bg-amber-500/10 text-amber-600 dark:text-amber-400";
+              } else if (isCancelled) {
+                statusLabel = "Stopped";
+                statusClass = "bg-muted text-muted-foreground";
               } else if (task.status === "failed") {
                 statusLabel = "Failed";
                 statusClass = "bg-destructive/10 text-destructive";
@@ -1097,7 +1356,23 @@ export default function DataSyncPage() {
                     </div>
                   </div>
 
-                  <p className="text-xs text-foreground leading-relaxed">
+                  {/* Progress Bar for active running sync */}
+                  {task.status === "running" && percent !== null && (
+                    <div className="space-y-1">
+                      <div className="w-full bg-muted rounded-full h-1.5 overflow-hidden">
+                        <div
+                          className="bg-sky-500 h-1.5 rounded-full transition-all duration-300"
+                          style={{ width: `${percent}%` }}
+                        />
+                      </div>
+                      <div className="flex justify-between text-[10px] text-muted-foreground font-mono">
+                        <span>Transferring...</span>
+                        <span>{percent}%</span>
+                      </div>
+                    </div>
+                  )}
+
+                  <p className="text-xs text-foreground leading-relaxed font-mono">
                     {task.message || "Dataset synchronization task"}
                   </p>
 
@@ -1119,7 +1394,7 @@ export default function DataSyncPage() {
                       </button>
 
                       {isExpanded && (
-                        <pre className="mt-2 max-h-48 overflow-y-auto rounded-xl bg-muted/60 p-3 font-mono text-[10px] leading-relaxed text-muted-foreground">
+                        <pre className="mt-2 max-h-48 overflow-y-auto rounded-xl bg-muted/60 p-3 font-mono text-[10px] leading-relaxed text-muted-foreground whitespace-pre-wrap">
                           {task.log.join("\n")}
                         </pre>
                       )}
@@ -1141,7 +1416,7 @@ export default function DataSyncPage() {
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4 backdrop-blur-xs">
           <div className="w-full max-w-md rounded-2xl border border-border bg-card p-6 shadow-2xl space-y-4">
             <div className="flex items-center gap-2.5 text-foreground">
-              <AlertTriangle className="h-5 w-5 text-amber-500" />
+              <AlertTriangle className="h-5 w-5 text-amber-500 shrink-0" />
               <h3 className="text-base font-bold">{confirmModal.title}</h3>
             </div>
             <p className="text-xs text-muted-foreground">{confirmModal.description}</p>

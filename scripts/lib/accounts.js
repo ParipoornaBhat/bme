@@ -257,7 +257,7 @@ export async function h200Route(env = mergedEnv()) {
   const host = env.H200_HOST || H200_HOST_DEFAULT;
   const jump = env.H200_JUMP || JUMP_HOST_DEFAULT;
   if (await tcpReachable(host)) return { host, remote: false, sshOpts: [], label: "college network, direct" };
-  return { host, remote: true, sshOpts: ["-J", jump], jump, label: `outside college, through ${jump}` };
+  return { host, remote: true, sshOpts: ["-C", "-J", jump], jump, label: `outside college, through ${jump}` };
 }
 
 export const UNREACHABLE =

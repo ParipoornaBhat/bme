@@ -149,13 +149,22 @@ function neededFiles() {
 }
 
 async function push() {
+  const isFresh = process.argv.includes("--fresh");
   const { files, cases } = neededFiles();
-  console.log(`${cases} annotated case(s) on this PC.`);
-  const listing = await ssh(
-    `mkdir -p ${REMOTE}/logs ${REMOTE}/data && cd ${REMOTE} && ` +
-      `find ml data/annotations data/nifti data/worklist.csv data/splits -type f -printf '%s %p\\n' 2>/dev/null; ` +
-      `echo ===MD5; md5sum data/annotations/*/*.seg.nrrd data/worklist.csv ${HOLDOUT} 2>/dev/null; true`,
-  );
+  console.log(`${cases} annotated case(s) on this PC.${isFresh ? " (Fresh re-upload requested)" : ""}`);
+
+  if (isFresh) {
+    console.log("Removing previous remote annotations, scans and splits on H200...");
+    await ssh(`rm -rf ${REMOTE}/data/annotations ${REMOTE}/data/nifti ${REMOTE}/data/splits ${REMOTE}/data/worklist.csv && mkdir -p ${REMOTE}/data`);
+  }
+
+  const listing = isFresh
+    ? { code: 0, out: "" }
+    : await ssh(
+        `mkdir -p ${REMOTE}/logs ${REMOTE}/data && cd ${REMOTE} && ` +
+          `find ml data/annotations data/nifti data/worklist.csv data/splits -type f -printf '%s %p\\n' 2>/dev/null; ` +
+          `echo ===MD5; md5sum data/annotations/*/*.seg.nrrd data/worklist.csv ${HOLDOUT} 2>/dev/null; true`,
+      );
   if (listing.code !== 0) fail(session.unreachable, listing.code);
   const [sizesPart, md5Part = ""] = listing.out.split("===MD5");
   const remoteSize = new Map();
@@ -175,9 +184,9 @@ async function push() {
   for (const rel of files) {
     const size = fs.statSync(path.join(root, rel)).size;
     const hashed = rel.endsWith(".seg.nrrd") || rel === "data/worklist.csv" || rel === HOLDOUT;
-    const unchanged = hashed
+    const unchanged = !isFresh && (hashed
       ? remoteMd5.get(rel) === md5(path.join(root, rel))
-      : remoteSize.get(rel) === size;
+      : remoteSize.get(rel) === size);
     if (unchanged) {
       same++;
       continue;

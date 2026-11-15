@@ -123,236 +123,234 @@ async function handleAccounts() {
   const isDirectH200 = !route.remote;
   const isHostReachable = await tcpReachable(route.host, 22, 2000);
 
-  const cards = [];
+  // 1. Parallel H200 cards check
+  const h200Candidates = all.filter((acc) => !acc.slot || acc.slot <= 1);
+  const h200Cards = await Promise.all(
+    h200Candidates.map(async (acc) => {
+      const id = `h200-${acc.roll}`;
+      if (!usable.h200(acc)) {
+        return {
+          id,
+          platform: "h200",
+          label: `H200 - ${acc.usn}${acc.name ? ` (${acc.name})` : ""}`,
+          accountName: acc.h200?.user || `nnm23cs${acc.roll}_stu_cse`,
+          usn: acc.usn,
+          roll: acc.roll,
+          connected: false,
+          connectionDetails: `No H200 password in .env for ${acc.name || acc.usn}`,
+          currentJob: null,
+        };
+      }
 
-  // 1. H200 cards (one per teammate; with password tested, without password marked)
-  for (const acc of all) {
-    if (acc.slot && acc.slot > 1) continue;
-    const id = `h200-${acc.roll}`;
-    if (!usable.h200(acc)) {
-      cards.push({
+      let connected = false;
+      let connDetails = isDirectH200
+        ? "Direct college network route"
+        : `Outside college, via jump host ${route.jump}`;
+      let currentJob = null;
+
+      if (!isHostReachable && !route.remote) {
+        connDetails = "Unreachable on direct college network (connect to college WiFi or jump host)";
+      } else {
+        let session = null;
+        try {
+          session = await chooseH200(root, acc.roll);
+          const testRes = await runSshCommand(session, "echo OK", 5000);
+          if (testRes.code === 0 && testRes.out.includes("OK")) {
+            connected = true;
+            const statusRes = await runSshCommand(
+              session,
+              `squeue -u $USER -h -o '%i|%j|%T|%M|%l'; ` +
+              `echo "===RESULTS==="; ` +
+              `cd $HOME/bme/data 2>/dev/null && for d in results3d-holdout results3d-aug-low results3d-aug-med results3d-aug-max results3d-h200-v2 results-nnunet-3d_fullres results-nnunet-2d; do ` +
+              `[ -f $d/metrics.json ] && echo "$d|finished"; ` +
+              `[ ! -f $d/metrics.json ] && [ -n "$(ls -A $d 2>/dev/null)" ] && echo "$d|stopped"; done; ` +
+              `echo "===LOG==="; ` +
+              `f=$(ls -t $HOME/bme/logs/*.out 2>/dev/null | head -1); [ -n "$f" ] && { echo "FILE:$f"; tail -n 25 "$f"; }`,
+              10000
+            );
+
+            if (statusRes.code === 0) {
+              const [squeuePart, rest1 = ""] = statusRes.out.split("===RESULTS===");
+              const [resultsPart, logPart = ""] = rest1.split("===LOG===");
+
+              const activeJobLine = squeuePart.trim().split(/\r?\n/).filter(Boolean)[0];
+              const logLines = logPart.trim().split(/\r?\n/).filter(Boolean);
+              const tailText = logLines.join("\n");
+
+              let jobStatus = "idle";
+              let resumePending = false;
+              let methodId = "";
+              let methodLabel = "";
+              let slurmJobId = "";
+              let startedAt = null;
+              let elapsedSeconds = null;
+
+              if (activeJobLine) {
+                const [jid, jname, jstate, jelapsed] = activeJobLine.split("|");
+                slurmJobId = jid;
+                jobStatus = jstate === "RUNNING" ? "running" : "running";
+                methodId = jname.replace(/^bme_/, "");
+                methodLabel = `Job ${jid} (${jname})`;
+                const parts = (jelapsed || "").split(":").map(Number);
+                if (parts.length === 3) elapsedSeconds = parts[0] * 3600 + parts[1] * 60 + parts[2];
+                else if (parts.length === 2) elapsedSeconds = parts[0] * 60 + parts[1];
+              } else {
+                for (const rLine of resultsPart.trim().split(/\r?\n/).filter(Boolean)) {
+                  const [rFolder, rState] = rLine.split("|");
+                  if (rState === "stopped") {
+                    jobStatus = "stopped";
+                    resumePending = true;
+                    methodId = rFolder.replace("results3d-", "").replace("results-", "");
+                    methodLabel = rFolder;
+                    break;
+                  }
+                }
+              }
+
+              let metaStartedBy = { usn: acc.usn, name: acc.name || acc.roll };
+              let metaAccount = acc.h200?.user || `nnm23cs${acc.roll}_stu_cse`;
+              let metaHost = "";
+              const statusFile = path.join(root, "data", `results3d-${methodId}`, "run_status.json");
+              if (fs.existsSync(statusFile)) {
+                try {
+                  const meta = JSON.parse(fs.readFileSync(statusFile, "utf8"));
+                  if (meta.startedBy) metaStartedBy = meta.startedBy;
+                  if (meta.account) metaAccount = meta.account;
+                  if (meta.host) metaHost = meta.host;
+                  if (meta.startedAt) startedAt = meta.startedAt;
+                } catch {}
+              }
+
+              const progress = parseLogProgress(tailText, 5, 40, startedAt);
+
+              if (jobStatus !== "idle" || resumePending) {
+                currentJob = {
+                  methodId,
+                  methodLabel: methodLabel || methodId,
+                  iteration: resumePending ? "Resume pending" : "1st run",
+                  startedBy: metaStartedBy,
+                  startedAt,
+                  elapsedSeconds,
+                  status: jobStatus,
+                  resumePending,
+                  resumeAutomatic: false,
+                  slurmJobId,
+                  logTail: logLines.slice(-20),
+                  progress,
+                };
+              }
+            }
+          } else {
+            connDetails = `SSH connection refused or host key mismatch: ${testRes.err.slice(0, 100)}`;
+          }
+        } catch (err) {
+          connDetails = `Connection failed: ${String(err.message || err).slice(0, 120)}`;
+        } finally {
+          if (session) session.close();
+        }
+      }
+
+      return {
         id,
         platform: "h200",
         label: `H200 - ${acc.usn}${acc.name ? ` (${acc.name})` : ""}`,
         accountName: acc.h200?.user || `nnm23cs${acc.roll}_stu_cse`,
         usn: acc.usn,
         roll: acc.roll,
-        connected: false,
-        connectionDetails: `No H200 password in .env for ${acc.name || acc.usn}`,
-        currentJob: null,
-      });
-      continue;
-    }
+        connected,
+        connectionDetails: connDetails,
+        isRemoteRoute: route.remote,
+        jumpHost: route.jump,
+        currentJob,
+      };
+    })
+  );
 
-    let connected = false;
-    let connDetails = isDirectH200
-      ? "Direct college network route"
-      : `Outside college, via jump host ${route.jump}`;
-    let currentJob = null;
-
-    if (!isHostReachable && !route.remote) {
-      connDetails = "Unreachable on direct college network (connect to college WiFi or jump host)";
-    } else {
-      let session = null;
-      try {
-        session = await chooseH200(root, acc.roll);
-        const testRes = await runSshCommand(session, "echo OK", 5000);
-        if (testRes.code === 0 && testRes.out.includes("OK")) {
-          connected = true;
-          // Check running Slurm jobs and server data
-          const statusRes = await runSshCommand(
-            session,
-            `squeue -u $USER -h -o '%i|%j|%T|%M|%l'; ` +
-            `echo "===RESULTS==="; ` +
-            `cd $HOME/bme/data 2>/dev/null && for d in results3d-holdout results3d-aug-low results3d-aug-med results3d-aug-max results3d-h200-v2 results-nnunet-3d_fullres results-nnunet-2d; do ` +
-            `[ -f $d/metrics.json ] && echo "$d|finished"; ` +
-            `[ ! -f $d/metrics.json ] && [ -n "$(ls -A $d 2>/dev/null)" ] && echo "$d|stopped"; done; ` +
-            `echo "===LOG==="; ` +
-            `f=$(ls -t $HOME/bme/logs/*.out 2>/dev/null | head -1); [ -n "$f" ] && { echo "FILE:$f"; tail -n 25 "$f"; }`,
-            12000
-          );
-
-          if (statusRes.code === 0) {
-            const [squeuePart, rest1 = ""] = statusRes.out.split("===RESULTS===");
-            const [resultsPart, logPart = ""] = rest1.split("===LOG===");
-
-            const activeJobLine = squeuePart.trim().split(/\r?\n/).filter(Boolean)[0];
-            const logLines = logPart.trim().split(/\r?\n/).filter(Boolean);
-            const tailText = logLines.join("\n");
-
-            let jobStatus = "idle";
-            let resumePending = false;
-            let methodId = "";
-            let methodLabel = "";
-            let slurmJobId = "";
-            let startedAt = null;
-            let elapsedSeconds = null;
-
-            if (activeJobLine) {
-              const [jid, jname, jstate, jelapsed] = activeJobLine.split("|");
-              slurmJobId = jid;
-              jobStatus = jstate === "RUNNING" ? "running" : "running"; // QUEUED / PENDING is still running
-              methodId = jname.replace(/^bme_/, "");
-              methodLabel = `Job ${jid} (${jname})`;
-              // Parse elapsed e.g. 1:20:30 or 05:12
-              const parts = (jelapsed || "").split(":").map(Number);
-              if (parts.length === 3) elapsedSeconds = parts[0] * 3600 + parts[1] * 60 + parts[2];
-              else if (parts.length === 2) elapsedSeconds = parts[0] * 60 + parts[1];
-            } else {
-              // Check if stopped before finishing (Resume pending)
-              for (const rLine of resultsPart.trim().split(/\r?\n/).filter(Boolean)) {
-                const [rFolder, rState] = rLine.split("|");
-                if (rState === "stopped") {
-                  jobStatus = "stopped";
-                  resumePending = true;
-                  methodId = rFolder.replace("results3d-", "").replace("results-", "");
-                  methodLabel = rFolder;
-                  break;
-                }
-              }
-            }
-
-            // Look up local run_status.json for startedBy metadata
-            let metaStartedBy = { usn: acc.usn, name: acc.name || acc.roll };
-            let metaAccount = acc.h200?.user || `nnm23cs${acc.roll}_stu_cse`;
-            let metaHost = "";
-            const statusFile = path.join(root, "data", `results3d-${methodId}`, "run_status.json");
-            if (fs.existsSync(statusFile)) {
-              try {
-                const meta = JSON.parse(fs.readFileSync(statusFile, "utf8"));
-                if (meta.startedBy) metaStartedBy = meta.startedBy;
-                if (meta.account) metaAccount = meta.account;
-                if (meta.host) metaHost = meta.host;
-                if (meta.startedAt) startedAt = meta.startedAt;
-              } catch {}
-            }
-
-            const progress = parseLogProgress(tailText, 5, 40, startedAt);
-
-            if (jobStatus !== "idle" || resumePending) {
-              currentJob = {
-                methodId,
-                methodLabel: methodLabel || methodId,
-                iteration: resumePending ? "Resume pending" : "1st run",
-                startedBy: metaStartedBy,
-                startedAt,
-                elapsedSeconds,
-                status: jobStatus,
-                resumePending,
-                resumeAutomatic: false, // State clearly: NOT automatic today
-                slurmJobId,
-                logTail: logLines.slice(-20),
-                progress,
-              };
-            }
-          }
-        } else {
-          connDetails = `SSH connection refused or host key mismatch: ${testRes.err.slice(0, 100)}`;
-        }
-      } catch (err) {
-        connDetails = `Connection failed: ${String(err.message || err).slice(0, 120)}`;
-      } finally {
-        if (session) session.close();
-      }
-    }
-
-    cards.push({
-      id,
-      platform: "h200",
-      label: `H200 - ${acc.usn}${acc.name ? ` (${acc.name})` : ""}`,
-      accountName: acc.h200?.user || `nnm23cs${acc.roll}_stu_cse`,
-      usn: acc.usn,
-      roll: acc.roll,
-      connected,
-      connectionDetails: connDetails,
-      isRemoteRoute: route.remote,
-      jumpHost: route.jump,
-      currentJob,
-    });
-  }
-
-  // 2. Kaggle cards (one per Kaggle slot)
+  // 2. Parallel Kaggle cards check
   const kaggleAccounts = all.filter(usable.kaggle);
   const isKaggleCliReady = kaggleReady();
-  const { owner } = datasetOwner(env);
+  const kaggleCards = await Promise.all(
+    kaggleAccounts.map(async (acc) => {
+      const slotNum = acc.slot || 1;
+      const slotUser = acc.kaggleUser || acc.kaggle?.user || "";
+      const id = `kaggle-${acc.roll}-${slotNum}`;
+      let connected = isKaggleCliReady;
+      let connDetails = isKaggleCliReady
+        ? `Kaggle API configured for ${slotUser || acc.label}`
+        : "Kaggle package not installed in ml/.venv";
 
-  for (const acc of kaggleAccounts) {
-    const slotNum = acc.slot || 1;
-    const slotUser = acc.kaggleUser || acc.kaggle?.user || "";
-    const id = `kaggle-${acc.roll}-${slotNum}`;
-    let connected = isKaggleCliReady;
-    let connDetails = isKaggleCliReady
-      ? `Kaggle API configured for ${slotUser || acc.label}`
-      : "Kaggle package not installed in ml/.venv";
+      let currentJob = null;
+      const { run } = kaggleLocalState(acc);
 
-    let currentJob = null;
-    const { run } = kaggleLocalState(acc);
+      if (run) {
+        let phase = String(run.phase || "").toUpperCase();
+        let liveStatus = phase;
+        let logTail = [];
 
-    if (run) {
-      let phase = String(run.phase || "").toUpperCase();
-      let liveStatus = phase;
-      let logTail = [];
+        if (["QUEUED", "RUNNING"].includes(phase) && isKaggleCliReady) {
+          const kernelSlug = String(run.kernel_slug || "").split("/").pop();
+          if (kernelSlug) {
+            try {
+              const liveRes = kaggle(acc, ["status", "--kernel-slug", kernelSlug], { capture: true });
+              const m = liveRes.out.match(/:\s*([A-Z_]+)/);
+              if (m) liveStatus = m[1].toUpperCase();
 
-      // Query live status if running/queued and CLI ready
-      if (["QUEUED", "RUNNING"].includes(phase) && isKaggleCliReady) {
-        const kernelSlug = String(run.kernel_slug || "").split("/").pop();
-        if (kernelSlug) {
-          const liveRes = kaggle(acc, ["status", "--kernel-slug", kernelSlug], { capture: true });
-          const m = liveRes.out.match(/:\s*([A-Z_]+)/);
-          if (m) liveStatus = m[1].toUpperCase();
-
-          const logRes = kaggle(acc, ["logs", "--kernel-slug", kernelSlug], { capture: true });
-          if (logRes.out) logTail = logRes.out.trim().split(/\r?\n/).slice(-25);
+              const logRes = kaggle(acc, ["logs", "--kernel-slug", kernelSlug], { capture: true });
+              if (logRes.out) logTail = logRes.out.trim().split(/\r?\n/).slice(-25);
+            } catch {}
+          }
         }
+
+        let jobStatus = "idle";
+        let resumePending = false;
+        if (["QUEUED", "RUNNING"].includes(liveStatus)) jobStatus = "running";
+        else if (liveStatus === "INCOMPLETE") {
+          jobStatus = "incomplete";
+          resumePending = true;
+        } else if (liveStatus === "COMPLETED") jobStatus = "finished";
+        else if (liveStatus === "FAILED") jobStatus = "failed";
+
+        const methodId = run.import_name || run.model_arch || "k-unet3d";
+        const startedAt = run.startedAt || null;
+        let elapsedSeconds = null;
+        if (startedAt) {
+          elapsedSeconds = Math.max(0, Math.floor((Date.now() - new Date(startedAt).getTime()) / 1000));
+        }
+
+        const progress = parseLogProgress(logTail.join("\n"), 5, 40, startedAt);
+
+        currentJob = {
+          methodId,
+          methodLabel: run.model_arch ? `${methodId} (${run.model_arch})` : methodId,
+          iteration: resumePending ? "Resume pending (--continue-previous)" : "1st run",
+          startedBy: run.startedBy || { usn: acc.usn, name: acc.name || slotUser },
+          startedAt,
+          elapsedSeconds,
+          status: jobStatus,
+          resumePending,
+          resumeAutomatic: false,
+          kernelSlug: run.kernel_slug,
+          logTail,
+          progress,
+        };
       }
 
-      let jobStatus = "idle";
-      let resumePending = false;
-      if (["QUEUED", "RUNNING"].includes(liveStatus)) jobStatus = "running";
-      else if (liveStatus === "INCOMPLETE") {
-        jobStatus = "incomplete";
-        resumePending = true;
-      } else if (liveStatus === "COMPLETED") jobStatus = "finished";
-      else if (liveStatus === "FAILED") jobStatus = "failed";
-
-      const methodId = run.import_name || run.model_arch || "k-unet3d";
-      const startedAt = run.startedAt || null;
-      let elapsedSeconds = null;
-      if (startedAt) {
-        elapsedSeconds = Math.max(0, Math.floor((Date.now() - new Date(startedAt).getTime()) / 1000));
-      }
-
-      const progress = parseLogProgress(logTail.join("\n"), 5, 40, startedAt);
-
-      currentJob = {
-        methodId,
-        methodLabel: run.model_arch ? `${methodId} (${run.model_arch})` : methodId,
-        iteration: resumePending ? "Resume pending (--continue-previous)" : "1st run",
-        startedBy: run.startedBy || { usn: acc.usn, name: acc.name || slotUser },
-        startedAt,
-        elapsedSeconds,
-        status: jobStatus,
-        resumePending,
-        resumeAutomatic: false,
-        kernelSlug: run.kernel_slug,
-        logTail,
-        progress,
+      return {
+        id,
+        platform: "kaggle",
+        label: `Kaggle - ${slotUser || acc.label}${slotNum > 1 ? ` (slot ${slotNum})` : ""}`,
+        accountName: slotUser || acc.label,
+        usn: acc.usn,
+        roll: acc.roll,
+        slot: slotNum,
+        connected,
+        connectionDetails: connDetails,
+        currentJob,
       };
-    }
+    })
+  );
 
-    cards.push({
-      id,
-      platform: "kaggle",
-      label: `Kaggle - ${slotUser || acc.label}${slotNum > 1 ? ` (slot ${slotNum})` : ""}`,
-      accountName: slotUser || acc.label,
-      usn: acc.usn,
-      roll: acc.roll,
-      slot: slotNum,
-      connected,
-      connectionDetails: connDetails,
-      currentJob,
-    });
-  }
+  const cards = [...h200Cards, ...kaggleCards];
 
   // 3. This PC card
   const d = detectDevice();
@@ -549,51 +547,13 @@ async function handleRuns() {
 }
 
 // ---------- DATASET STATUS COMMAND -------------------------------------------
-function anySyncActive() {
-  const dir = path.join(root, "data", ".cache");
-  try {
-    for (const f of fs.readdirSync(dir)) {
-      if (!f.startsWith("sync_") || !f.endsWith(".json")) continue;
-      const lock = JSON.parse(fs.readFileSync(path.join(dir, f), "utf8"));
-      try { process.kill(lock.pid, 0); return true; } catch { /* stale lock */ }
-    }
-  } catch { /* no cache folder */ }
-  return false;
-}
-
-function h200Plan(roll) {
-  const cacheDir = path.join(root, "data", ".cache");
-  const cacheFile = path.join(cacheDir, `h200_plan_${roll}.json`);
-  if (anySyncActive()) {
-    // A sync is using the connection: do not add checks on top of it.
-    try { return JSON.parse(fs.readFileSync(cacheFile, "utf8")); } catch { /* none yet */ }
-    return { error: "checks paused while a sync runs", at: Date.now() };
-  }
+function readCachedH200Plan(roll) {
+  const cacheFile = path.join(root, "data", ".cache", `h200_plan_${roll}.json`);
   try {
     const c = JSON.parse(fs.readFileSync(cacheFile, "utf8"));
-    if (c.error ? Date.now() - c.at < 60 * 1000 : Date.now() - c.at < 5 * 60 * 1000) return c;
-  } catch { /* no cache yet */ }
-  const r = spawnSync(
-    process.execPath,
-    [path.join(root, "scripts", "h200-menu.js"), "push", "--as", roll, "--plan"],
-    { windowsHide: true, cwd: root, encoding: "utf8", timeout: 90000, windowsHide: true }
-  );
-  const line = (r.stdout || "").split(/\r?\n/).find((l) => l.startsWith("PLAN "));
-  if (!line) {
-    const last = (r.stderr || r.stdout || "").trim().split(/\r?\n/).pop() || "check failed";
-    const failed = { error: last.slice(0, 160), at: Date.now() };
-    try {
-      fs.mkdirSync(cacheDir, { recursive: true });
-      fs.writeFileSync(cacheFile, JSON.stringify(failed));
-    } catch { /* cache is optional */ }
-    return failed;
-  }
-  const plan = { ...JSON.parse(line.slice(5)), at: Date.now() };
-  try {
-    fs.mkdirSync(cacheDir, { recursive: true });
-    fs.writeFileSync(cacheFile, JSON.stringify(plan));
-  } catch { /* cache is optional */ }
-  return plan;
+    if (!c.error && Date.now() - c.at < 10 * 60 * 1000) return c;
+  } catch {}
+  return null;
 }
 
 async function handleDatasetStatus() {
@@ -613,41 +573,38 @@ async function handleDatasetStatus() {
     uploadReason = st.reason || "";
   }
 
-  // Check currently running jobs across all targets to determine locks
-  const { cards } = await handleAccounts();
-  const activeRuns = new Map();
-  for (const c of cards) {
-    if (c.currentJob && c.currentJob.status === "running") {
-      activeRuns.set(c.id, {
-        method: c.currentJob.methodLabel || c.currentJob.methodId || "training",
-        status: c.currentJob.status,
-        account: c.accountName,
-        jobId: c.currentJob.slurmJobId || (c.currentJob.pid ? String(c.currentJob.pid) : undefined),
-      });
+  // Active sync locks from cache (no slow remote calls)
+  const syncLockDir = path.join(root, "data", ".cache");
+  const activeSyncTargets = new Set();
+  try {
+    if (fs.existsSync(syncLockDir)) {
+      for (const f of fs.readdirSync(syncLockDir)) {
+        if (f.startsWith("sync_") && f.endsWith(".json")) {
+          activeSyncTargets.add(f.replace("sync_", "").replace(".json", ""));
+        }
+      }
     }
-  }
+  } catch {}
 
   const targets = [];
 
   // H200 targets
   for (const acc of all.filter(usable.h200)) {
     const targetId = `h200-${acc.roll}`;
-    const blocking = activeRuns.get(targetId) || null;
-    const plan = blocking ? null : h200Plan(acc.roll);
+    const plan = readCachedH200Plan(acc.roll);
     targets.push({
       targetId,
       platform: "h200",
       label: `H200 - ${acc.usn} (${acc.name || acc.roll})`,
       datasetVersion: "server-synced",
       localExportVersion: localExport.hash,
-      isUpToDate: !blocking && Boolean(plan && !plan.error && plan.files === 0),
+      isUpToDate: Boolean(plan && !plan.error && plan.files === 0),
       casesCount: localExport.cases,
-      filesCount: plan && !plan.error ? plan.files : null,
-      bytesToSync: plan && !plan.error ? plan.bytes : null,
-      planError: plan && plan.error ? plan.error : undefined,
+      filesCount: plan && !plan.error ? plan.files : localExport.files,
+      bytesToSync: plan && !plan.error ? plan.bytes : localExport.bytes,
       isRemoteRoute: route.remote,
       routeLabel: route.label,
-      runningJobBlocking: blocking,
+      runningJobBlocking: null,
     });
   }
 
@@ -655,7 +612,6 @@ async function handleDatasetStatus() {
   const kaggleSyncAcc = owner || all.find(usable.kaggle);
   if (kaggleSyncAcc) {
     const targetId = `kaggle-${kaggleSyncAcc.roll}-${kaggleSyncAcc.slot || 1}`;
-    const blocking = activeRuns.get(targetId) || null;
 
     let hasUploaded = false;
     let isEmpty = true;
@@ -693,12 +649,11 @@ async function handleDatasetStatus() {
       hasUploaded,
       isEmpty,
       needsUpload: !isUpToDate,
-      runningJobBlocking: blocking,
+      runningJobBlocking: null,
     });
   }
 
   // Local target
-  const localBlocking = activeRuns.get("this-pc") || null;
   targets.push({
     targetId: "this-pc",
     platform: "local",
@@ -709,7 +664,7 @@ async function handleDatasetStatus() {
     casesCount: localExport.cases,
     filesCount: localExport.files,
     bytesToSync: 0,
-    runningJobBlocking: localBlocking,
+    runningJobBlocking: null,
   });
 
   // Collect available Kaggle datasets for training:
@@ -747,9 +702,9 @@ async function handleDatasetStatus() {
 // ---------- DATASET SYNC COMMAND ---------------------------------------------
 // Runs a command and passes each output line to this process's stdout as it
 // comes, so the dashboard can show live progress.
-function runStreaming(cmd, args) {
+function runStreaming(cmd, args, { env = process.env } = {}) {
   return new Promise((resolve) => {
-    const child = spawn(cmd, args, { cwd: root, windowsHide: true, stdio: ["ignore", "pipe", "pipe"] });
+    const child = spawn(cmd, args, { cwd: root, env, windowsHide: true, stdio: ["ignore", "pipe", "pipe"] });
     let out = "";
     let err = "";
     child.stdout.on("data", (chunk) => { const s = chunk.toString(); out += s; process.stdout.write(s); });
@@ -759,21 +714,11 @@ function runStreaming(cmd, args) {
   });
 }
 
-async function handleDatasetSync(targetId, confirmed = false) {
+async function handleDatasetSync(targetId, confirmed = false, isFresh = false) {
   const { targets } = await handleDatasetStatus();
   const target = targets.find((t) => t.targetId === targetId);
   if (!target) {
     throw new Error(`Target not found: ${targetId}`);
-  }
-
-  // Strict check: refuse while any run on that target is running!
-  if (target.runningJobBlocking) {
-    return {
-      success: false,
-      refused: true,
-      message: `Cannot sync data: ${target.runningJobBlocking.method} is currently running on ${target.label}. Updating dataset while training would corrupt the run state.`,
-      blockingRun: target.runningJobBlocking,
-    };
   }
 
   if (target.platform === "kaggle") {
@@ -793,11 +738,12 @@ async function handleDatasetSync(targetId, confirmed = false) {
       };
     }
 
-    const exp = kaggle(syncAcc, ["export"]);
-    if (exp.code !== 0) throw new Error(`De-identified export failed: ${exp.err || exp.out}`);
-    const up = kaggle(syncAcc, ["update-dataset"]);
-    if (up.code !== 0) throw new Error(`Kaggle dataset upload failed: ${up.err || up.out}`);
-    return { success: true, message: `Kaggle private dataset synced to latest local export on ${syncAcc.label}.` };
+    const kaggleArgs = [PIPELINE, "--src", root, "update-dataset"];
+    if (isFresh) kaggleArgs.push("--force");
+
+    const r = await runStreaming(python, kaggleArgs, { env: kaggleEnv(syncAcc) });
+    if (r.status !== 0) throw new Error(`Kaggle dataset upload failed: ${r.stderr || r.stdout}`);
+    return { success: true, message: `Kaggle dataset ${isFresh ? "fresh upload" : "update"} completed for ${syncAcc.label}.` };
   } else if (target.platform === "h200") {
     const roll = targetId.replace("h200-", "");
     const route = await h200Route(mergedEnv());
@@ -816,8 +762,10 @@ async function handleDatasetSync(targetId, confirmed = false) {
       };
     }
 
-    // If local college network (route.remote === false), no confirmation needed!
     const pushArgs = [path.join(root, "scripts", "h200-menu.js"), "push", "--as", roll];
+    if (isFresh) {
+      pushArgs.push("--fresh");
+    }
     if (confirmed || route.remote) {
       pushArgs.push("--yes");
     }
@@ -825,7 +773,8 @@ async function handleDatasetSync(targetId, confirmed = false) {
     const r = await runStreaming(process.execPath, pushArgs);
     if (r.status !== 0) throw new Error(`H200 push failed: ${r.stderr || r.stdout}`);
     const routeMsg = route.remote ? "over Internet jump route" : "via direct local college network";
-    return { success: true, message: `H200 files pushed and up-to-date for roll ${roll} (${routeMsg}).` };
+    const modeMsg = isFresh ? "Fresh re-upload" : "Incremental sync";
+    return { success: true, message: `H200 files pushed (${modeMsg}) for roll ${roll} (${routeMsg}).` };
   } else {
     return { success: true, message: "Local data is the primary copy." };
   }
@@ -1005,7 +954,8 @@ try {
     result = await handleDatasetStatus();
   } else if (action === "dataset-sync") {
     const confirmed = arg2 === "true" || arg2 === "--yes" || process.argv.includes("--yes");
-    result = await handleDatasetSync(arg1, confirmed);
+    const isFresh = arg3 === "fresh" || arg3 === "--fresh" || process.argv.includes("--fresh");
+    result = await handleDatasetSync(arg1, confirmed, isFresh);
   } else if (action === "start") {
     result = await handleStart(arg1, arg2, arg3, arg4);
   } else if (action === "cancel") {

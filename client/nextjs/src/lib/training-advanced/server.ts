@@ -155,6 +155,12 @@ function clearSyncLock(targetId: string) {
 
 const cancelledSyncs = new Set<string>();
 
+export function clearTasks(): void {
+  try {
+    fs.writeFileSync(tasksFile(), JSON.stringify([], null, 2), "utf8");
+  } catch {}
+}
+
 export function cancelSync(targetId: string): { success: boolean; message: string } {
   const lock = readSyncLock(targetId);
   if (!lock) return { success: false, message: "No sync is running for this account." };
@@ -174,7 +180,8 @@ export function cancelSync(targetId: string): { success: boolean; message: strin
 
 export async function syncDataset(
   targetId: string,
-  confirmed = false
+  confirmed = false,
+  isFresh = false
 ): Promise<{
   success: boolean;
   refused?: boolean;
@@ -208,7 +215,7 @@ export async function syncDataset(
       isRemoteRoute: true,
       bytesToSync: target.bytesToSync,
       formattedSize,
-      message: `H200 is connected through the Internet (jump host: pc-server-1). Syncing requires ~${formattedSize} using your internet data. Confirmation required.`,
+      message: `H200 is connected through the Internet (jump host: pc-server-1). ${isFresh ? "Fresh upload" : "Syncing"} requires ~${formattedSize} using your internet data. Confirmation required.`,
     };
   }
 
@@ -239,13 +246,12 @@ export async function syncDataset(
     target: targetId,
     status: "running",
     startedAt: new Date().toISOString(),
-    message: `Syncing training data to ${target.label}...`,
+    message: `${isFresh ? "Fresh uploading" : "Syncing"} training data to ${target.label}...`,
     log: [],
   };
   saveTask(task);
 
-  const bridgeArgs = ["dataset-sync", targetId];
-  if (confirmed) bridgeArgs.push("true");
+  const bridgeArgs = ["dataset-sync", targetId, confirmed ? "true" : "false", isFresh ? "fresh" : "normal"];
 
   // Run in background process
   const child = spawn(process.execPath, [bridgeScript, ...bridgeArgs], {
@@ -284,7 +290,7 @@ export async function syncDataset(
     task.status = code === 0 ? "completed" : "failed";
     task.endedAt = new Date().toISOString();
     task.message = code === 0 ? "Dataset sync completed successfully." : `Dataset sync failed with exit code ${code}`;
-    task.log = log.split(/\r?\n/).slice(-30);
+    task.log = log.split(/\r?\n|\r/).map((l) => l.trim()).filter(Boolean).slice(-30);
     saveTask(task);
   });
 
@@ -345,7 +351,7 @@ export async function startJob({
     task.status = code === 0 ? "completed" : "failed";
     task.endedAt = new Date().toISOString();
     task.message = code === 0 ? `Run ${methodId} launched successfully.` : `Run ${methodId} failed with exit code ${code}`;
-    task.log = log.split(/\r?\n/).slice(-30);
+    task.log = log.split(/\r?\n|\r/).map((l) => l.trim()).filter(Boolean).slice(-30);
     saveTask(task);
   });
 
@@ -413,7 +419,7 @@ export async function resumeJob({
     task.status = code === 0 ? "completed" : "failed";
     task.endedAt = new Date().toISOString();
     task.message = code === 0 ? `Resume for ${methodId} finished successfully.` : `Resume stopped with code ${code}`;
-    task.log = log.split(/\r?\n/).slice(-30);
+    task.log = log.split(/\r?\n|\r/).map((l) => l.trim()).filter(Boolean).slice(-30);
     saveTask(task);
   });
 

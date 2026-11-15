@@ -1645,6 +1645,15 @@ def run_update_dataset(
                 fp_file.unlink()
             except Exception:
                 pass
+        app_file = staging_dir / "dataset_approval.json"
+        if app_file.exists():
+            try:
+                app_data = json.loads(app_file.read_text(encoding="utf-8"))
+                app_data.pop("uploaded_hash", None)
+                app_data.pop("uploaded_version", None)
+                app_file.write_text(json.dumps(app_data, indent=2), encoding="utf-8")
+            except Exception:
+                pass
 
     print("\n" + "=" * 60)
     print("ONE-CLICK DATASET UPDATE: STARTING")
