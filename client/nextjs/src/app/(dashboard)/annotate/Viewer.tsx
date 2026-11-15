@@ -1058,8 +1058,16 @@ export default function Viewer({
         setMyReview(metaMyReview);
         setAnnotatedByAll(metaAnnotatedByAll);
 
+        // Default: the case owner's own annotation (first to annotate, or assigned).
+        // Owner names are short ("Paripoorna"), annotator names carry the full
+        // name ("Paripoorna_B"), so match on the first word.
+        const ownerName = (metaAnnotatedByAll[0] || "").split("_")[0].toLowerCase();
+        const ownerItem = ownerName
+          ? metaAnnotators.find((a) => !a.mentor && a.name.split("_")[0].toLowerCase() === ownerName)
+          : undefined;
         const mainItem = metaAnnotators.find((a) => a.isMain);
-        defaultAnnotator = mainItem ? mainItem.name : (metaAnnotators[0]?.name || "");
+        const pickItem = ownerItem ?? mainItem ?? metaAnnotators[0];
+        defaultAnnotator = pickItem ? pickItem.name : "";
         setPickedAnnotator(defaultAnnotator);
         baseAnnotatorRef.current = defaultAnnotator || "_main";
 
