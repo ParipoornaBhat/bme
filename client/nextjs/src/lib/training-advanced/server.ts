@@ -29,7 +29,16 @@ export function getTasks(): BackgroundTask[] {
   try {
     const f = tasksFile();
     if (!fs.existsSync(f)) return [];
-    return JSON.parse(fs.readFileSync(f, "utf8")) as BackgroundTask[];
+    const tasks = JSON.parse(fs.readFileSync(f, "utf8")) as BackgroundTask[];
+    // A sync marked running whose process is gone (for example after the app restarted) is shown as ended.
+    return tasks.map((t) => {
+      const started = Date.parse(t.startedAt || "");
+      if (t.status !== "running" || !t.id.startsWith("sync-") || !t.target) return t;
+      if (Number.isNaN(started) || Date.now() - started < 30000) return t;
+      const lock = readSyncLock(t.target);
+      if (lock && lock.taskId === t.id) return t;
+      return { ...t, status: "failed", endedAt: t.endedAt || new Date().toISOString(), message: "Sync ended (the process stopped or the app was restarted)." };
+    });
   } catch {
     return [];
   }
@@ -117,8 +126,9 @@ function pidAlive(pid: number) {
   try {
     process.kill(pid, 0);
     return true;
-  } catch {
-    return false;
+  } catch (e: any) {
+    // On Windows a live process can refuse the probe with EPERM; that means it is running.
+    return e?.code === "EPERM";
   }
 }
 
