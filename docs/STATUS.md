@@ -68,6 +68,8 @@ Phases are defined in [PRD.md](PRD.md) §8.
 
 ## Do this next
 
+**Continue here: see [docs/handoff/HANDOFF.md](handoff/HANDOFF.md)** for the open items (reload on annotation switch, slice counts, Move button, copy/paste, duplicate decision) and the agy workflow.
+
 In order. Each step's output is the next step's input.
 
 - **2026-11-15:** Reviewer site: scans on Drive (145), accounts and annotation sync in the online DB. New cases: run `pnpm review:scans`, upload `drive-upload/` to the Drive folder, then `pnpm review:scans --finish`. Hosted deploy to bme.paripoorna.me pending (`pnpm vercel:link`, `vercel:secrets`, `vercel:deploy`).

@@ -1,0 +1,12 @@
+{
+  "permissions": {
+    "allow": [
+      "command(regex:^(node|node\\.exe)\\s+--check\\s+.*)",
+      "command(regex:^git\\s+(status|diff|log|show)(\\s.*)?$)",
+      "command(regex:^ml[/\\\\]\\.venv[/\\\\]Scripts[/\\\\]python\\.exe\\s+-m\\s+py_compile\\s+.*)",
+      "command(regex:^pnpm\\s+--filter\\s+@bme/db\\s+db:generate(\\s+--name[= ]\\S+)?$)",
+      "command(regex:^pnpm\\s+--filter\\s+(@bme/db|nextjs)\\s+exec\\s+tsc\\s+--noEmit.*$)",
+      "command(regex:^pnpm\\s+--filter\\s+@bme/db\\s+exec\\s+node\\s+--import\\s+tsx\\s+--test\\s+\\S+$)"
+    ]
+  }
+}
