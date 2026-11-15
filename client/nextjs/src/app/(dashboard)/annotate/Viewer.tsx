@@ -410,7 +410,8 @@ export default function Viewer({
   const me = isReview
     ? (reviewUser?.displayName || reviewUser?.username || "reviewer")
     : ((isCollaborator ? collaboratorUserName : null) || session?.user?.name || session?.user?.email || "unknown");
-  const isReviewer = isReview && (reviewUser?.role === "reviewer" || !reviewUser?.role);
+  const isMentor = isReview && (reviewUser?.role as string) === "mentor";
+  const isReviewer = isReview && (reviewUser?.role === "reviewer" || (!reviewUser?.role && !isMentor));
   const isTeam = isReview && reviewUser?.role === "team";
 
   const [annotatorsList, setAnnotatorsList] = useState<AnnotatorItem[]>([]);
@@ -2434,8 +2435,11 @@ export default function Viewer({
         setSavedLoadError(null);
         const c = countLabels(saved.labels);
         setCounts(c);
+        const isSelectedMentor = newAnnotator.toLowerCase() === "mentor" || annotatorsList.some((a) => a.name === newAnnotator && a.mentor);
         const labelName = newAnnotator === "_mine"
-          ? (isReviewer ? "My review" : "Mine (online)")
+          ? (isMentor ? "Mentor (online only)" : isReviewer ? "My review" : "Mine (online)")
+          : isSelectedMentor
+          ? "Mentor (online only)"
           : (newAnnotator || "Main");
         setStatus(`Loaded annotation: ${labelName}`);
         for (const w of saved.warnings) toast.warning(w);
@@ -2619,13 +2623,26 @@ export default function Viewer({
         return;
       }
       if (isReviewMode()) {
-        const isReviewerRole = reviewUser?.role !== "team";
-        setStatus(isReviewerRole ? "Review submitted — open edit updated" : "Saved online — will sync to your laptop");
+        const isMentorRole = (reviewUser?.role as string) === "mentor";
+        const isReviewerRole = reviewUser?.role !== "team" && !isMentorRole;
+        setStatus(
+          isMentorRole
+            ? "Saved online."
+            : isReviewerRole
+            ? "Review submitted — open edit updated"
+            : "Saved online — will sync to your laptop"
+        );
         if (editVersion.current === version) setDirty(false);
         setHasSaved(true);
         setSavedSuccess(true);
         setTimeout(() => setSavedSuccess(false), 2000);
-        toast.success(isReviewerRole ? `Review submitted for ${caseId}` : `Saved 3D mask for ${caseId} online`);
+        toast.success(
+          isMentorRole
+            ? "Saved online."
+            : isReviewerRole
+            ? `Review submitted for ${caseId}`
+            : `Saved 3D mask for ${caseId} online`
+        );
         setReviewInfo({ status: "open", updatedAt: new Date().toISOString() });
         setPickedAnnotator("_mine");
         onSaved?.();
@@ -3104,7 +3121,7 @@ export default function Viewer({
           <RailButton
             key={id}
             active={tool === id}
-            disabled={(isPaint && isReviewLocked) || switching}
+            disabled={isPaint && isReviewLocked}
             title={isPaint && isReviewLocked ? lockTooltip : title}
             onClick={() => pickTool(id)}
           >
@@ -3115,7 +3132,7 @@ export default function Viewer({
       {canAnnotate && (
         <RailButton
           active={erasing ? "danger" : false}
-          disabled={isReviewLocked || switching}
+          disabled={isReviewLocked}
           title={isReviewLocked ? lockTooltip : "Eraser (Key 0 or E)"}
           onClick={() => toggleEraser()}
         >
@@ -3126,15 +3143,15 @@ export default function Viewer({
         ? railSize("torch", torchSize, (d) => stepTorch(d * 8))
         : canAnnotate && tool === "brush" ? railSize("brush", brush, (d) => setBrush((b) => Math.min(20, Math.max(1, b + d))))
         : canAnnotate && tool === "move" && (
-          <RailButton active={moveAllSlices} disabled={isReviewLocked || switching} title={isReviewLocked ? lockTooltip : moveScopeTitle} onClick={() => setMoveAllSlices((v) => !v)}>
+          <RailButton active={moveAllSlices} disabled={isReviewLocked} title={isReviewLocked ? lockTooltip : moveScopeTitle} onClick={() => setMoveAllSlices((v) => !v)}>
             <Layers className="h-4 w-4" />
           </RailButton>
         )}
       {canAnnotate && (
         <>
           {railDivider}
-          <RailButton disabled={isReviewLocked || undoStack.current.length === 0 || switching} title={isReviewLocked ? lockTooltip : "Undo (Ctrl+Z)"} onClick={undo}><RotateCcw className="h-4 w-4" /></RailButton>
-          <RailButton disabled={isReviewLocked || redoStack.current.length === 0 || switching} title={isReviewLocked ? lockTooltip : "Redo (Ctrl+Y)"} onClick={redo}><RotateCw className="h-4 w-4" /></RailButton>
+          <RailButton disabled={isReviewLocked || undoStack.current.length === 0} title={isReviewLocked ? lockTooltip : "Undo (Ctrl+Z)"} onClick={undo}><RotateCcw className="h-4 w-4" /></RailButton>
+          <RailButton disabled={isReviewLocked || redoStack.current.length === 0} title={isReviewLocked ? lockTooltip : "Redo (Ctrl+Y)"} onClick={redo}><RotateCw className="h-4 w-4" /></RailButton>
         </>
       )}
 
@@ -3417,10 +3434,10 @@ export default function Viewer({
               selected={pickedAnnotator}
               onChange={handleAnnotatorChange}
               isReview={isReview}
-              userRole={reviewUser?.role === "team" ? "team" : ((reviewUser?.role as string) === "radiologist" ? "radiologist" : "reviewer")}
+              userRole={isMentor ? "mentor" : (reviewUser?.role === "team" ? "team" : ((reviewUser?.role as string) === "radiologist" ? "radiologist" : "reviewer"))}
               disabled={busy || switching}
             />
-            {isReview && reviewUser?.role !== "team" && (
+            {isReview && reviewUser?.role !== "team" && !isMentor && (
               <ReviewMarkButton
                 caseId={caseId}
                 myReview={myReview}
@@ -3536,7 +3553,7 @@ export default function Viewer({
                 title={isReviewLocked
                   ? lockTooltip
                   : isReview
-                  ? (isReviewer ? "Submit review (Ctrl+S)" : "Save (Ctrl+S)")
+                  ? (isMentor ? "Save (Ctrl+S)" : isReviewer ? "Submit review (Ctrl+S)" : "Save (Ctrl+S)")
                   : "Save 3D Mask (Ctrl+S)"}
                 className={`inline-flex items-center gap-1 rounded-md px-2.5 py-1 text-xs font-medium transition cursor-pointer disabled:cursor-not-allowed disabled:opacity-40 ${
                   savedSuccess ? "bg-emerald-600 text-white" : "bg-primary text-primary-foreground hover:bg-primary/90"
@@ -3551,10 +3568,8 @@ export default function Viewer({
                 )}
                 <span>
                   {savedSuccess
-                    ? (isReview ? (isReviewer ? "Submitted!" : "Saved!") : "Saved!")
-                    : dirty
-                    ? (isReview ? (isReviewer ? "Submit review" : "Save") : "Save")
-                    : (isReview ? (isReviewer ? "Submitted" : "Saved") : "Saved")}
+                    ? (isMentor ? "Saved online." : (isReview ? (isReviewer ? "Submitted!" : "Saved!") : "Saved!"))
+                    : (isMentor ? "Save" : (dirty ? (isReview ? (isReviewer ? "Submit review" : "Save") : "Save") : (isReview ? (isReviewer ? "Submitted" : "Saved") : "Saved")))}
                 </span>
               </button>
             )}
@@ -3859,11 +3874,11 @@ export default function Viewer({
               selected={pickedAnnotator}
               onChange={handleAnnotatorChange}
               isReview={isReview}
-              userRole={reviewUser?.role === "team" ? "team" : ((reviewUser?.role as string) === "radiologist" ? "radiologist" : "reviewer")}
+              userRole={isMentor ? "mentor" : (reviewUser?.role === "team" ? "team" : ((reviewUser?.role as string) === "radiologist" ? "radiologist" : "reviewer"))}
               disabled={busy}
             />
 
-            {isReview && reviewUser?.role !== "team" && (
+            {isReview && reviewUser?.role !== "team" && !isMentor && (
               <ReviewMarkButton
                 caseId={caseId}
                 myReview={myReview}
@@ -3880,7 +3895,7 @@ export default function Viewer({
                 title={isReviewLocked
                   ? lockTooltip
                   : isReview
-                  ? (isReviewer ? "Submit review (Ctrl+S)" : "Save (Ctrl+S)")
+                  ? (isMentor ? "Save (Ctrl+S)" : isReviewer ? "Submit review (Ctrl+S)" : "Save (Ctrl+S)")
                   : "Save 3D Mask (Ctrl+S)"}
                 className={`inline-flex items-center gap-1.5 rounded-md px-3 py-1 font-medium transition cursor-pointer disabled:cursor-not-allowed disabled:opacity-40 ${
                   savedSuccess
@@ -3896,10 +3911,8 @@ export default function Viewer({
                   <Save className="h-3.5 w-3.5" />
                 )}
                 {savedSuccess
-                  ? (isReview ? (isReviewer ? "Submitted!" : "Saved!") : "Saved!")
-                  : dirty
-                  ? (isReview ? (isReviewer ? "Submit review" : "Save") : "Save")
-                  : (isReview ? (isReviewer ? "Submitted" : "Saved") : "Saved")}
+                  ? (isMentor ? "Saved online." : (isReview ? (isReviewer ? "Submitted!" : "Saved!") : "Saved!"))
+                  : (isMentor ? "Save" : (dirty ? (isReview ? (isReviewer ? "Submit review" : "Save") : "Save") : (isReview ? (isReviewer ? "Submitted" : "Saved") : "Saved")))}
               </button>
             )}
 
@@ -4209,6 +4222,7 @@ export default function Viewer({
                   touchAction: "none",
                 }}
                 onPointerDown={(e) => {
+                  if (switching) return;
                   if (isReview && !scanComplete) {
                     setStatus("Painting disabled until scan download is complete");
                     return;
