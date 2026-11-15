@@ -93,6 +93,7 @@ export interface KaggleDatasetOption {
   uploadedHash: string | null;
   caseCount: number;
   fileCount: number;
+  isDefault?: boolean;
 }
 
 export interface TargetDatasetStatus {

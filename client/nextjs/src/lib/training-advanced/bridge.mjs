@@ -664,6 +664,7 @@ async function handleDatasetStatus() {
   // Collect available Kaggle datasets for training:
   // Rule: If an account has not yet uploaded for first time or if its dataset is empty, DON'T show it!
   const kaggleDatasets = [];
+  const defaultOwnerRoll = owner?.roll || (all.find(usable.kaggle)?.roll || "");
   for (const acc of all.filter(usable.kaggle)) {
     const stagingDir = stagingFor(acc);
     const appFile = path.join(stagingDir, "dataset_approval.json");
@@ -683,12 +684,13 @@ async function handleDatasetStatus() {
           uploadedHash,
           caseCount: cases,
           fileCount: files,
+          isDefault: acc.roll === defaultOwnerRoll,
         });
       }
     } catch {}
   }
 
-  return { localExport, targets, kaggleDatasets };
+  return { localExport, targets, kaggleDatasets, defaultDatasetOwner: defaultOwnerRoll };
 }
 
 // ---------- DATASET SYNC COMMAND ---------------------------------------------

@@ -217,7 +217,8 @@ export default function AdvancedTrainingPage() {
           setSelectedSyncTarget(dataJson.targets[0].targetId);
         }
         if (kds.length > 0) {
-          setSelectedDatasetOwner((prev) => prev || kds[0].roll);
+          const defaultRoll = dataJson.defaultDatasetOwner || kds.find((k: any) => k.isDefault)?.roll || kds[0].roll;
+          setSelectedDatasetOwner((prev) => prev || defaultRoll);
         }
       }
       if (tasksRes.ok) {
@@ -1068,7 +1069,7 @@ export default function AdvancedTrainingPage() {
                   >
                     {kaggleDatasets.map((kd) => (
                       <option key={kd.roll} value={kd.roll}>
-                        {kd.label} — {kd.caseCount} scans {kd.uploadedAt ? `(Updated: ${new Date(kd.uploadedAt).toLocaleDateString("en-IN", { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" })})` : ""}
+                        {kd.label}{kd.isDefault ? " [Default Owner]" : ""} — {kd.caseCount} scans {kd.uploadedAt ? `(Updated: ${new Date(kd.uploadedAt).toLocaleDateString("en-IN", { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" })})` : ""}
                       </option>
                     ))}
                   </select>
