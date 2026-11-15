@@ -18,7 +18,7 @@ print(json.dumps(d))
 
 /** What this PC can train on, as PyTorch sees it: cuda (NVIDIA), mps (Apple) or cpu. */
 export function detectDevice() {
-  const r = spawnSync(python, ["-c", PROBE], { encoding: "utf8" });
+  const r = spawnSync(python, ["-c", PROBE], { encoding: "utf8", windowsHide: true });
   const line = (r.stdout || "").trim().split(/\r?\n/).pop() || "";
   try {
     return JSON.parse(line);

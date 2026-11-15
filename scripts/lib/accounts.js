@@ -283,6 +283,7 @@ export function requirePython() {
 export function kaggleReady() {
   const r = spawnSync(python, ["-c", "import kaggle.api.kaggle_api_extended, psutil"], {
     encoding: "utf8",
+    windowsHide: true,
     env: { ...process.env, KAGGLE_USERNAME: "x", KAGGLE_KEY: "x" },
   });
   return r.status === 0;
@@ -344,6 +345,7 @@ const PIPELINE = path.join(root, "ml", "scripts", "kaggle_pipeline.py");
 /** Run one kaggle_pipeline.py subcommand as this account. capture: return stdout instead of showing it. */
 export function kaggle(account, args, { capture = false, extraEnv = {} } = {}) {
   const r = spawnSync(python, [PIPELINE, "--src", root, ...args], {
+    windowsHide: true,
     cwd: root,
     env: kaggleEnv(account, extraEnv),
     encoding: "utf8",
@@ -407,6 +409,7 @@ export function kaggleUserOf(account) {
 
 export function runNode(script, args = [], extraEnv = {}) {
   const r = spawnSync(process.execPath, [path.join(root, "scripts", script), ...args], {
+    windowsHide: true,
     cwd: root,
     stdio: "inherit",
     env: { ...process.env, ...extraEnv },

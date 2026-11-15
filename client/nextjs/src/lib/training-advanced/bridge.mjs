@@ -89,6 +89,7 @@ async function runSshCommand(session, cmd, timeoutMs = 15000) {
         cmd,
       ],
       {
+        windowsHide: true,
         cwd: root,
         env: session.env,
         stdio: ["ignore", "pipe", "pipe"],
@@ -553,17 +554,22 @@ function h200Plan(roll) {
   const cacheFile = path.join(cacheDir, `h200_plan_${roll}.json`);
   try {
     const c = JSON.parse(fs.readFileSync(cacheFile, "utf8"));
-    if (Date.now() - c.at < 5 * 60 * 1000) return c;
+    if (c.error ? Date.now() - c.at < 60 * 1000 : Date.now() - c.at < 5 * 60 * 1000) return c;
   } catch { /* no cache yet */ }
   const r = spawnSync(
     process.execPath,
     [path.join(root, "scripts", "h200-menu.js"), "push", "--as", roll, "--plan"],
-    { cwd: root, encoding: "utf8", timeout: 90000, windowsHide: true }
+    { windowsHide: true, cwd: root, encoding: "utf8", timeout: 90000, windowsHide: true }
   );
   const line = (r.stdout || "").split(/\r?\n/).find((l) => l.startsWith("PLAN "));
   if (!line) {
     const last = (r.stderr || r.stdout || "").trim().split(/\r?\n/).pop() || "check failed";
-    return { error: last.slice(0, 160) };
+    const failed = { error: last.slice(0, 160), at: Date.now() };
+    try {
+      fs.mkdirSync(cacheDir, { recursive: true });
+      fs.writeFileSync(cacheFile, JSON.stringify(failed));
+    } catch { /* cache is optional */ }
+    return failed;
   }
   const plan = { ...JSON.parse(line.slice(5)), at: Date.now() };
   try {
@@ -786,6 +792,7 @@ async function handleDatasetSync(targetId, confirmed = false) {
     }
 
     const r = spawnSync(process.execPath, pushArgs, {
+      windowsHide: true,
       cwd: root,
       encoding: "utf8",
       stdio: "pipe",
@@ -854,6 +861,7 @@ async function handleStart(platform, targetId, methodId, extraJson = "{}") {
       h200Args = ["best", "2d", "--as", roll];
     }
     const r = spawnSync(process.execPath, [path.join(root, "scripts", "h200-menu.js"), ...h200Args], {
+      windowsHide: true,
       cwd: root,
       encoding: "utf8",
       stdio: "pipe",
@@ -862,6 +870,7 @@ async function handleStart(platform, targetId, methodId, extraJson = "{}") {
     return { success: true, message: `H200 job started for ${methodId} on account ${roll}` };
   } else if (platform === "local") {
     const r = spawnSync(process.execPath, [path.join(root, "scripts", "train-local.js"), methodId], {
+      windowsHide: true,
       cwd: root,
       encoding: "utf8",
       stdio: "pipe",

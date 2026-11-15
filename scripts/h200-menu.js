@@ -49,6 +49,7 @@ let session;
 function run(cmd, args, { stdin, capture, interactive } = {}) {
   return new Promise((resolve, reject) => {
     const child = spawn(cmd, args, {
+      windowsHide: true,
       cwd: root,
       env: session.env,
       stdio: [stdin ? "pipe" : interactive ? "inherit" : "ignore", capture ? "pipe" : "inherit", "inherit"],
@@ -208,7 +209,7 @@ async function push() {
 
   const listFile = path.join(os.tmpdir(), `bme-h200-push-${process.pid}.txt`);
   fs.writeFileSync(listFile, send.join("\n"), "utf8");
-  const tar = spawn("tar", ["-cf", "-", "-C", root, "-T", listFile], { cwd: root, stdio: ["ignore", "pipe", "inherit"] });
+  const tar = spawn("tar", ["-cf", "-", "-C", root, "-T", listFile], { windowsHide: true, cwd: root, stdio: ["ignore", "pipe", "inherit"] });
   let sent = 0;
   let shown = 0;
   tar.stdout.on("data", (chunk) => {
@@ -564,7 +565,7 @@ async function download(remoteRel, localRel, label) {
   const remote = spawn(
     "ssh",
     [...session.sshOpts, "-o", "ConnectTimeout=30", session.target, `cd ${REMOTE}/${remoteRel} && tar -cf - ${names.join(" ")}`],
-    { cwd: root, env: session.env, stdio: ["ignore", "pipe", "inherit"] },
+    { windowsHide: true, cwd: root, env: session.env, stdio: ["ignore", "pipe", "inherit"] },
   );
   const r = await run("tar", ["-xf", "-", "-C", dest], { stdin: remote });
   if (r.code !== 0) fail("Download failed.", r.code);
