@@ -549,9 +549,26 @@ async function handleRuns() {
 }
 
 // ---------- DATASET STATUS COMMAND -------------------------------------------
+function anySyncActive() {
+  const dir = path.join(root, "data", ".cache");
+  try {
+    for (const f of fs.readdirSync(dir)) {
+      if (!f.startsWith("sync_") || !f.endsWith(".json")) continue;
+      const lock = JSON.parse(fs.readFileSync(path.join(dir, f), "utf8"));
+      try { process.kill(lock.pid, 0); return true; } catch { /* stale lock */ }
+    }
+  } catch { /* no cache folder */ }
+  return false;
+}
+
 function h200Plan(roll) {
   const cacheDir = path.join(root, "data", ".cache");
   const cacheFile = path.join(cacheDir, `h200_plan_${roll}.json`);
+  if (anySyncActive()) {
+    // A sync is using the connection: do not add checks on top of it.
+    try { return JSON.parse(fs.readFileSync(cacheFile, "utf8")); } catch { /* none yet */ }
+    return { error: "checks paused while a sync runs", at: Date.now() };
+  }
   try {
     const c = JSON.parse(fs.readFileSync(cacheFile, "utf8"));
     if (c.error ? Date.now() - c.at < 60 * 1000 : Date.now() - c.at < 5 * 60 * 1000) return c;
