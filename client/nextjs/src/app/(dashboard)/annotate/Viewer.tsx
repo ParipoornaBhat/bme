@@ -887,6 +887,7 @@ export default function Viewer({
 
               setScanComplete(true);
               setSlicesDone(dims[2]);
+              setCursor({ i: Math.floor(dims[0] / 2), j: Math.floor(dims[1] / 2), k: 0 });
             }
           }
 

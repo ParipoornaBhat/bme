@@ -22,6 +22,31 @@ export const dynamic = "force-dynamic";
 
 const SHOW_NAMES = process.env.SHOW_SOURCE_NAMES === "true";
 
+type CaseOrId = string | { id: string; cls?: string };
+
+function compareCaseIds(a: CaseOrId, b: CaseOrId): number {
+  const idA = typeof a === "string" ? a : a.id;
+  const idB = typeof b === "string" ? b : b.id;
+  const clsA = typeof a === "string" ? undefined : a.cls;
+  const clsB = typeof b === "string" ? undefined : b.cls;
+
+  const isBme = (id: string, cls?: string) => {
+    if (cls === "bme") return true;
+    if (cls === "non_bme") return false;
+    return id.startsWith("BME-");
+  };
+
+  const bmeA = isBme(idA, clsA);
+  const bmeB = isBme(idB, clsB);
+  if (bmeA !== bmeB) {
+    return bmeA ? -1 : 1;
+  }
+
+  const numA = parseInt(idA.replace(/\D+/g, ""), 10) || 0;
+  const numB = parseInt(idB.replace(/\D+/g, ""), 10) || 0;
+  return numA !== numB ? numA - numB : idA.localeCompare(idB);
+}
+
 async function reviewHandler() {
   const scans = await db.select().from(reviewScan);
   const mainAnnotations = await db
@@ -103,6 +128,8 @@ async function reviewHandler() {
       reviewedBy: reviewsMap.get(id) || [],
     };
   });
+
+  cases.sort(compareCaseIds);
 
   return NextResponse.json({
     cases,
@@ -224,6 +251,8 @@ export async function GET() {
       reviewedBy: reviewsMap.get(id) || [],
     };
   });
+
+  cases.sort(compareCaseIds);
 
   return NextResponse.json({
     cases,

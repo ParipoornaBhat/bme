@@ -13,6 +13,7 @@ type Case = {
   id: string;
   cls: "bme" | "non_bme";
   assignedTo: string;
+  annotatedBy?: string | null;
   isOverlap: boolean;
   isotropic: boolean;
   slices: number;
@@ -327,72 +328,79 @@ function AnnotatePageContent() {
                 </div>
 
                 <div className="max-h-[min(calc(100vh_-_250px),1100px)] space-y-1 overflow-y-auto rounded-lg border border-border p-1 lg:max-h-none lg:min-h-0 lg:flex-1">
-                  {visible.map((c) => (
-                    <button
-                      key={c.id}
-                      onClick={() => handleSelectCase(c.id)}
-                      title={c.sourceName ?? undefined}
-                      className={`flex w-full items-center gap-2 rounded-md px-2.5 py-2 text-left text-sm transition cursor-pointer ${
-                        selected === c.id ? "bg-accent" : "hover:bg-accent/50"
-                      }`}
-                    >
-                      {c.annotated ? (
-                        <CheckCircle2 className="h-4 w-4 shrink-0 text-emerald-500" />
-                      ) : !isReview && ledger[c.id] ? (
-                        <Download className="h-4 w-4 shrink-0 text-amber-500" />
-                      ) : (
-                        <Circle className="h-4 w-4 shrink-0 text-muted-foreground/40" />
-                      )}
-                      <span className="flex-1">
-                        <span className="font-medium tabular-nums">{c.id}</span>
-                        {!isReview && ledger[c.id]?.annotator && (
-                          <span className="block text-[10px] leading-tight text-muted-foreground">
-                            {c.annotated ? "by " : "ask "}{ledger[c.id].annotator}
+                  {visible.map((c) => {
+                    const owner = (c.annotatedBy || c.assignedTo || "").trim();
+                    const firstName = owner ? (owner.split("_")[0] || owner).split(" ")[0] : "";
+                    return (
+                      <button
+                        key={c.id}
+                        onClick={() => handleSelectCase(c.id)}
+                        title={c.sourceName ?? undefined}
+                        className={`flex w-full items-center gap-2 rounded-md px-2.5 py-2 text-left text-sm transition cursor-pointer ${
+                          selected === c.id ? "bg-accent" : "hover:bg-accent/50"
+                        }`}
+                      >
+                        {c.annotated ? (
+                          <CheckCircle2 className="h-4 w-4 shrink-0 text-emerald-500" />
+                        ) : !isReview && ledger[c.id] ? (
+                          <Download className="h-4 w-4 shrink-0 text-amber-500" />
+                        ) : (
+                          <Circle className="h-4 w-4 shrink-0 text-muted-foreground/40" />
+                        )}
+                        <span className="flex-1 min-w-0">
+                          <span className="font-medium tabular-nums">{c.id}</span>
+                          {owner ? (
+                            <span
+                              title={`Annotated by ${owner}`}
+                              className="block truncate text-[10px] leading-tight text-muted-foreground"
+                            >
+                              {firstName}
+                            </span>
+                          ) : null}
+                        </span>
+                        {c.reviewedBy && c.reviewedBy.length > 0 && (
+                          <span className="flex items-center gap-0.5 shrink-0">
+                            {c.reviewedBy.map((rb, idx) => {
+                              const statusText =
+                                rb.status === "reviewed_with_edits"
+                                  ? `Reviewed with edits by ${rb.reviewer}`
+                                  : `Reviewed by ${rb.reviewer}`;
+                              const initial = rb.reviewer ? rb.reviewer.charAt(0).toUpperCase() : "R";
+                              return (
+                                <span
+                                  key={idx}
+                                  title={statusText}
+                                  className={`inline-flex h-4 w-4 shrink-0 items-center justify-center rounded-full text-[10px] font-bold leading-none ${
+                                    rb.status === "reviewed_with_edits"
+                                      ? "bg-amber-500/20 text-amber-500 border border-amber-500/40"
+                                      : "bg-emerald-500/20 text-emerald-500 border border-emerald-500/40"
+                                  }`}
+                                >
+                                  {initial}
+                                </span>
+                              );
+                            })}
                           </span>
                         )}
-                      </span>
-                      {c.reviewedBy && c.reviewedBy.length > 0 && (
-                        <span className="flex items-center gap-0.5 shrink-0">
-                          {c.reviewedBy.map((rb, idx) => {
-                            const statusText =
-                              rb.status === "reviewed_with_edits"
-                                ? `Reviewed with edits by ${rb.reviewer}`
-                                : `Reviewed by ${rb.reviewer}`;
-                            const initial = rb.reviewer ? rb.reviewer.charAt(0).toUpperCase() : "R";
-                            return (
-                              <span
-                                key={idx}
-                                title={statusText}
-                                className={`inline-flex h-4 w-4 shrink-0 items-center justify-center rounded-full text-[10px] font-bold leading-none ${
-                                  rb.status === "reviewed_with_edits"
-                                    ? "bg-amber-500/20 text-amber-500 border border-amber-500/40"
-                                    : "bg-emerald-500/20 text-emerald-500 border border-emerald-500/40"
-                                }`}
-                              >
-                                {initial}
-                              </span>
-                            );
-                          })}
-                        </span>
-                      )}
-                      {!isReview && c.flag && (
-                        <span title={`Flagged: ${c.flag.reason || "Not Sure"}`}>
-                          <Flag className="h-3.5 w-3.5 shrink-0 fill-amber-400 text-amber-400" />
-                        </span>
-                      )}
-                      {c.isotropic && (
-                        <span className="rounded bg-muted px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
-                          Iso
-                        </span>
-                      )}
-                      <span
-                        className={`h-2 w-2 shrink-0 rounded-full ${
-                          c.cls === "bme" ? "bg-rose-500" : "bg-slate-400"
-                        }`}
-                        title={c.cls === "bme" ? "BME positive" : "No BME"}
-                      />
-                    </button>
-                  ))}
+                        {!isReview && c.flag && (
+                          <span title={`Flagged: ${c.flag.reason || "Not Sure"}`}>
+                            <Flag className="h-3.5 w-3.5 shrink-0 fill-amber-400 text-amber-400" />
+                          </span>
+                        )}
+                        {c.isotropic && (
+                          <span className="rounded bg-muted px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+                            Iso
+                          </span>
+                        )}
+                        <span
+                          className={`h-2 w-2 shrink-0 rounded-full ${
+                            c.cls === "bme" ? "bg-rose-500" : "bg-slate-400"
+                          }`}
+                          title={c.cls === "bme" ? "BME positive" : "No BME"}
+                        />
+                      </button>
+                    );
+                  })}
                   {casesState === "loading" && (
                     <p className="p-4 text-center text-xs text-muted-foreground">Loading cases…</p>
                   )}
