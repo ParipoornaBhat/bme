@@ -26,7 +26,8 @@ import {
   ChevronRight, 
   UserCircle,
   Loader2,
-  History
+  History,
+  Server
 } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
 
@@ -219,6 +220,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
         { name: "Annotate", href: "/annotate", icon: PenTool },
         { name: "Activities", href: "/activities", icon: History },
         { name: "Training", href: "/training", icon: Cpu },
+        { name: "Training (advanced)", href: "/training/advanced", icon: Server },
         { name: "Model Results", href: "/results", icon: Activity },
         { name: "Storage", href: "/storage", icon: HardDrive },
         { name: "Users", href: "/users", icon: Users, permission: "users:view" },
