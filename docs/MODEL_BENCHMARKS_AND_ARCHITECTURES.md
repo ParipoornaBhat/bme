@@ -1,6 +1,6 @@
 # BME MRI Segmentation & Detection — Model Architectures & Benchmark Report
 
-> **Generated:** 2026-11-11 07:06 UTC | **Dataset Cohort:** De-identified knee MRI (`up to 121 volumes: 61 BME+, 60 Control`) | **PHI Status:** Zero patient identifiers or file paths stored.
+> **Generated:** 2026-11-15 02:30 UTC | **Dataset Cohort:** De-identified knee MRI (`145 volumes: 85 BME+, 60 Control`) | **PHI Status:** Zero patient identifiers or file paths stored.
 
 ---
 
@@ -8,9 +8,9 @@
 
 This repository evaluates **6 architectures across 3 task pipelines** (`2D Classification`, `2D Segmentation`, `3D Volumetric Segmentation`) using patient-grouped cross-validation:
 
-- **Active Production Weights (`data/results3d/`, Version #37):** `C-Net + Dual-Channel 3D U-Net` (`121` scans, `50` epochs, `128x128x16`) — **Bone Dice `0.817`**, **Positives-Only BME Dice `0.229`**, **Control Specificity `96.7%`**, **Presence Accuracy `107/121 (88.4%)`**, `0.1` FP/case.
+- **Active Production Weights (`data/results3d/`, Version #43):** `OrthoGate-MedNeXt3D` (`145` scans, `50` epochs, `128x128x16`) — **Bone Dice `0.841 ± 0.017`**, **Positives-Only BME Dice `0.479 ± 0.038`** (+109% vs. v37), **Overall BME Dice `0.606 ± 0.049`**, **Lesion Sensitivity on Positives `60.3% ± 7.6%`** (+19.4% absolute gain), **Edema Recall `62.3%`** (vs. 17.3% in v37), **Presence Accuracy `127/145 (87.6%)`**, and **Control Specificity `78.3% ± 12.6%`** with `0.42` FP/neg scan.
+- **Previous Production Baseline (Version #37):** `C-Net + Dual-Channel 3D U-Net` (`121` scans, `50` epochs, `128x128x16`) — **Bone Dice `0.817`**, **Positives-Only BME Dice `0.229`**, **Control Specificity `96.7%`**, **Presence Accuracy `107/121 (88.4%)`**, `0.1` FP/case. Had an overly aggressive hard C-Net binary gate wiping subtle lesions.
 - **Diagnosed Collapse Run (`Version #41`):** Raised epochs to `65` with `BatchNorm3d` at `batch=4` and hard binary C-Net gating; **Fold 0 reached `0.324` Pos BME Dice (`11/12 TP`)** while **Folds 1–4 collapsed (`TP=0`)** due to `BatchNorm3d` batch-size shift, unclipped AMP gradient spikes (`6–9` skipped steps/fold), and binary gatekeeper cliffs.
-- **New Flagship Architecture Currently Training (`OrthoGate-MedNeXt3D`, Live Kaggle Run `run_20261111_062858`):** Directly addresses every failure mode of `Version #41` (`5x5x3` MedNeXt + `3D ASPP` + `Bone-Guided Spatial Attention` + `Deep Supervision` + `GroupNorm` + `GradClip 1.0` + `Tversky beta=0.7` + `Soft C-Net Ramp` + `3D Gaussian Stitching` + `3x3x1 Closing & Hysteresis`) while compressing weights to **`0.809 MB / fold`** (`3.55 MB` 5-fold zip).
 
 ---
 
@@ -120,9 +120,10 @@ This repository evaluates **6 architectures across 3 task pipelines** (`2D Class
 
 | Run Key | Status | Arch | Cases (`Pos/Neg`) | Patch / Norm | Ep | Bone Dice | Pos BME Dice | All BME Dice | Pos Sens | Control TNR | FP/Case | Presence |
 | :--- | :--- | :--- | :--- | :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
-| `3d-run_20261111_062858` (Version #42 (Training Live on Kaggle T4 x2)) | **RUNNING** | `orthogate_mednext` | 121 (61/60) | `128x128x16 / group` | 65 | — | — | — | — | — | — | — |
+| `3d-run_20261114_180505` (Version #43 (145 cases, Active Production)) | **ACTIVE** | `orthogate_mednext` | 145 (85/60) | `128x128x16 / group` | 50 | **0.841** | **0.479** | **0.606** | **60.3%** | 78.3% | 1.23 (0.42 neg) | **127/145 (87.6%)** |
+| `3d-run_20261111_062858` (Version #42) | superseded | `orthogate_mednext` | 121 (61/60) | `128x128x16 / group` | 65 | — | — | — | — | — | — | — |
 | `3d-run_20261110_181938` (Version #41 (Folds 1-4 BatchNorm Collapse)) | completed | `cnet_dual_unet` | 121 (61/60) | `128x128x16 / batch` | 65 | 0.833 | 0.065 | 0.512 | 8.0% | 96.7% | 0.0 | 69/121 |
-| `3d-run_20261110_135412` (Version #37 (Active Production)) | **ACTIVE** | `cnet_dual_unet` | 121 (61/60) | `128x128x16 / batch` | 50 | 0.817 | 0.229 | 0.595 | 41.0% | 96.7% | 0.1 | 107/121 |
+| `3d-run_20261110_135412` (Version #37 (Previous Production Baseline)) | completed | `cnet_dual_unet` | 121 (61/60) | `128x128x16 / batch` | 50 | 0.817 | 0.229 | 0.595 | 41.0% | 96.7% | 0.1 | 107/121 |
 | `3d-run_20261110_075814` | completed | `3d-unet` | 121 (61/60) | `96x96x12 / instance` | 50 | 0.720 | 0.390 | 0.237 | 65.9% | 8.3% | 8.2 | 66/121 |
 | `3d-run_20261109_170539` | completed | `3d-unet` | 121 (61/60) | `96x96x12 / instance` | 40 | 0.542 | 0.034 | 0.393 | 15.8% | 80.0% | 33.8 | 56/121 |
 | `3d-run_20261109_062316` | completed | `3d-unet` | 121 (61/60) | `96x96x12 / instance` | 40 | 0.396 | — | 0.496 | — | — | 0.0 | 60/121 |
@@ -147,9 +148,22 @@ This repository evaluates **6 architectures across 3 task pipelines** (`2D Class
 
 ## 4. Detailed Per-Fold Breakdowns (Key Milestones)
 
-### Version #37 — Active Production (`cnet_dual_unet`, 121 cases)
+### Version #43 — Active Production (`orthogate_mednext`, 145 cases)
 
-- **Note:** Best 121-case clinical balance served in app (Version #37): 107/121 presence accuracy, 96.7% control specificity, Pos BME Dice 0.229; missed 12/61 borderline positives due to hard C-Net gate.
+- **Note:** Active production model trained across 145 cases (85 BME+, 60 Control; 144 patients, zero leak). Soft C-Net ramp gatekeeper, 5x5x3 MedNeXt anisotropic blocks with GroupNorm, 3D ASPP bottleneck, Bone-Guided spatial attention, and deep supervision. Achieves 127/145 (87.6%) presence accuracy, 0.479 Pos BME Dice (+109% vs. v37), 60.3% lesion sensitivity, and 78.3% control specificity.
+
+| Fold | Epochs | Final Loss | Bone Dice | Pos BME Dice | Overall BME Dice | Sens (Pos) | Control TNR | FP / Case | AMP Skip % |
+| :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
+| Fold 0 | 50 | 2.4870 | 0.822 | 0.531 | 0.619 | 67.3% | 75.0% | 1.27 | 0.08% |
+| Fold 1 | 50 | 2.5629 | 0.841 | 0.428 | 0.595 | 48.2% | 83.3% | 0.69 | 0.07% |
+| Fold 2 | 50 | 2.4421 | 0.836 | 0.493 | 0.530 | 61.1% | 58.3% | 1.55 | 0.08% |
+| Fold 3 | 50 | 2.4906 | 0.870 | 0.482 | 0.662 | 66.1% | 91.7% | 1.03 | 0.07% |
+| Fold 4 | 50 | 2.4385 | 0.837 | 0.463 | 0.622 | 58.9% | 83.3% | 1.61 | 0.07% |
+| **Mean** | **50** | **2.4842** | **0.841 ± 0.017** | **0.479 ± 0.038** | **0.606 ± 0.049** | **60.3% ± 7.6%** | **78.3% ± 12.6%** | **1.23** | **0.07%** |
+
+### Version #37 — Previous Production Baseline (`cnet_dual_unet`, 121 cases)
+
+- **Note:** Previous 121-case baseline: 107/121 presence accuracy, 96.7% control specificity, Pos BME Dice 0.229; missed 12/61 borderline positives due to hard C-Net gate.
 
 | Fold | Epochs | Final Loss | Bone Dice | Pos BME Dice | Overall BME Dice | Sens (Pos) | Control TNR | FP / Case | AMP Skip |
 | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
@@ -197,12 +211,11 @@ This repository evaluates **6 architectures across 3 task pipelines** (`2D Class
 
 ---
 
-## 5. Active Training Run (`OrthoGate-MedNeXt3D`)
+## 5. Production Model Deployment (`OrthoGate-MedNeXt3D`, Version #43)
 
-- **Run Key:** `3d-run_20261111_062858`
-- **Status:** `RUNNING` on `Kaggle T4 x2` (`121` scans: `61` BME+ / `60` Control, `5` folds × `65` epochs)
-- **Model Spec:** `base_channels=20`, `double_conv=True`, `aniso=True`, `norm_type=group`, `patch=128x128x16`, `spacing=0.5,0.5,3.0 mm`
+- **Run Key:** `3d-run_20261114_180505`
+- **Status:** `ACTIVE PRODUCTION` on `Kaggle T4 x2` (`145` scans: `85` BME+ / `60` Control, `5` folds × `50` epochs, 144 patients, zero leak)
+- **Model Spec:** `base_channels=16`, `double_conv=True`, `aniso=True`, `norm_type=group`, `patch=128x128x16`, `spacing=0.5,0.5,3.0 mm`
 - **Loss & Stability:** `Tversky(alpha=0.3, beta=0.7)` + `Focal` + `0.3 * Deep Supervision` + `0.5 * C-Net BCE` + `clip_grad_norm_(1.0)`
 - **Inference & Gating:** `Soft C-Net Ramp`, `Gaussian Patch Stitching`, `3x3x1 Intra-Osseous Closing`, `Confidence Hysteresis (>=25 vox @ peak>=0.65)`, `Flip TTA`, `5-Fold Prob Ensemble`
-
-*Once this Kaggle job finishes and imports results, re-run `pnpm --filter @bme/db db:seed-benchmarks` and refresh this report before pushing final metrics to GitHub.*
+- **Production Artifacts:** Active in `data/results3d/` (`fold_0.pt` through `fold_4.pt`, `metrics.json`, `run_status.json`). Seeded into PostgreSQL via `pnpm --filter @bme/db db:seed-benchmarks`.
