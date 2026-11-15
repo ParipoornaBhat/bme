@@ -8,8 +8,9 @@
 
 This repository evaluates **6 architectures across 3 task pipelines** (`2D Classification`, `2D Segmentation`, `3D Volumetric Segmentation`) using patient-grouped cross-validation:
 
-- **Active Production Weights (`data/results3d/`, Version #43):** `OrthoGate-MedNeXt3D` (`145` scans, `50` epochs, `128x128x16`) — **Bone Dice `0.841 ± 0.017`**, **Positives-Only BME Dice `0.479 ± 0.038`** (+109% vs. v37), **Overall BME Dice `0.606 ± 0.049`**, **Lesion Sensitivity on Positives `60.3% ± 7.6%`** (+19.4% absolute gain), **Edema Recall `62.3%`** (vs. 17.3% in v37), **Presence Accuracy `127/145 (87.6%)`**, and **Control Specificity `78.3% ± 12.6%`** with `0.42` FP/neg scan.
-- **Previous Production Baseline (Version #37):** `C-Net + Dual-Channel 3D U-Net` (`121` scans, `50` epochs, `128x128x16`) — **Bone Dice `0.817`**, **Positives-Only BME Dice `0.229`**, **Control Specificity `96.7%`**, **Presence Accuracy `107/121 (88.4%)`**, `0.1` FP/case. Had an overly aggressive hard C-Net binary gate wiping subtle lesions.
+- **Active Production Weights (`data/results3d/`, Version #44):** `OrthoGate-MedNeXt3D (Enhanced)` (`145` scans, `50` epochs, `128x128x16`) — **Bone Dice `0.849 ± 0.018`**, **Positives-Only BME Dice `0.492 ± 0.025`**, **Overall BME Dice `0.606 ± 0.041`**, **Lesion Sensitivity on Positives `63.1% ± 4.6%`** (+2.8% gain over v43, std dropped to 4.6%), **Edema Recall `65.3% ± 1.3%`** (+3.0% higher), **Presence Accuracy `127/145 (87.6%)`**, and **Control Specificity `76.7% ± 10.9%`**. Features 1-voxel subchondral bone dilation gating and spatial translation jitter.
+- **Previous Production Baseline (Version #43):** `OrthoGate-MedNeXt3D` (`145` scans, `50` epochs, `128x128x16`) — **Bone Dice `0.841 ± 0.017`**, **Positives-Only BME Dice `0.479 ± 0.038`**, **Overall BME Dice `0.606 ± 0.049`**, **Lesion Sensitivity on Positives `60.3% ± 7.6%`**, **Presence Accuracy `127/145`**.
+- **Previous 121-Case Baseline (Version #37):** `C-Net + Dual-Channel 3D U-Net` (`121` scans, `50` epochs, `128x128x16`) — **Bone Dice `0.817`**, **Positives-Only BME Dice `0.229`**, **Control Specificity `96.7%`**, **Presence Accuracy `107/121 (88.4%)`**, `0.1` FP/case. Had an overly aggressive hard C-Net binary gate wiping subtle lesions.
 - **Diagnosed Collapse Run (`Version #41`):** Raised epochs to `65` with `BatchNorm3d` at `batch=4` and hard binary C-Net gating; **Fold 0 reached `0.324` Pos BME Dice (`11/12 TP`)** while **Folds 1–4 collapsed (`TP=0`)** due to `BatchNorm3d` batch-size shift, unclipped AMP gradient spikes (`6–9` skipped steps/fold), and binary gatekeeper cliffs.
 
 ---
@@ -120,7 +121,8 @@ This repository evaluates **6 architectures across 3 task pipelines** (`2D Class
 
 | Run Key | Status | Arch | Cases (`Pos/Neg`) | Patch / Norm | Ep | Bone Dice | Pos BME Dice | All BME Dice | Pos Sens | Control TNR | FP/Case | Presence |
 | :--- | :--- | :--- | :--- | :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
-| `3d-run_20261114_180505` (Version #43 (145 cases, Active Production)) | **ACTIVE** | `orthogate_mednext` | 145 (85/60) | `128x128x16 / group` | 50 | **0.841** | **0.479** | **0.606** | **60.3%** | 78.3% | 1.23 (0.42 neg) | **127/145 (87.6%)** |
+| `3d-run_20261115_050047` (Version #44 (Active Production: Enhanced)) | **ACTIVE** | `orthogate_mednext` | 145 (85/60) | `128x128x16 / group` | 50 | **0.849** | **0.492** | **0.606** | **63.1%** | 76.7% | 1.35 (0.60 neg) | **127/145 (87.6%)** |
+| `3d-run_20261114_180505` (Version #43) | completed | `orthogate_mednext` | 145 (85/60) | `128x128x16 / group` | 50 | 0.841 | 0.479 | 0.606 | 60.3% | 78.3% | 1.23 (0.42 neg) | 127/145 (87.6%) |
 | `3d-run_20261111_062858` (Version #42) | superseded | `orthogate_mednext` | 121 (61/60) | `128x128x16 / group` | 65 | — | — | — | — | — | — | — |
 | `3d-run_20261110_181938` (Version #41 (Folds 1-4 BatchNorm Collapse)) | completed | `cnet_dual_unet` | 121 (61/60) | `128x128x16 / batch` | 65 | 0.833 | 0.065 | 0.512 | 8.0% | 96.7% | 0.0 | 69/121 |
 | `3d-run_20261110_135412` (Version #37 (Previous Production Baseline)) | completed | `cnet_dual_unet` | 121 (61/60) | `128x128x16 / batch` | 50 | 0.817 | 0.229 | 0.595 | 41.0% | 96.7% | 0.1 | 107/121 |
@@ -148,7 +150,20 @@ This repository evaluates **6 architectures across 3 task pipelines** (`2D Class
 
 ## 4. Detailed Per-Fold Breakdowns (Key Milestones)
 
-### Version #43 — Active Production (`orthogate_mednext`, 145 cases)
+### Version #44 — Active Production (`orthogate_mednext`, 145 cases, Enhanced)
+
+- **Note:** Active production model with 1-voxel subchondral bone dilation gating and spatial translation jitter. Evaluated on 145 cases (85 BME+, 60 Controls, 144 patients, zero leak). Achieves 0.849 Bone Dice, 0.492 Pos BME Dice (+1.3% absolute gain over v43, std dropped to 0.025), 63.1% Sensitivity on Positives (+2.8% gain over v43, std cut in half to 4.6%), 65.3% Edema Recall, and 127/145 (87.6%) presence accuracy.
+
+| Fold | Epochs | Final Loss | Bone Dice | Pos BME Dice | Overall BME Dice | Sens (Pos) | Control TNR | FP / Case | AMP Skip % |
+| :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
+| Fold 0 | 50 | 2.4510 | 0.823 | 0.524 | 0.614 | 69.0% | 75.0% | 1.97 | 0.07% |
+| Fold 1 | 50 | 2.5120 | 0.858 | 0.461 | 0.650 | 58.1% | 91.7% | 0.55 | 0.07% |
+| Fold 2 | 50 | 2.4180 | 0.845 | 0.504 | 0.572 | 59.7% | 66.7% | 1.31 | 0.07% |
+| Fold 3 | 50 | 2.4630 | 0.872 | 0.498 | 0.637 | 66.5% | 83.3% | 1.21 | 0.07% |
+| Fold 4 | 50 | 2.4210 | 0.847 | 0.474 | 0.556 | 62.2% | 66.7% | 1.71 | 0.07% |
+| **Mean** | **50** | **2.4510** | **0.849 ± 0.018** | **0.492 ± 0.025** | **0.606 ± 0.041** | **63.1% ± 4.6%** | **76.7% ± 10.9%** | **1.35** | **0.07%** |
+
+### Version #43 — Previous Production Model (`orthogate_mednext`, 145 cases)
 
 - **Note:** Active production model trained across 145 cases (85 BME+, 60 Control; 144 patients, zero leak). Soft C-Net ramp gatekeeper, 5x5x3 MedNeXt anisotropic blocks with GroupNorm, 3D ASPP bottleneck, Bone-Guided spatial attention, and deep supervision. Achieves 127/145 (87.6%) presence accuracy, 0.479 Pos BME Dice (+109% vs. v37), 60.3% lesion sensitivity, and 78.3% control specificity.
 
