@@ -1,8 +1,8 @@
 import { NextResponse } from "next/server";
 import fs from "node:fs";
 import path from "node:path";
-import { eq } from "drizzle-orm";
-import { db, caseAnnotation } from "@bme/db";
+import { eq, and, isNull } from "drizzle-orm";
+import { db, caseAnnotation, caseOwner, ownerForCase, caseReview } from "@bme/db";
 import { isReviewMode } from "~/lib/app-mode";
 import { reviewScan } from "~/lib/review-auth";
 import { readFlags } from "~/lib/flag-store";
@@ -27,9 +27,49 @@ async function reviewHandler() {
   const mainAnnotations = await db
     .select()
     .from(caseAnnotation)
-    .where(eq(caseAnnotation.annotator, "_main"));
+    .where(
+      and(
+        eq(caseAnnotation.annotator, "_main"),
+        isNull(caseAnnotation.deletedAt),
+      ),
+    );
 
   const mainMap = new Map(mainAnnotations.map((m) => [m.caseId, m]));
+
+  let ownerMap = new Map<string, string | null>();
+  try {
+    const owners = await db
+      .select({ caseId: caseOwner.caseId, annotatedBy: caseOwner.annotatedBy })
+      .from(caseOwner);
+    ownerMap = new Map(owners.map((o) => [o.caseId, o.annotatedBy]));
+  } catch {
+    ownerMap = new Map();
+  }
+
+  let reviewsMap = new Map<string, { reviewer: string; status: string; locked: boolean }[]>();
+  try {
+    const lockedReviews = await db
+      .select({
+        caseId: caseReview.caseId,
+        reviewer: caseReview.reviewer,
+        status: caseReview.status,
+        locked: caseReview.locked,
+      })
+      .from(caseReview)
+      .where(eq(caseReview.locked, true));
+
+    for (const r of lockedReviews) {
+      const list = reviewsMap.get(r.caseId) || [];
+      list.push({
+        reviewer: r.reviewer,
+        status: r.status,
+        locked: r.locked,
+      });
+      reviewsMap.set(r.caseId, list);
+    }
+  } catch {
+    reviewsMap = new Map();
+  }
 
   const cases = scans.map((s) => {
     const id = s.caseId;
@@ -38,10 +78,18 @@ async function reviewHandler() {
     const annotated = Boolean(main);
     const savedAt = main ? (main.updatedAt || main.createdAt || new Date()).toISOString() : null;
 
+    let owner: string | null = null;
+    if (ownerMap.has(id)) {
+      owner = ownerMap.get(id) ?? null;
+    } else if (typeof ownerForCase === "function") {
+      owner = ownerForCase(id) ?? null;
+    }
+
     return {
       id,
       cls: isBme ? "bme" : "non_bme",
-      assignedTo: "",
+      assignedTo: owner ?? "",
+      annotatedBy: owner ?? null,
       isOverlap: false,
       isotropic: false,
       slices: 0,
@@ -52,13 +100,14 @@ async function reviewHandler() {
       savedAt,
       flag: null,
       sourceName: null,
+      reviewedBy: reviewsMap.get(id) || [],
     };
   });
 
   return NextResponse.json({
     cases,
     showSourceNames: false,
-    annotators: [],
+    annotators: [...new Set(cases.map((c) => c.assignedTo).filter(Boolean))].sort(),
     counts: {
       total: cases.length,
       annotated: cases.filter((c) => c.annotated).length,
@@ -97,6 +146,43 @@ export async function GET() {
     deid.map((r) => [r.case_id, (r.source_archive ?? "").split("/").pop() ?? ""]),
   );
 
+  let ownerMap = new Map<string, string | null>();
+  let dbAvailable = false;
+  try {
+    const owners = await db
+      .select({ caseId: caseOwner.caseId, annotatedBy: caseOwner.annotatedBy })
+      .from(caseOwner);
+    ownerMap = new Map(owners.map((o) => [o.caseId, o.annotatedBy]));
+    dbAvailable = true;
+  } catch {
+    dbAvailable = false;
+  }
+
+  let reviewsMap = new Map<string, { reviewer: string; status: string; locked: boolean }[]>();
+  try {
+    const lockedReviews = await db
+      .select({
+        caseId: caseReview.caseId,
+        reviewer: caseReview.reviewer,
+        status: caseReview.status,
+        locked: caseReview.locked,
+      })
+      .from(caseReview)
+      .where(eq(caseReview.locked, true));
+
+    for (const r of lockedReviews) {
+      const list = reviewsMap.get(r.caseId) || [];
+      list.push({
+        reviewer: r.reviewer,
+        status: r.status,
+        locked: r.locked,
+      });
+      reviewsMap.set(r.caseId, list);
+    }
+  } catch {
+    reviewsMap = new Map();
+  }
+
   const flags = readFlags("annotations3d_flags.json");
   const cases = worklist.map((r) => {
     const id = r.case_id;
@@ -112,10 +198,18 @@ export async function GET() {
       }
     }
 
+    let owner: string | null = null;
+    if (dbAvailable && ownerMap.has(id)) {
+      owner = ownerMap.get(id) ?? null;
+    } else if (typeof ownerForCase === "function") {
+      owner = ownerForCase(id) ?? null;
+    }
+
     return {
       id,
       cls: r.class,                       // "bme" | "non_bme"
-      assignedTo: r.assigned_to || "",
+      assignedTo: owner ?? "",
+      annotatedBy: owner ?? null,
       isOverlap: r.is_overlap === "True",
       isotropic: r.isotropic === "True",
       slices: Number(r.n_slices || 0),
@@ -127,6 +221,7 @@ export async function GET() {
       flag: flags[id] ?? null,
       // null unless the local flag is on
       sourceName: SHOW_NAMES ? nameFor.get(id) ?? null : null,
+      reviewedBy: reviewsMap.get(id) || [],
     };
   });
 

@@ -46,9 +46,11 @@ import {
 import { toast } from "sonner";
 import { useSession } from "~/lib/auth-client";
 import { isReviewMode } from "~/lib/app-mode";
+import { streamNifti, getCachedVolume, prefetchVolume, cancelPrefetch, type StreamInfo } from "~/lib/stream-volume";
 import { useReviewIdentity } from "./useReviewIdentity";
 import { useCloudSync } from "./useCloudSync";
-import AnnotatorPicker, { type AnnotatorItem, type ReviewEditInfo } from "./AnnotatorPicker";
+import AnnotatorPicker, { type AnnotatorItem, type ReviewEditInfo, type ReviewItem } from "./AnnotatorPicker";
+import ReviewMarkButton from "./ReviewMarkButton";
 import Render3D from "./Render3D";
 import CollaborationMasterPanel from "~/components/collaborate/CollaborationMasterPanel";
 import CollaborationViewerHeader from "~/components/collaborate/CollaborationViewerHeader";
@@ -61,6 +63,7 @@ import {
   hiddenLabelsForView,
   OverlayControls,
 } from "~/lib/useOverlayView";
+import OverlayQuickControls from "./OverlayQuickControls";
 import {
   useCollaboration,
   type Participant,
@@ -78,10 +81,14 @@ import { edgePanStep, useAutoPanSetting, useSpaceHeld } from "~/lib/view-pan";
 import { isInTorch, type TorchState } from "~/lib/torch";
 import { renderSmoothLabels, scratchCanvas, smoothScale, type Rgba } from "~/lib/smooth-labels";
 import {
+  combineRegions,
   dragBox,
+  findRegionAt,
+  findRegionsInBox,
   handleAt,
   placeRegion,
   sameBox,
+  sameRegion,
   selectRegion,
   HANDLE_CURSOR,
   type Box,
@@ -376,6 +383,7 @@ export default function Viewer({
   focus: focusFromPage,
   onPrevCase,
   onNextCase,
+  nextCaseId,
 }: {
   caseId: string;
   onSaved?: () => void;
@@ -392,8 +400,11 @@ export default function Viewer({
   /** Neighbouring cases in the page's list; absent at either end. */
   onPrevCase?: () => void;
   onNextCase?: () => void;
+  nextCaseId?: string;
 }) {
   const isReview = isReviewMode();
+  const [scanComplete, setScanComplete] = useState(!isReview);
+  const [slicesDone, setSlicesDone] = useState(0);
   const { data: session } = useSession();
   const { user: reviewUser } = useReviewIdentity(isReview);
   const me = isReview
@@ -404,8 +415,14 @@ export default function Viewer({
 
   const [annotatorsList, setAnnotatorsList] = useState<AnnotatorItem[]>([]);
   const [reviewInfo, setReviewInfo] = useState<ReviewEditInfo | null>(null);
+  const [reviewsList, setReviewsList] = useState<ReviewItem[]>([]);
+  const [myReview, setMyReview] = useState<ReviewItem | null>(null);
+  const [annotatedByAll, setAnnotatedByAll] = useState<string[]>([]);
   const [pickedAnnotator, setPickedAnnotator] = useState<string>("");
   const baseAnnotatorRef = useRef<string>("");
+
+  const isReviewLocked = Boolean(isReview && myReview?.locked);
+  const lockTooltip = "Marked as reviewed. Unmark to edit.";
 
   const [vol, setVol] = useState<Vol | null>(null);
   const [labels, setLabels] = useState<Uint8Array | null>(null);
@@ -434,17 +451,33 @@ export default function Viewer({
   const lastPointerPosRef = useRef<{ plane: Plane; a: number; b: number } | null>(null);
   const torchRafRef = useRef<number | null>(null);
 
-  const outline = useRef<[number, number][]>([]);
+  const pencilTrace = useRef<[number, number][]>([]);
   const [outlineTick, setOutlineTick] = useState(0);
   // Move tool: the selected region, where it sits now, and what it covered.
   // `under` holds the label each touched voxel had before the region landed
   // there (255 = not touched yet), so moving it again puts those back.
   const moveSel = useRef<{
-    plane: Plane; region: Region; to: Box; stamped: Int32Array; under: Uint8Array;
+    plane: Plane;
+    regions: Region[];
+    combined: Region;
+    to: Box;
+    stamped: Int32Array;
+    under: Uint8Array;
   } | null>(null);
   const [moveTick, setMoveTick] = useState(0);
   const [moveAllSlices, setMoveAllSlices] = useState(false);
   const [moveCursorStyle, setMoveCursorStyle] = useState("crosshair");
+  const boxSelect = useRef<{
+    id: number;
+    plane: Plane;
+    startX: number;
+    startY: number;
+    currentX: number;
+    currentY: number;
+    mod: boolean;
+  } | null>(null);
+  const [boxSelecting, setBoxSelecting] = useState(false);
+  const [boxSelectTick, setBoxSelectTick] = useState(0);
   // Zoom is per view: you often want a lesion magnified in one plane while
   // keeping the others wide for context.
   const [zoom, setZoom] = useState<Record<Plane, number>>({ axial: 1, coronal: 1, sagittal: 1 });
@@ -507,7 +540,7 @@ export default function Viewer({
   const [dirty, setDirty] = useState(false);
   const [saving, setSaving] = useState(false);
   const [counts, setCounts] = useState<[number, number, number]>([0, 0, 0]);
-  const { opacity, view, setOpacity, setView, cycleView } = useOverlayView();
+  const { opacity, view, outline, setOpacity, setView, setOutline, cycleView } = useOverlayView();
   const cycleViewRef = useRef(cycleView);
   cycleViewRef.current = cycleView;
 
@@ -714,7 +747,9 @@ export default function Viewer({
   useEffect(() => {
     if (!dataReady) return;
     let cancelled = false;
+    const abortController = new AbortController();
     setBusy(true); setStatus("Loading scan…"); setLabels(null); setVol(null);
+    setScanComplete(!isReview); setSlicesDone(0);
     // The previous series' labels are about to be replaced; its live copy
     // stops here and the new one is joined once loaded.
     maskSyncRef.current?.leave();
@@ -743,49 +778,246 @@ export default function Viewer({
           return;
         }
         const query = pick && pick !== "primary" ? `?series=${encodeURIComponent(pick)}` : "";
-        const res = await fetch(withAccessRef.current(`/api/volume/${caseId}${query}`));
-        if (!res.ok) throw new Error((await res.json()).error ?? "load failed");
-        let buf = await res.arrayBuffer();
-        if (nifti.isCompressed(buf)) buf = nifti.decompress(buf) as ArrayBuffer;
-        if (!nifti.isNIFTI(buf)) throw new Error("not a NIfTI file");
+        const volumeUrl = withAccessRef.current(`/api/volume/${caseId}${query}`);
+        const cacheKey = pick && pick !== "primary" ? `${caseId}:${pick}` : caseId;
 
-        const hdr = nifti.readHeader(buf)!;
-        const raw = nifti.readImage(hdr, buf);
-        const dims: [number, number, number] = [hdr.dims[1], hdr.dims[2], hdr.dims[3]];
-        // pixDims[1..3] is mm per voxel. Our data is ~0.35 mm in-plane against
-        // 3-4 mm slices, so a coronal view is 432 voxels wide and 33 tall but
-        // roughly SQUARE in millimetres. Rendering by voxel count alone squashes
-        // it into a sliver — which is exactly what it looked like.
-        const spacing: [number, number, number] = [
-          Math.abs(hdr.pixDims?.[1]) || 1,
-          Math.abs(hdr.pixDims?.[2]) || 1,
-          Math.abs(hdr.pixDims?.[3]) || 1,
+        let buf: ArrayBuffer | null = null;
+        let hdr: any = null;
+        let dims: [number, number, number] = [1, 1, 1];
+        let spacing: [number, number, number] = [1, 1, 1];
+        let axes: Record<Plane, PlaneAxes> = {
+          axial: { slice: 2, h: 0, v: 1, flipH: false, flipV: false },
+          coronal: { slice: 1, h: 0, v: 2, flipH: false, flipV: false },
+          sagittal: { slice: 0, h: 1, v: 2, flipH: false, flipV: false },
+        };
+        let orient: [AxisEnds, AxisEnds, AxisEnds] = [
+          { atZero: "L", atMax: "R" },
+          { atZero: "P", atMax: "A" },
+          { atZero: "I", atMax: "S" },
         ];
-        const n = dims[0] * dims[1] * dims[2];
+        let data: Float32Array = new Float32Array(0);
+        let lo = 0;
+        let hi = 1;
+        let n = 0;
 
-        const ctor: Record<number, new (b: ArrayBuffer) => ArrayLike<number>> = {
-          2: Uint8Array, 4: Int16Array, 8: Int32Array,
-          16: Float32Array, 64: Float64Array, 512: Uint16Array, 768: Uint32Array,
-        } as never;
-        const Typed = ctor[hdr.datatypeCode] ?? Int16Array;
-        const src = new Typed(raw);
-        const data = new Float32Array(n);
-        for (let i = 0; i < n; i++) data[i] = Number(src[i]);
+        if (!isReview) {
+          const res = await fetch(volumeUrl);
+          if (!res.ok) throw new Error((await res.json()).error ?? "load failed");
+          let rawBuf = await res.arrayBuffer();
+          if (nifti.isCompressed(rawBuf)) rawBuf = nifti.decompress(rawBuf) as ArrayBuffer;
+          if (!nifti.isNIFTI(rawBuf)) throw new Error("not a NIfTI file");
 
-        const sample = new Float32Array(Math.min(n, 200_000));
-        const step = Math.max(1, Math.floor(n / sample.length));
-        for (let i = 0, s = 0; s < sample.length; i += step, s++) sample[s] = data[i];
-        sample.sort();
-        const lo = sample[Math.floor(sample.length * 0.01)];
-        const hi = sample[Math.floor(sample.length * 0.99)] || lo + 1;
+          buf = rawBuf;
+          hdr = nifti.readHeader(buf)!;
+          const raw = nifti.readImage(hdr, buf);
+          dims = [hdr.dims[1], hdr.dims[2], hdr.dims[3]];
+          spacing = [
+            Math.abs(hdr.pixDims?.[1]) || 1,
+            Math.abs(hdr.pixDims?.[2]) || 1,
+            Math.abs(hdr.pixDims?.[3]) || 1,
+          ];
+          n = dims[0] * dims[1] * dims[2];
 
-        // nifti-reader-js exposes the sform/qform-derived affine; fall back to
-        // an identity mapping if a file somehow lacks one.
-        const aff: number[][] =
-          (hdr as unknown as { affine?: number[][] }).affine ??
-          [[1, 0, 0, 0], [0, 1, 0, 0], [0, 0, 1, 0], [0, 0, 0, 1]];
-        const axes = deriveAxes(aff);
-        const orient = orientationEnds(aff);
+          const ctor: Record<number, new (b: ArrayBuffer) => ArrayLike<number>> = {
+            2: Uint8Array, 4: Int16Array, 8: Int32Array,
+            16: Float32Array, 64: Float64Array, 512: Uint16Array, 768: Uint32Array,
+          } as never;
+          const Typed = ctor[hdr.datatypeCode] ?? Int16Array;
+          const src = new Typed(raw);
+          data = new Float32Array(n);
+          for (let i = 0; i < n; i++) data[i] = Number(src[i]);
+
+          const sample = new Float32Array(Math.min(n, 200_000));
+          const step = Math.max(1, Math.floor(n / sample.length));
+          for (let i = 0, s = 0; s < sample.length; i += step, s++) sample[s] = data[i];
+          sample.sort();
+          lo = sample[Math.floor(sample.length * 0.01)];
+          hi = sample[Math.floor(sample.length * 0.99)] || lo + 1;
+
+          const aff: number[][] =
+            (hdr as unknown as { affine?: number[][] }).affine ??
+            [[1, 0, 0, 0], [0, 1, 0, 0], [0, 0, 1, 0], [0, 0, 0, 1]];
+          axes = deriveAxes(aff);
+          orient = orientationEnds(aff);
+
+          setScanComplete(true);
+          setSlicesDone(dims[2]);
+        } else {
+          // Review mode: check IndexedDB cache first
+          const cached = await getCachedVolume(cacheKey);
+          if (cached?.gz) {
+            let decompBuf = cached.gz;
+            if (nifti.isCompressed(decompBuf)) decompBuf = nifti.decompress(decompBuf) as unknown as ArrayBuffer;
+            if (nifti.isNIFTI(decompBuf)) {
+              buf = decompBuf;
+              hdr = nifti.readHeader(buf)!;
+              const raw = nifti.readImage(hdr, buf);
+              dims = [hdr.dims[1], hdr.dims[2], hdr.dims[3]];
+              spacing = [
+                Math.abs(hdr.pixDims?.[1]) || 1,
+                Math.abs(hdr.pixDims?.[2]) || 1,
+                Math.abs(hdr.pixDims?.[3]) || 1,
+              ];
+              n = dims[0] * dims[1] * dims[2];
+
+              const ctor: Record<number, new (b: ArrayBuffer) => ArrayLike<number>> = {
+                2: Uint8Array, 4: Int16Array, 8: Int32Array,
+                16: Float32Array, 64: Float64Array, 512: Uint16Array, 768: Uint32Array,
+              } as never;
+              const Typed = ctor[hdr.datatypeCode] ?? Int16Array;
+              const src = new Typed(raw);
+              data = new Float32Array(n);
+              for (let i = 0; i < n; i++) data[i] = Number(src[i]);
+
+              const sample = new Float32Array(Math.min(n, 200_000));
+              const step = Math.max(1, Math.floor(n / sample.length));
+              for (let i = 0, s = 0; s < sample.length; i += step, s++) sample[s] = data[i];
+              sample.sort();
+              lo = sample[Math.floor(sample.length * 0.01)];
+              hi = sample[Math.floor(sample.length * 0.99)] || lo + 1;
+
+              const aff: number[][] =
+                (hdr as unknown as { affine?: number[][] }).affine ??
+                [[1, 0, 0, 0], [0, 1, 0, 0], [0, 0, 1, 0], [0, 0, 0, 1]];
+              axes = deriveAxes(aff);
+              orient = orientationEnds(aff);
+
+              setScanComplete(true);
+              setSlicesDone(dims[2]);
+            }
+          }
+
+          if (!buf) {
+            // Not in cache: stream with streamNifti
+            setScanComplete(false);
+            setSlicesDone(0);
+
+            let volData: Float32Array | null = null;
+            let volDims: [number, number, number] | null = null;
+            let volSpacing: [number, number, number] | null = null;
+            let volAxes: Record<Plane, PlaneAxes> | null = null;
+            let volOrient: [AxisEnds, AxisEnds, AxisEnds] | null = null;
+            let streamHdr: any = null;
+            let streamGrowingBuf: Uint8Array | null = null;
+            let streamInfoObj: StreamInfo | null = null;
+            let lastCopiedSlice = 0;
+
+            const streamed = await streamNifti(volumeUrl, {
+              signal: abortController.signal,
+              caseId: cacheKey,
+              onHeader: (h, info) => {
+                if (cancelled) return;
+                streamHdr = h;
+                streamGrowingBuf = info.growingBuffer;
+                streamInfoObj = info;
+                volDims = [h.dims[1], h.dims[2], h.dims[3]];
+                volSpacing = [
+                  Math.abs(h.pixDims?.[1]) || 1,
+                  Math.abs(h.pixDims?.[2]) || 1,
+                  Math.abs(h.pixDims?.[3]) || 1,
+                ];
+                const aff: number[][] =
+                  (h as unknown as { affine?: number[][] }).affine ??
+                  [[1, 0, 0, 0], [0, 1, 0, 0], [0, 0, 1, 0], [0, 0, 0, 1]];
+                volAxes = deriveAxes(aff);
+                volOrient = orientationEnds(aff);
+
+                n = volDims[0] * volDims[1] * volDims[2];
+                volData = new Float32Array(n);
+
+                setVol({
+                  data: volData,
+                  dims: volDims,
+                  spacing: volSpacing,
+                  axes: volAxes,
+                  orient: volOrient,
+                  lo: 0,
+                  hi: 1,
+                });
+                setLabels(new Uint8Array(n));
+                // Start view on the FIRST slice (k = 0) of the scan's slice axis
+                setCursor({
+                  i: Math.floor(volDims[0] / 2),
+                  j: Math.floor(volDims[1] / 2),
+                  k: 0,
+                });
+                setBusy(false);
+                setStatus("Loading scan 0%");
+              },
+              onProgress: (slicesDoneCount, totalSlicesCount, bytesDoneCount, bytesTotalCount) => {
+                if (cancelled || !volData || !volDims || !streamGrowingBuf || !streamInfoObj || !streamHdr) return;
+                setSlicesDone(slicesDoneCount);
+                const pct = bytesTotalCount > 0
+                  ? Math.round((bytesDoneCount / bytesTotalCount) * 100)
+                  : Math.round((slicesDoneCount / totalSlicesCount) * 100);
+                setStatus(`Loading scan ${pct}%`);
+
+                const ctor: Record<number, new (b: ArrayBuffer, byteOffset?: number, length?: number) => ArrayLike<number>> = {
+                  2: Uint8Array, 4: Int16Array, 8: Int32Array,
+                  16: Float32Array, 64: Float64Array, 512: Uint16Array, 768: Uint32Array,
+                } as never;
+                const Typed = ctor[streamHdr.datatypeCode] ?? Int16Array;
+                const nx = volDims[0];
+                const ny = volDims[1];
+                const sliceVoxels = nx * ny;
+                const bytesPerVoxel = streamInfoObj.bytesPerVoxel;
+
+                for (let s = lastCopiedSlice; s < slicesDoneCount; s++) {
+                  const byteOffset = streamInfoObj.voxOffset + s * sliceVoxels * bytesPerVoxel;
+                  const src = new Typed(streamGrowingBuf.buffer as unknown as ArrayBuffer, byteOffset, sliceVoxels);
+                  const destOffset = s * sliceVoxels;
+                  for (let i = 0; i < sliceVoxels; i++) {
+                    volData[destOffset + i] = Number(src[i]);
+                  }
+                }
+                lastCopiedSlice = slicesDoneCount;
+
+                // Provisional intensity window from arrived slices
+                if (slicesDoneCount > 0) {
+                  const arrivedVoxels = slicesDoneCount * sliceVoxels;
+                  const sampleCount = Math.min(arrivedVoxels, 50_000);
+                  const sample = new Float32Array(sampleCount);
+                  const step = Math.max(1, Math.floor(arrivedVoxels / sampleCount));
+                  for (let i = 0, s = 0; s < sampleCount; i += step, s++) {
+                    sample[s] = volData[i];
+                  }
+                  sample.sort();
+                  const pLo = sample[Math.floor(sample.length * 0.01)];
+                  const pHi = sample[Math.floor(sample.length * 0.99)] || pLo + 1;
+                  setVol((v) => (v ? { ...v, lo: pLo, hi: pHi } : null));
+                }
+              },
+            });
+
+            if (cancelled) return;
+            buf = streamed.buffer;
+            hdr = streamed.hdr;
+            dims = volDims!;
+            spacing = volSpacing!;
+            axes = volAxes!;
+            orient = volOrient!;
+            data = volData!;
+
+            // Recompute final window from full volume
+            const sample = new Float32Array(Math.min(n, 200_000));
+            const step = Math.max(1, Math.floor(n / sample.length));
+            for (let i = 0, s = 0; s < sample.length; i += step, s++) sample[s] = data[i];
+            sample.sort();
+            lo = sample[Math.floor(sample.length * 0.01)];
+            hi = sample[Math.floor(sample.length * 0.99)] || lo + 1;
+
+            setScanComplete(true);
+            setSlicesDone(dims[2]);
+            setVol({ data, dims, spacing, axes, orient, lo, hi });
+
+            // The other two planes open at their MIDDLE slice
+            setCursor((c) => ({
+              ...c,
+              i: Math.floor(dims[0] / 2),
+              j: Math.floor(dims[1] / 2),
+            }));
+          }
+        }
 
         if (cancelled) return;
         setStatus("Loading saved annotation…");
@@ -796,6 +1028,9 @@ export default function Viewer({
 
         let metaAnnotators: AnnotatorItem[] = [];
         let metaReview: ReviewEditInfo | null = null;
+        let metaReviews: ReviewItem[] = [];
+        let metaMyReview: ReviewItem | null = null;
+        let metaAnnotatedByAll: string[] = [];
         let defaultAnnotator = "";
 
         try {
@@ -804,12 +1039,18 @@ export default function Viewer({
             const meta = await metaRes.json();
             metaAnnotators = meta.annotators ?? [];
             metaReview = meta.review ?? null;
+            metaReviews = meta.reviews ?? [];
+            metaMyReview = meta.myReview ?? null;
+            metaAnnotatedByAll = meta.annotatedByAll ?? [];
           }
         } catch { /* meta optional */ }
 
         if (cancelled) return;
         setAnnotatorsList(metaAnnotators);
         setReviewInfo(metaReview);
+        setReviewsList(metaReviews);
+        setMyReview(metaMyReview);
+        setAnnotatedByAll(metaAnnotatedByAll);
 
         const mainItem = metaAnnotators.find((a) => a.isMain);
         defaultAnnotator = mainItem ? mainItem.name : (metaAnnotators[0]?.name || "");
@@ -838,21 +1079,41 @@ export default function Viewer({
         setSavedLoadError(loadError);
         setVol({ data, dims, spacing, axes, orient, lo, hi });
         setLabels(initial);
-        setCursor({
-          i: Math.floor(dims[0] / 2), j: Math.floor(dims[1] / 2), k: Math.floor(dims[2] / 2),
-        });
+        if (!isReview) {
+          setCursor({
+            i: Math.floor(dims[0] / 2), j: Math.floor(dims[1] / 2), k: Math.floor(dims[2] / 2),
+          });
+        }
         setCounts(countLabels(initial));
         // The dimensions are on the info bar already; the status is the news.
         setStatus(note ? note.replace(/^ · /, "").replace(/^./, (c) => c.toUpperCase()) : "No saved annotation yet");
         setDirty(false);
+
+        // Prefetch next case if known in review mode
+        if (isReview && nextCaseId) {
+          void prefetchVolume(nextCaseId, withAccessRef.current(`/api/volume/${nextCaseId}`));
+        }
       } catch (e) {
         if (!cancelled) setStatus(e instanceof Error ? e.message : "failed to load");
       } finally {
         if (!cancelled) setBusy(false);
       }
     })();
-    return () => { cancelled = true; };
+    return () => {
+      cancelled = true;
+      abortController.abort();
+      cancelPrefetch();
+    };
   }, [caseId, seriesId, dataReady]);
+
+  // Review mode: keep next case prefetched once the scan is ready
+  useEffect(() => {
+    if (!isReview || !scanComplete || !nextCaseId) return;
+    void prefetchVolume(nextCaseId, withAccessRef.current(`/api/volume/${nextCaseId}`));
+    return () => {
+      cancelPrefetch();
+    };
+  }, [isReview, scanComplete, nextCaseId, caseId]);
 
   // ---- geometry --------------------------------------------------------
   /**
@@ -915,6 +1176,11 @@ export default function Viewer({
   const draw = useCallback((p: Plane) => {
     const cv = canvases.current[p];
     if (!cv || !vol || !labels) return;
+    if (isReview && !scanComplete) {
+      if (vol.axes[p].slice !== 2) return;
+      const curSlice = sliceOf(p, vol, cursor);
+      if (curSlice >= slicesDone) return;
+    }
     const { data, dims, lo, hi } = vol;
     const { w, h } = planeGeom(p, vol);
     const s = sliceOf(p, vol, cursor);
@@ -932,16 +1198,47 @@ export default function Viewer({
     const range = hi - lo || 1;
     const currentTorch = torchRef.current;
 
-    for (let b = 0; b < h; b++) {
-      for (let a = 0; a < w; a++) {
-        const flat = sampleAt(p, vol, a, b, s);
-        const v = data[flat];
-        const g = Math.round(((Math.min(Math.max(v, lo), hi) - lo) / range) * 255);
-        const row = h - 1 - b; // flip so anatomy is upright
-        const lv = labels[flat];
-        if (lv && !isInTorch(a, b, p, currentTorch) && isLabelVisible(lv, view)) grid[row * w + a] = lv;
-        const o = (row * w + a) * 4;
-        img.data[o] = g; img.data[o + 1] = g; img.data[o + 2] = g; img.data[o + 3] = 255;
+    if (!outline) {
+      for (let b = 0; b < h; b++) {
+        for (let a = 0; a < w; a++) {
+          const flat = sampleAt(p, vol, a, b, s);
+          const v = data[flat];
+          const g = Math.round(((Math.min(Math.max(v, lo), hi) - lo) / range) * 255);
+          const row = h - 1 - b; // flip so anatomy is upright
+          const lv = labels[flat];
+          if (lv && !isInTorch(a, b, p, currentTorch) && isLabelVisible(lv, view)) grid[row * w + a] = lv;
+          const o = (row * w + a) * 4;
+          img.data[o] = g; img.data[o + 1] = g; img.data[o + 2] = g; img.data[o + 3] = 255;
+        }
+      }
+    } else {
+      const sliceLabels = new Uint8Array(w * h);
+      for (let b = 0; b < h; b++) {
+        for (let a = 0; a < w; a++) {
+          const flat = sampleAt(p, vol, a, b, s);
+          sliceLabels[b * w + a] = labels[flat];
+          const v = data[flat];
+          const g = Math.round(((Math.min(Math.max(v, lo), hi) - lo) / range) * 255);
+          const row = h - 1 - b; // flip so anatomy is upright
+          const o = (row * w + a) * 4;
+          img.data[o] = g; img.data[o + 1] = g; img.data[o + 2] = g; img.data[o + 3] = 255;
+        }
+      }
+      for (let b = 0; b < h; b++) {
+        const row = h - 1 - b;
+        for (let a = 0; a < w; a++) {
+          const lv = sliceLabels[b * w + a];
+          if (!lv) continue;
+          const isBoundary =
+            a === 0 || a === w - 1 || b === 0 || b === h - 1 ||
+            sliceLabels[b * w + (a - 1)] !== lv ||
+            sliceLabels[b * w + (a + 1)] !== lv ||
+            sliceLabels[(b - 1) * w + a] !== lv ||
+            sliceLabels[(b + 1) * w + a] !== lv;
+          if (isBoundary && !isInTorch(a, b, p, currentTorch) && isLabelVisible(lv, view)) {
+            grid[row * w + a] = lv;
+          }
+        }
       }
     }
     const scan = scratchCanvas(`scan-${p}`, w, h);
@@ -952,7 +1249,8 @@ export default function Viewer({
 
     // Drawing a label colour at this alpha over the scan gives the same mix
     // as blendLabel: its colour weight, out of 255.
-    const alpha = blendLabel(0, [255, 255, 255], opacity)[0];
+    const effectiveOpacity = outline ? Math.max(opacity, 85) : opacity;
+    const alpha = blendLabel(0, [255, 255, 255], effectiveOpacity)[0];
     const colors: (Rgba | undefined)[] = [];
     for (const sd of SEGMENTS) {
       const c = sd.color;
@@ -1008,7 +1306,7 @@ export default function Viewer({
     // Live pencil trace on the plane being drawn in, as in the 2D painter:
     // either a dotted edge alone, or a solid edge over the area that will be
     // filled on release.
-    if (pencilPlane.current === p && outline.current.length > 1) {
+    if (pencilPlane.current === p && pencilTrace.current.length > 1) {
       // Erasing shows as a white outline (over a darkened area): what will be
       // removed, never mistakable for an edema (red) outline.
       const color = erasing ? "#ffffff" : SEGMENTS.find((x) => x.value === seg)!.color;
@@ -1016,9 +1314,9 @@ export default function Viewer({
       ctx.save();
       ctx.beginPath();
       // Trace points sit on voxel centres, half a voxel in from the corner.
-      const [x0, y0] = outline.current[0];
+      const [x0, y0] = pencilTrace.current[0];
       ctx.moveTo(x0 + 0.5, h - 0.5 - y0);
-      for (const [x, y] of outline.current.slice(1)) ctx.lineTo(x + 0.5, h - 0.5 - y);
+      for (const [x, y] of pencilTrace.current.slice(1)) ctx.lineTo(x + 0.5, h - 0.5 - y);
       ctx.closePath();
       if (!pencilDotted) {
         ctx.globalAlpha = erasing ? 0.4 : 0.22;
@@ -1038,7 +1336,7 @@ export default function Viewer({
 
     // Move tool: the selected region's box and its resize handles.
     const sel = moveSel.current;
-    if (sel && sel.plane === p && sel.region.masks.has(s)) {
+    if (sel && sel.plane === p && sel.combined.masks.has(s)) {
       const { x0, y0, x1, y1 } = sel.to;
       const lw = Math.max(1, Math.round(w / 350));
       const hs = Math.max(4, Math.round(w / 70));
@@ -1055,6 +1353,25 @@ export default function Viewer({
         ctx.fillRect(hx - hs / 2, h - hy - hs / 2, hs, hs);
         ctx.strokeRect(hx - hs / 2, h - hy - hs / 2, hs, hs);
       }
+      ctx.restore();
+    }
+
+    // Box select: dashed rectangle while dragging on empty space
+    const bs = boxSelect.current;
+    if (bs && bs.plane === p) {
+      const bx0 = Math.min(bs.startX, bs.currentX);
+      const bx1 = Math.max(bs.startX, bs.currentX);
+      const by0 = Math.min(bs.startY, bs.currentY);
+      const by1 = Math.max(bs.startY, bs.currentY);
+      const lw = Math.max(1, Math.round(w / 350));
+      ctx.save();
+      ctx.lineWidth = lw;
+      ctx.strokeStyle = "#ffffff";
+      ctx.setLineDash([lw * 3, lw * 3]);
+      ctx.strokeRect(bx0, h - by1, bx1 - bx0, by1 - by0);
+      ctx.setLineDash([]);
+      ctx.fillStyle = "rgba(255, 255, 255, 0.08)";
+      ctx.fillRect(bx0, h - by1, bx1 - bx0, by1 - by0);
       ctx.restore();
     }
 
@@ -1099,11 +1416,11 @@ export default function Viewer({
       ctx.stroke();
       ctx.restore();
     }
-  }, [vol, labels, cursor, seg, erasing, outlineTick, planeGeom, sampleAt, cursorInPlane, sliceOf, view, opacity,
-      collabToken, suggestion, caseId, pencilDotted, moveTick]);
+  }, [vol, labels, cursor, seg, erasing, outlineTick, planeGeom, sampleAt, cursorInPlane, sliceOf, view, opacity, outline,
+      collabToken, suggestion, caseId, pencilDotted, moveTick, boxSelectTick, isReview, scanComplete, slicesDone]);
 
   const drawAll = useCallback(() => { PLANES.forEach(draw); }, [draw]);
-  useEffect(() => { drawAll(); }, [drawAll]);
+  useEffect(() => { drawAll(); }, [drawAll, slicesDone, scanComplete]);
 
   const scheduleTorchRedraw = useCallback((p: Plane) => {
     if (torchRafRef.current !== null) return;
@@ -1468,9 +1785,9 @@ export default function Viewer({
   /** Add a point to the pencil outline being traced, skipping repeats. */
   const traceTo = useCallback((hit: Hit) => {
     const x = hit.fa ?? hit.a, y = hit.fb ?? hit.b;
-    const last = outline.current[outline.current.length - 1];
+    const last = pencilTrace.current[pencilTrace.current.length - 1];
     if (!last || Math.hypot(x - last[0], y - last[1]) >= PENCIL_STEP) {
-      outline.current.push([x, y]);
+      pencilTrace.current.push([x, y]);
       setOutlineTick((n) => n + 1);
     }
   }, []);
@@ -1484,9 +1801,9 @@ export default function Viewer({
    * worst case is a slightly wrong shape rather than a whole slice filled.
    */
   const commitOutline = useCallback(() => {
-    const pts = outline.current;
+    const pts = pencilTrace.current;
     const p = pencilPlane.current;
-    outline.current = [];
+    pencilTrace.current = [];
     pencilPlane.current = null;
     setOutlineTick((n) => n + 1);
     if (!vol || !labels || !p || pts.length < 3) { drawAll(); return; }
@@ -1570,7 +1887,7 @@ export default function Viewer({
       const before = undoStack.current.pop();
       if (before) { labels.set(before); markEdited(); recount(); }
     }
-    outline.current = []; pencilPlane.current = null; painting.current = false;
+    pencilTrace.current = []; pencilPlane.current = null; painting.current = false;
     strokePlane.current = null; strokePointer.current = null; setStroking(false);
     setOutlineTick((n) => n + 1); drawAll();
   };
@@ -1651,7 +1968,39 @@ export default function Viewer({
     if (!moveSel.current) return;
     moveSel.current = null;
     setMoveTick((n) => n + 1);
-  }, []);
+    drawAll();
+  }, [drawAll]);
+
+  const setSelection = useCallback((p: Plane, regions: Region[]) => {
+    if (!vol || !labels || regions.length === 0) {
+      dropSelection();
+      return;
+    }
+    const combined = combineRegions(regions);
+    if (!combined) {
+      dropSelection();
+      return;
+    }
+    const { w, h } = planeGeom(p, vol);
+    const under = new Uint8Array(labels.length).fill(255);
+    const stamped = new Int32Array(combined.size);
+    let n = 0;
+    placeRegion(combined, combined.from, w, h, (a, b, sl) => {
+      const f = sampleAt(p, vol, a, b, sl);
+      under[f] = 0;
+      stamped[n++] = f;
+    });
+    moveSel.current = {
+      plane: p,
+      regions,
+      combined,
+      to: combined.from,
+      stamped,
+      under,
+    };
+    setMoveTick((t) => t + 1);
+    drawAll();
+  }, [vol, labels, planeGeom, sampleAt, dropSelection, drawAll]);
 
   /** A screen point in this plane's voxel units, unclamped, and 8 px in voxels. */
   const toPlanePoint = useCallback((p: Plane, clientX: number, clientY: number) => {
@@ -1670,12 +2019,12 @@ export default function Viewer({
   const placeSelection = useCallback((to: Box) => {
     const sel = moveSel.current;
     if (!sel || !vol || !labels) return;
-    const { under, stamped } = sel;
+    const { under, stamped, combined, plane } = sel;
     for (let n = 0; n < stamped.length; n++) labels[stamped[n]] = under[stamped[n]];
-    const { w, h } = planeGeom(sel.plane, vol);
+    const { w, h } = planeGeom(plane, vol);
     const out: number[] = [];
-    placeRegion(sel.region, to, w, h, (a, b, sl, v) => {
-      const f = sampleAt(sel.plane, vol, a, b, sl);
+    placeRegion(combined, to, w, h, (a, b, sl, v) => {
+      const f = sampleAt(plane, vol, a, b, sl);
       if (under[f] === 255) under[f] = labels[f];
       if (!canPaint(under[f], v, { erasing: false, insideBone: false, hasBone: false, protectLesion })) return;
       labels[f] = v;
@@ -1688,7 +2037,15 @@ export default function Viewer({
   }, [vol, labels, planeGeom, sampleAt, protectLesion, markEdited, drawAll]);
 
   const moveDrag = useRef<{
-    id: number; plane: Plane; handle: Handle; x: number; y: number; start: Box; pushed: boolean;
+    id: number;
+    plane: Plane;
+    handle: Handle;
+    x: number;
+    y: number;
+    start: Box;
+    pushed: boolean;
+    clickedRegion?: Region | null;
+    emptyClick?: boolean;
   } | null>(null);
   const [moveDragging, setMoveDragging] = useState(false);
 
@@ -1698,33 +2055,135 @@ export default function Viewer({
     const pt = toPlanePoint(p, e.clientX, e.clientY);
     if (!pt) return;
     const s = sliceOf(p, vol, cursor);
-    let sel = moveSel.current;
-    let handle = sel && sel.plane === p && sel.region.masks.has(s) ? handleAt(sel.to, pt.x, pt.y, pt.tol) : null;
-    if (!handle) {
-      const hit = toVoxelAt(p, e.clientX, e.clientY);
+    const hit = toVoxelAt(p, e.clientX, e.clientY);
+    const sel = moveSel.current;
+    const isMod = e.ctrlKey || e.metaKey || e.shiftKey;
+
+    const hasMaskOnSlice = Boolean(sel && sel.plane === p && sel.combined.masks.has(s));
+    const handle = hasMaskOnSlice && sel ? handleAt(sel.to, pt.x, pt.y, pt.tol) : null;
+    const isResizeHandle = Boolean(handle && handle !== "move");
+
+    // 1. If clicking on one of the 8 resize handles: drag handle (Shift keeps proportions)
+    if (isResizeHandle && sel && handle) {
+      moveDrag.current = {
+        id: e.pointerId,
+        plane: p,
+        handle,
+        x: pt.x,
+        y: pt.y,
+        start: sel.to,
+        pushed: false,
+      };
+      setMoveDragging(true);
+      return;
+    }
+
+    // Check whether the pointer is over a visible painted region
+    const clickedLabel = hit ? labels[sampleAt(p, vol, hit.a, hit.b, s)] : 0;
+    const isPainted = Boolean(clickedLabel && isLabelVisible(clickedLabel, view));
+
+    // 2. Clicked on a painted region
+    if (isPainted && hit) {
+      if (isMod) {
+        // Shift or Ctrl/Cmd + click on a painted region: add or remove
+        const alreadyRegion = sel && sel.plane === p && findRegionAt(sel.regions, hit.a, hit.b, s);
+        if (alreadyRegion && sel) {
+          // Remove it
+          const next = sel.regions.filter((r) => !sameRegion(r, alreadyRegion));
+          setSelection(p, next);
+        } else {
+          // Add it
+          const { w, h, depth } = planeGeom(p, vol);
+          const newRegion = selectRegion(
+            { a: hit.a, b: hit.b, s },
+            { w, h, depth, labels, flat: (a, b, sl) => sampleAt(p, vol, a, b, sl) },
+            moveAllSlices,
+            (v) => isLabelVisible(v, view),
+          );
+          if (newRegion) {
+            const next = sel && sel.plane === p ? [...sel.regions, newRegion] : [newRegion];
+            setSelection(p, next);
+          }
+        }
+        return;
+      }
+
+      // Plain click on a painted region
+      if (handle === "move" && sel) {
+        // Inside current selection's box: might drag group or narrow to this region on release
+        const clickedRegion = findRegionAt(sel.regions, hit.a, hit.b, s);
+        moveDrag.current = {
+          id: e.pointerId,
+          plane: p,
+          handle: "move",
+          x: pt.x,
+          y: pt.y,
+          start: sel.to,
+          pushed: false,
+          clickedRegion,
+        };
+        setMoveDragging(true);
+        return;
+      }
+
+      // Plain click on a painted region outside current selection: select only this region and allow immediate drag
       const { w, h, depth } = planeGeom(p, vol);
-      const region = hit && selectRegion(
+      const newRegion = selectRegion(
         { a: hit.a, b: hit.b, s },
         { w, h, depth, labels, flat: (a, b, sl) => sampleAt(p, vol, a, b, sl) },
         moveAllSlices,
         (v) => isLabelVisible(v, view),
       );
-      if (!region) { dropSelection(); return; }
-      const under = new Uint8Array(labels.length).fill(255);
-      const stamped = new Int32Array(region.size);
-      let n = 0;
-      placeRegion(region, region.from, w, h, (a, b, sl) => {
-        const f = sampleAt(p, vol, a, b, sl);
-        under[f] = 0;
-        stamped[n++] = f;
-      });
-      sel = { plane: p, region, to: region.from, stamped, under };
-      moveSel.current = sel;
-      setMoveTick((t) => t + 1);
-      handle = "move";
+      if (newRegion) {
+        setSelection(p, [newRegion]);
+        moveDrag.current = {
+          id: e.pointerId,
+          plane: p,
+          handle: "move",
+          x: pt.x,
+          y: pt.y,
+          start: newRegion.from,
+          pushed: false,
+        };
+        setMoveDragging(true);
+      } else {
+        dropSelection();
+      }
+      return;
     }
-    moveDrag.current = { id: e.pointerId, plane: p, handle, x: pt.x, y: pt.y, start: sel!.to, pushed: false };
-    setMoveDragging(true);
+
+    // 3. Pointer is on empty space
+    if (handle === "move" && sel && !isMod) {
+      // Inside group bounding box on empty voxel: drag group, or clear on click release
+      moveDrag.current = {
+        id: e.pointerId,
+        plane: p,
+        handle: "move",
+        x: pt.x,
+        y: pt.y,
+        start: sel.to,
+        pushed: false,
+        emptyClick: true,
+      };
+      setMoveDragging(true);
+      return;
+    }
+
+    // Outside bounding box on empty space: Box Select!
+    if (!isMod) {
+      dropSelection();
+    }
+    boxSelect.current = {
+      id: e.pointerId,
+      plane: p,
+      startX: pt.x,
+      startY: pt.y,
+      currentX: pt.x,
+      currentY: pt.y,
+      mod: isMod,
+    };
+    setBoxSelecting(true);
+    setBoxSelectTick((t) => t + 1);
   };
 
   const moveDragStep = useRef<(e: PointerEvent) => void>(() => {});
@@ -1745,7 +2204,17 @@ export default function Viewer({
     if (!st || st.id !== e.pointerId) return;
     moveDrag.current = null;
     setMoveDragging(false);
-    if (!st.pushed) return;
+    if (!st.pushed) {
+      // No drag occurred: process as a plain click
+      if (st.clickedRegion && moveSel.current && moveSel.current.regions.length > 1) {
+        // Plain click on one region of a group: select only that region
+        setSelection(st.plane, [st.clickedRegion]);
+      } else if (st.emptyClick) {
+        // Plain click on empty space inside the bounding box: clear selection
+        dropSelection();
+      }
+      return;
+    }
     recount();
     scheduleAutoSaveRef.current();
   };
@@ -1763,11 +2232,94 @@ export default function Viewer({
     };
   }, [moveDragging]);
 
+  const boxSelectStep = useRef<(e: PointerEvent) => void>(() => {});
+  boxSelectStep.current = (e) => {
+    const bs = boxSelect.current;
+    if (!bs || bs.id !== e.pointerId) return;
+    const pt = toPlanePoint(bs.plane, e.clientX, e.clientY);
+    if (!pt) return;
+    bs.currentX = pt.x;
+    bs.currentY = pt.y;
+    setBoxSelectTick((t) => t + 1);
+    draw(bs.plane);
+  };
+  const endBoxSelect = useRef<(e: PointerEvent) => void>(() => {});
+  endBoxSelect.current = (e) => {
+    const bs = boxSelect.current;
+    if (!bs || bs.id !== e.pointerId) return;
+    boxSelect.current = null;
+    setBoxSelecting(false);
+    setBoxSelectTick((t) => t + 1);
+
+    if (!vol || !labels) {
+      draw(bs.plane);
+      return;
+    }
+
+    const dx = Math.abs(bs.currentX - bs.startX);
+    const dy = Math.abs(bs.currentY - bs.startY);
+    const s = sliceOf(bs.plane, vol, cursor);
+
+    if (dx > 1 || dy > 1) {
+      const box: Box = {
+        x0: Math.floor(Math.min(bs.startX, bs.currentX)),
+        y0: Math.floor(Math.min(bs.startY, bs.currentY)),
+        x1: Math.ceil(Math.max(bs.startX, bs.currentX)),
+        y1: Math.ceil(Math.max(bs.startY, bs.currentY)),
+      };
+      const { w, h, depth } = planeGeom(bs.plane, vol);
+      const found = findRegionsInBox(
+        box,
+        s,
+        { w, h, depth, labels, flat: (a, b, sl) => sampleAt(bs.plane, vol, a, b, sl) },
+        moveAllSlices,
+        (v) => isLabelVisible(v, view),
+      );
+
+      const sel = moveSel.current;
+      if (bs.mod && sel && sel.plane === bs.plane) {
+        const next = [...sel.regions];
+        for (const r of found) {
+          if (!next.some((existing) => sameRegion(existing, r))) {
+            next.push(r);
+          }
+        }
+        setSelection(bs.plane, next);
+      } else {
+        setSelection(bs.plane, found);
+      }
+    } else {
+      if (!bs.mod) {
+        dropSelection();
+      }
+    }
+    draw(bs.plane);
+  };
+  useEffect(() => {
+    if (!boxSelecting) return;
+    const move = (e: PointerEvent) => boxSelectStep.current(e);
+    const up = (e: PointerEvent) => endBoxSelect.current(e);
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", up);
+    window.addEventListener("pointercancel", up);
+    return () => {
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", up);
+      window.removeEventListener("pointercancel", up);
+    };
+  }, [boxSelecting]);
+
   // The selection describes the label volume as it was when taken. A new
   // volume (load, undo, redo, import), another tool, or a change of scope
   // makes it stale, so it is dropped.
   useEffect(() => { dropSelection(); }, [labels, dropSelection]);
-  useEffect(() => { if (tool !== "move") dropSelection(); }, [tool, dropSelection]);
+  useEffect(() => {
+    if (tool !== "move") {
+      boxSelect.current = null;
+      setBoxSelecting(false);
+      dropSelection();
+    }
+  }, [tool, dropSelection]);
   useEffect(() => { dropSelection(); }, [moveAllSlices, dropSelection]);
 
   const clearMask = useCallback(() => {
@@ -1878,6 +2430,9 @@ export default function Viewer({
         const meta = await metaRes.json();
         setAnnotatorsList(meta.annotators ?? []);
         setReviewInfo(meta.review ?? null);
+        setReviewsList(meta.reviews ?? []);
+        setMyReview(meta.myReview ?? null);
+        setAnnotatedByAll(meta.annotatedByAll ?? []);
       }
       const saved = await fetchSavedLabels(caseId, n, seriesId, withAccessRef.current, pickedAnnotator || undefined);
       if (saved.labels) {
@@ -1892,6 +2447,22 @@ export default function Viewer({
       }
     } catch { /* ignore */ }
   }, [caseId, seriesId, vol, pickedAnnotator, drawAll]);
+
+  const handleReviewChange = useCallback((updatedReview: ReviewItem | null) => {
+    setMyReview(updatedReview);
+    if (updatedReview) {
+      setReviewsList((prev) => {
+        const idx = prev.findIndex((r) => r.reviewer === updatedReview.reviewer);
+        if (idx >= 0) {
+          const copy = [...prev];
+          copy[idx] = { ...copy[idx], ...updatedReview };
+          return copy;
+        }
+        return [...prev, updatedReview];
+      });
+    }
+    onSaved?.();
+  }, [onSaved]);
 
   const { syncStatus, isSyncing, teamNotice, clearTeamNotice, triggerSync } = useCloudSync({
     caseId,
@@ -1937,7 +2508,7 @@ export default function Viewer({
       });
       const j = await res.json();
       if (!res.ok) throw new Error(j.error ?? "save failed");
-      return { me, logged: false, review: j.review };
+      return { me, logged: false, review: j.review, unchanged: Boolean(j.unchanged) };
     }
 
     const meLocal = (isCollaborator ? collaboratorUserName : null) || session?.user?.name || session?.user?.email || "unknown";
@@ -1972,6 +2543,10 @@ export default function Viewer({
 
   const save = useCallback(async () => {
     if (!labels) return;
+    if (isReviewLocked) {
+      toast.error("You marked this case as reviewed. Unmark it to edit.");
+      return;
+    }
     if (savedLoadError) {
       toast.error("The saved annotation for this case could not be loaded, so saving would overwrite it. Re-import it or fix the file first.");
       return;
@@ -2005,6 +2580,12 @@ export default function Viewer({
     try {
       const baseForSave = pickedAnnotator === "_mine" ? (baseAnnotatorRef.current || null) : (pickedAnnotator || null);
       const res = await persist(labels.slice(), seriesId, baseForSave);
+      if (res.unchanged) {
+        setStatus("No changes to save.");
+        toast.info("No changes to save.");
+        if (editVersion.current === version) setDirty(false);
+        return;
+      }
       if (isReviewMode()) {
         const isReviewerRole = reviewUser?.role !== "team";
         setStatus(isReviewerRole ? "Review submitted — open edit updated" : "Saved online — will sync to your laptop");
@@ -2037,14 +2618,14 @@ export default function Viewer({
       saveInFlight.current = false;
       setSaving(false);
     }
-  }, [labels, counts, caseId, onSaved, savedLoadError, seriesId, annotatedSeries, hasSaved, persist, pickedAnnotator, reviewUser, triggerSync]);
+  }, [labels, counts, caseId, onSaved, savedLoadError, seriesId, annotatedSeries, hasSaved, persist, pickedAnnotator, reviewUser, triggerSync, isReviewLocked]);
 
   // Auto save: a short pause after each stroke, undo or clear. The snapshot,
   // case and series are fixed when it is queued, so it lands on the scan it
   // was drawn on even if the user has moved on by then.
   scheduleAutoSaveRef.current = (source) => {
     const current = source ?? labels;
-    if (!autoSave || !current || savedLoadError) return;
+    if (!autoSave || !current || savedLoadError || isReviewLocked) return;
     if (annotatedSeries && seriesId && seriesId !== annotatedSeries && seriesId !== "primary") {
       setAutoSaveStatus(`Auto save off here: edema is on ${annotatedSeries}`);
       return;
@@ -2188,7 +2769,7 @@ export default function Viewer({
       const k = e.key.toLowerCase();
       // Keys for tools a guest has not been granted do nothing.
       const annotateKey = mod ? ["z", "y", "s"].includes(k) : ["1", "2", "3", "4", "5", "8", "0", "b", "p", "m", "e"].includes(k);
-      if (annotateKey && !permsRef.current.annotate) return;
+      if (annotateKey && (!permsRef.current.annotate || isReviewLocked)) return;
       if (!mod && (k === "6" || k === "h") && !permsRef.current.zoomPan) return;
       if (!mod && ["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", "PageUp", "PageDown"].includes(e.key)
           && !permsRef.current.slices) return;
@@ -2213,12 +2794,17 @@ export default function Viewer({
       else if (e.key.toLowerCase() === "t" && !e.ctrlKey && !e.metaKey && !e.altKey) { setTorchHeld(true); }
       else if (e.key === "0" || e.key.toLowerCase() === "e") toggleEraser();
       else if (e.key.toLowerCase() === "v") cycleViewRef.current();
+      else if (e.key.toLowerCase() === "o") setOutline((v) => !v);
       else if (e.key.toLowerCase() === "l") setLocked((v) => !v);
       else if (e.key.toLowerCase() === "f" && !painting.current) focusToggleRef.current();
       else if (e.key === "Escape" && showShortcutsRef.current) {
         setShowShortcuts(false);
       }
-      else if (e.key === "Escape" && moveSel.current && !moveDrag.current) dropSelection();
+      else if (e.key === "Escape" && (moveSel.current || boxSelect.current) && !moveDrag.current) {
+        boxSelect.current = null;
+        setBoxSelecting(false);
+        dropSelection();
+      }
       // Esc leaves focus mode outright, not one layout at a time: in browser
       // fullscreen the browser takes Esc and leaves anyway.
       else if (e.key === "Escape" && focusOnRef.current && !painting.current) {
@@ -2229,7 +2815,7 @@ export default function Viewer({
         setExpanded(null);
       }
       else if (e.key === "Escape") {
-        outline.current = []; pencilPlane.current = null; painting.current = false;
+        pencilTrace.current = []; pencilPlane.current = null; painting.current = false;
         strokePlane.current = null; setStroking(false);
         setOutlineTick((n) => n + 1); drawAll();
       }
@@ -2260,6 +2846,7 @@ export default function Viewer({
         if (!vol) return;
         e.preventDefault();
         const ax = vol.axes[activePlane].slice;
+        if (isReview && !scanComplete && ax !== 2) return;
         const depth = vol.dims[ax];
         const big = e.key.startsWith("Page") ? 10 : 1;
         const dir = (e.key === "ArrowUp" || e.key === "ArrowRight" || e.key === "PageUp") ? 1 : -1;
@@ -2279,7 +2866,7 @@ export default function Viewer({
       window.removeEventListener("keyup", onKeyUp);
       window.removeEventListener("blur", onBlur);
     };
-  }, [undo, redo, drawAll, vol, activePlane, save, dropSelection]);
+  }, [undo, redo, drawAll, vol, activePlane, save, dropSelection, isReview, scanComplete, isReviewLocked]);
 
   if (isCollaborator) {
     const screen = guestSessionScreen(collab);
@@ -2387,7 +2974,7 @@ export default function Viewer({
     </div>
   );
 
-  const MOVE_TITLE = "Move / resize: click a painted region to select it, drag to move, drag a handle to resize; Shift keeps proportions, Esc deselects (Key 8 or M)";
+  const MOVE_TITLE = "Move / resize: click a painted region to select it, Ctrl or Shift+click adds, drag on empty space to box-select, drag to move, drag a handle to resize; Shift keeps proportions, Esc deselects (Key 8 or M)";
   const moveScopeTitle = moveAllSlices
     ? "Selecting through all slices: click to select on this slice only"
     : "Selecting on this slice only: click to select through all slices";
@@ -2466,9 +3053,10 @@ export default function Viewer({
             <button
               key={sg.value}
               type="button"
+              disabled={isReviewLocked}
               onClick={() => { setSeg(sg.value); drawWithLabel(); }}
-              title={`${sg.label} (Key ${i + 1}) - ${counts[sg.value - 1].toLocaleString()} voxels`}
-              className={`flex h-7 w-8 shrink-0 cursor-pointer items-center justify-center rounded-md transition ${
+              title={isReviewLocked ? lockTooltip : `${sg.label} (Key ${i + 1}) - ${counts[sg.value - 1].toLocaleString()} voxels`}
+              className={`flex h-7 w-8 shrink-0 cursor-pointer items-center justify-center rounded-md transition disabled:cursor-not-allowed disabled:opacity-40 ${
                 seg === sg.value && !erasing && drawing ? "bg-muted ring-1 ring-primary" : "hover:bg-muted"
               }`}
             >
@@ -2478,13 +3066,27 @@ export default function Viewer({
           {railDivider}
         </>
       )}
-      {paintTools.filter((t) => t.show).map(({ id, Icon, title }) => (
-        <RailButton key={id} active={tool === id} title={title} onClick={() => pickTool(id)}>
-          <Icon className="h-4 w-4" />
-        </RailButton>
-      ))}
+      {paintTools.filter((t) => t.show).map(({ id, Icon, title }) => {
+        const isPaint = id === "brush" || id === "pencil" || id === "move";
+        return (
+          <RailButton
+            key={id}
+            active={tool === id}
+            disabled={isPaint && isReviewLocked}
+            title={isPaint && isReviewLocked ? lockTooltip : title}
+            onClick={() => pickTool(id)}
+          >
+            <Icon className="h-4 w-4" />
+          </RailButton>
+        );
+      })}
       {canAnnotate && (
-        <RailButton active={erasing ? "danger" : false} title="Eraser (Key 0 or E)" onClick={() => toggleEraser()}>
+        <RailButton
+          active={erasing ? "danger" : false}
+          disabled={isReviewLocked}
+          title={isReviewLocked ? lockTooltip : "Eraser (Key 0 or E)"}
+          onClick={() => toggleEraser()}
+        >
           <Eraser className="h-4 w-4" />
         </RailButton>
       )}
@@ -2492,15 +3094,15 @@ export default function Viewer({
         ? railSize("torch", torchSize, (d) => stepTorch(d * 8))
         : canAnnotate && tool === "brush" ? railSize("brush", brush, (d) => setBrush((b) => Math.min(20, Math.max(1, b + d))))
         : canAnnotate && tool === "move" && (
-          <RailButton active={moveAllSlices} title={moveScopeTitle} onClick={() => setMoveAllSlices((v) => !v)}>
+          <RailButton active={moveAllSlices} disabled={isReviewLocked} title={isReviewLocked ? lockTooltip : moveScopeTitle} onClick={() => setMoveAllSlices((v) => !v)}>
             <Layers className="h-4 w-4" />
           </RailButton>
         )}
       {canAnnotate && (
         <>
           {railDivider}
-          <RailButton title="Undo (Ctrl+Z)" onClick={undo}><RotateCcw className="h-4 w-4" /></RailButton>
-          <RailButton title="Redo (Ctrl+Y)" onClick={redo}><RotateCw className="h-4 w-4" /></RailButton>
+          <RailButton disabled={isReviewLocked || undoStack.current.length === 0} title={isReviewLocked ? lockTooltip : "Undo (Ctrl+Z)"} onClick={undo}><RotateCcw className="h-4 w-4" /></RailButton>
+          <RailButton disabled={isReviewLocked || redoStack.current.length === 0} title={isReviewLocked ? lockTooltip : "Redo (Ctrl+Y)"} onClick={redo}><RotateCw className="h-4 w-4" /></RailButton>
         </>
       )}
 
@@ -2542,13 +3144,16 @@ export default function Viewer({
       )}
       {canAnnotate && (
         <RailButton
-          active={dirty && !saving}
-          title={saving
+          active={dirty && !saving && !isReviewLocked}
+          disabled={isReviewLocked || saving || !dirty}
+          title={isReviewLocked
+            ? lockTooltip
+            : saving
             ? (isReview ? (isReviewer ? "Submitting…" : "Saving…") : "Saving…")
             : dirty
             ? (isReview ? (isReviewer ? "Submit review (Ctrl+S)" : "Save (Ctrl+S)") : "Save (Ctrl+S)")
             : autoSaveStatus || status}
-          onClick={() => { if (dirty && !saving) void save(); }}
+          onClick={() => { if (dirty && !saving && !isReviewLocked) void save(); }}
         >
           {saving ? <Loader2 className="h-4 w-4 animate-spin" />
             : dirty ? <Save className="h-4 w-4" />
@@ -2619,9 +3224,10 @@ export default function Viewer({
                   {SEGMENTS.map((s, i) => (
                     <button
                       key={s.value}
+                      disabled={isReviewLocked}
                       onClick={() => { setSeg(s.value); drawWithLabel(); }}
-                      title={`${s.label} (Key ${i + 1}) - ${counts[s.value - 1].toLocaleString()} voxels`}
-                      className={`p-1 rounded transition cursor-pointer ${
+                      title={isReviewLocked ? lockTooltip : `${s.label} (Key ${i + 1}) - ${counts[s.value - 1].toLocaleString()} voxels`}
+                      className={`p-1 rounded transition cursor-pointer disabled:cursor-not-allowed disabled:opacity-40 ${
                         seg === s.value && !erasing && drawing ? "bg-primary/20 ring-1 ring-primary" : "hover:bg-muted"
                       }`}
                     >
@@ -2645,9 +3251,10 @@ export default function Viewer({
               <>
                 <button
                   type="button"
+                  disabled={isReviewLocked}
                   onClick={() => { pickTool("brush"); }}
-                  title="Brush mode (Key 4 or B)"
-                  className={`p-1.5 rounded transition border cursor-pointer ${
+                  title={isReviewLocked ? lockTooltip : "Brush mode (Key 4 or B)"}
+                  className={`p-1.5 rounded transition border cursor-pointer disabled:cursor-not-allowed disabled:opacity-40 ${
                     tool === "brush" ? "bg-primary text-primary-foreground border-primary font-medium" : "border-border bg-background text-muted-foreground hover:text-foreground"
                   }`}
                 >
@@ -2655,9 +3262,10 @@ export default function Viewer({
                 </button>
                 <button
                   type="button"
+                  disabled={isReviewLocked}
                   onClick={() => { pickTool("pencil"); }}
-                  title="Pencil mode (Key 5 or P)"
-                  className={`p-1.5 rounded transition border cursor-pointer ${
+                  title={isReviewLocked ? lockTooltip : "Pencil mode (Key 5 or P)"}
+                  className={`p-1.5 rounded transition border cursor-pointer disabled:cursor-not-allowed disabled:opacity-40 ${
                     tool === "pencil" ? "bg-primary text-primary-foreground border-primary font-medium" : "border-border bg-background text-muted-foreground hover:text-foreground"
                   }`}
                 >
@@ -2665,9 +3273,10 @@ export default function Viewer({
                 </button>
                 <button
                   type="button"
+                  disabled={isReviewLocked}
                   onClick={() => { pickTool("move"); }}
-                  title={MOVE_TITLE}
-                  className={`p-1.5 rounded transition border cursor-pointer ${
+                  title={isReviewLocked ? lockTooltip : MOVE_TITLE}
+                  className={`p-1.5 rounded transition border cursor-pointer disabled:cursor-not-allowed disabled:opacity-40 ${
                     tool === "move" ? "bg-primary text-primary-foreground border-primary font-medium" : "border-border bg-background text-muted-foreground hover:text-foreground"
                   }`}
                 >
@@ -2676,9 +3285,10 @@ export default function Viewer({
                 {tool === "move" && (
                   <button
                     type="button"
+                    disabled={isReviewLocked}
                     onClick={() => setMoveAllSlices((v) => !v)}
-                    title={moveScopeTitle}
-                    className={`p-1.5 rounded transition border cursor-pointer ${
+                    title={isReviewLocked ? lockTooltip : moveScopeTitle}
+                    className={`p-1.5 rounded transition border cursor-pointer disabled:cursor-not-allowed disabled:opacity-40 ${
                       moveAllSlices ? "border-primary bg-primary/20 text-primary" : "border-border bg-background text-muted-foreground hover:text-foreground"
                     }`}
                   >
@@ -2725,9 +3335,10 @@ export default function Viewer({
               <>
                 <button
                   type="button"
+                  disabled={isReviewLocked}
                   onClick={() => toggleEraser()}
-                  title="Eraser (Key 0 or E)"
-                  className={`p-1.5 rounded transition border cursor-pointer ${
+                  title={isReviewLocked ? lockTooltip : "Eraser (Key 0 or E)"}
+                  className={`p-1.5 rounded transition border cursor-pointer disabled:cursor-not-allowed disabled:opacity-40 ${
                     erasing ? "border-destructive bg-destructive/10 text-destructive ring-1 ring-destructive" : "border-border bg-background text-muted-foreground hover:text-foreground"
                   }`}
                 >
@@ -2739,22 +3350,27 @@ export default function Viewer({
                 {/* Undo / Redo */}
                 <button
                   type="button"
+                  disabled={isReviewLocked || undoStack.current.length === 0}
                   onClick={undo}
-                  title="Undo (Ctrl+Z)"
-                  className="p-1.5 rounded border border-border bg-background text-muted-foreground hover:text-foreground transition cursor-pointer"
+                  title={isReviewLocked ? lockTooltip : "Undo (Ctrl+Z)"}
+                  className="p-1.5 rounded border border-border bg-background text-muted-foreground hover:text-foreground transition cursor-pointer disabled:cursor-not-allowed disabled:opacity-40"
                 >
                   <RotateCcw className="h-3.5 w-3.5" />
                 </button>
                 <button
                   type="button"
+                  disabled={isReviewLocked || redoStack.current.length === 0}
                   onClick={redo}
-                  title="Redo (Ctrl+Y)"
-                  className="p-1.5 rounded border border-border bg-background text-muted-foreground hover:text-foreground transition cursor-pointer"
+                  title={isReviewLocked ? lockTooltip : "Redo (Ctrl+Y)"}
+                  className="p-1.5 rounded border border-border bg-background text-muted-foreground hover:text-foreground transition cursor-pointer disabled:cursor-not-allowed disabled:opacity-40"
                 >
                   <RotateCw className="h-3.5 w-3.5" />
                 </button>
               </>
             )}
+
+            <div className="h-4 w-px bg-border" />
+            <OverlayQuickControls opacity={opacity} setOpacity={setOpacity} outline={outline} setOutline={setOutline} />
           </div>
 
           {/* Compact Right Actions */}
@@ -2763,12 +3379,23 @@ export default function Viewer({
               annotators={annotatorsList}
               hasMainAnnotation={hasSaved}
               review={reviewInfo}
+              reviews={reviewsList}
+              myReview={myReview}
+              annotatedByAll={annotatedByAll}
               selected={pickedAnnotator}
               onChange={handleAnnotatorChange}
               isReview={isReview}
-              userRole={reviewUser?.role === "team" ? "team" : "reviewer"}
+              userRole={reviewUser?.role === "team" ? "team" : ((reviewUser?.role as string) === "radiologist" ? "radiologist" : "reviewer")}
               disabled={busy}
             />
+            {isReview && reviewUser?.role !== "team" && (
+              <ReviewMarkButton
+                caseId={caseId}
+                myReview={myReview}
+                onReviewChange={handleReviewChange}
+                disabled={busy}
+              />
+            )}
             {!isReview && (
               <button
                 type="button"
@@ -2873,10 +3500,14 @@ export default function Viewer({
             {canAnnotate && (
               <button
                 onClick={save}
-                disabled={saving || !dirty}
-                title={isReview ? (isReviewer ? "Submit review (Ctrl+S)" : "Save (Ctrl+S)") : "Save 3D Mask (Ctrl+S)"}
-                className={`inline-flex items-center gap-1 rounded-md px-2.5 py-1 text-xs font-medium transition cursor-pointer ${
-                  savedSuccess ? "bg-emerald-600 text-white" : "bg-primary text-primary-foreground hover:bg-primary/90 disabled:opacity-40"
+                disabled={isReviewLocked || saving || !dirty}
+                title={isReviewLocked
+                  ? lockTooltip
+                  : isReview
+                  ? (isReviewer ? "Submit review (Ctrl+S)" : "Save (Ctrl+S)")
+                  : "Save 3D Mask (Ctrl+S)"}
+                className={`inline-flex items-center gap-1 rounded-md px-2.5 py-1 text-xs font-medium transition cursor-pointer disabled:cursor-not-allowed disabled:opacity-40 ${
+                  savedSuccess ? "bg-emerald-600 text-white" : "bg-primary text-primary-foreground hover:bg-primary/90"
                 }`}
               >
                 {saving ? (
@@ -2922,9 +3553,10 @@ export default function Viewer({
                   <button
                     key={s.value}
                     type="button"
+                    disabled={isReviewLocked}
                     onClick={() => { setSeg(s.value); drawWithLabel(); }}
-                    title={`${s.label} (Key ${i + 1})`}
-                    className={`inline-flex items-center gap-1.5 rounded-md border px-2 py-1 font-medium transition cursor-pointer ${
+                    title={isReviewLocked ? lockTooltip : `${s.label} (Key ${i + 1})`}
+                    className={`inline-flex items-center gap-1.5 rounded-md border px-2 py-1 font-medium transition cursor-pointer disabled:cursor-not-allowed disabled:opacity-40 ${
                       seg === s.value && !erasing && drawing
                         ? `${s.badge} ring-1 ring-primary`
                         : "border-border bg-background text-muted-foreground hover:text-foreground"
@@ -2946,26 +3578,31 @@ export default function Viewer({
             <div className="h-5 w-px bg-border" />
 
             <div className="inline-flex overflow-hidden rounded-md border border-border">
-              {paintTools.filter((t) => t.show).map(({ id, Icon, title }, i) => (
-                <button
-                  key={id}
-                  type="button"
-                  onClick={() => pickTool(id)}
-                  title={title}
-                  className={`px-2 py-1.5 transition cursor-pointer ${i > 0 ? "border-l border-border" : ""} ${
-                    tool === id ? "bg-primary text-primary-foreground" : "bg-background text-muted-foreground hover:text-foreground"
-                  }`}
-                >
-                  <Icon className="h-3.5 w-3.5" />
-                </button>
-              ))}
+              {paintTools.filter((t) => t.show).map(({ id, Icon, title }, i) => {
+                const isPaint = id === "brush" || id === "pencil" || id === "move";
+                return (
+                  <button
+                    key={id}
+                    type="button"
+                    disabled={isPaint && isReviewLocked}
+                    onClick={() => pickTool(id)}
+                    title={isPaint && isReviewLocked ? lockTooltip : title}
+                    className={`px-2 py-1.5 transition cursor-pointer disabled:cursor-not-allowed disabled:opacity-40 ${i > 0 ? "border-l border-border" : ""} ${
+                      tool === id ? "bg-primary text-primary-foreground" : "bg-background text-muted-foreground hover:text-foreground"
+                    }`}
+                  >
+                    <Icon className="h-3.5 w-3.5" />
+                  </button>
+                );
+              })}
             </div>
             {canAnnotate && (
               <button
                 type="button"
+                disabled={isReviewLocked}
                 onClick={() => toggleEraser()}
-                title="Eraser (Key 0 or E)"
-                className={`rounded-md border px-2 py-1.5 transition cursor-pointer ${
+                title={isReviewLocked ? lockTooltip : "Eraser (Key 0 or E)"}
+                className={`rounded-md border px-2 py-1.5 transition cursor-pointer disabled:cursor-not-allowed disabled:opacity-40 ${
                   erasing
                     ? "border-destructive bg-destructive/10 text-destructive ring-1 ring-destructive"
                     : "border-border bg-background text-muted-foreground hover:text-foreground"
@@ -3013,8 +3650,10 @@ export default function Viewer({
                   <button
                     key={String(all)}
                     type="button"
+                    disabled={isReviewLocked}
                     onClick={() => setMoveAllSlices(all)}
-                    className={`px-2 py-1 transition cursor-pointer ${i > 0 ? "border-l border-border" : ""} ${
+                    title={isReviewLocked ? lockTooltip : (all ? "All slices" : "This slice")}
+                    className={`px-2 py-1 transition cursor-pointer disabled:cursor-not-allowed disabled:opacity-40 ${i > 0 ? "border-l border-border" : ""} ${
                       moveAllSlices === all ? "bg-primary text-primary-foreground" : "bg-background text-muted-foreground hover:text-foreground"
                     }`}
                   >
@@ -3028,22 +3667,27 @@ export default function Viewer({
               <div className="inline-flex overflow-hidden rounded-md border border-border">
                 <button
                   type="button"
+                  disabled={isReviewLocked || undoStack.current.length === 0}
                   onClick={undo}
-                  title="Undo (Ctrl+Z)"
-                  className="bg-background px-2 py-1.5 text-muted-foreground transition hover:bg-muted hover:text-foreground cursor-pointer"
+                  title={isReviewLocked ? lockTooltip : "Undo (Ctrl+Z)"}
+                  className="bg-background px-2 py-1.5 text-muted-foreground transition hover:bg-muted hover:text-foreground cursor-pointer disabled:cursor-not-allowed disabled:opacity-40"
                 >
                   <RotateCcw className="h-3.5 w-3.5" />
                 </button>
                 <button
                   type="button"
+                  disabled={isReviewLocked || redoStack.current.length === 0}
                   onClick={redo}
-                  title="Redo (Ctrl+Y)"
-                  className="border-l border-border bg-background px-2 py-1.5 text-muted-foreground transition hover:bg-muted hover:text-foreground cursor-pointer"
+                  title={isReviewLocked ? lockTooltip : "Redo (Ctrl+Y)"}
+                  className="border-l border-border bg-background px-2 py-1.5 text-muted-foreground transition hover:bg-muted hover:text-foreground cursor-pointer disabled:cursor-not-allowed disabled:opacity-40"
                 >
                   <RotateCw className="h-3.5 w-3.5" />
                 </button>
               </div>
             )}
+
+            <div className="h-5 w-px bg-border" />
+            <OverlayQuickControls opacity={opacity} setOpacity={setOpacity} outline={outline} setOutline={setOutline} />
           </div>
 
           <div className="flex flex-wrap items-center gap-1.5">
@@ -3069,7 +3713,7 @@ export default function Viewer({
               )}
             </div>
 
-            {canAnnotate && (
+            {!isReviewMode() && canAnnotate && (
               <button
                 type="button"
                 onClick={() => setFlagModalOpen(true)}
@@ -3084,7 +3728,7 @@ export default function Viewer({
               </button>
             )}
 
-            {!isCollaborator && canAnnotate && (
+            {!isReviewMode() && !isCollaborator && canAnnotate && (
               <button
                 type="button"
                 onClick={() => void suggestions.request()}
@@ -3097,7 +3741,7 @@ export default function Viewer({
               </button>
             )}
 
-            {!isCollaborator ? (
+            {!isReviewMode() && (!isCollaborator ? (
               <button
                 type="button"
                 onClick={() => host.start(caseId, "3d")}
@@ -3118,7 +3762,7 @@ export default function Viewer({
                 <Users className="h-3.5 w-3.5" />
                 <span>Review Session ({collab.participants.length})</span>
               </div>
-            )}
+            ))}
 
             {(!isCollaborator || canDelete) && (
               <div className="relative">
@@ -3173,16 +3817,43 @@ export default function Viewer({
               </div>
             )}
 
+            <AnnotatorPicker
+              annotators={annotatorsList}
+              hasMainAnnotation={hasSaved}
+              review={reviewInfo}
+              reviews={reviewsList}
+              myReview={myReview}
+              annotatedByAll={annotatedByAll}
+              selected={pickedAnnotator}
+              onChange={handleAnnotatorChange}
+              isReview={isReview}
+              userRole={reviewUser?.role === "team" ? "team" : ((reviewUser?.role as string) === "radiologist" ? "radiologist" : "reviewer")}
+              disabled={busy}
+            />
+
+            {isReview && reviewUser?.role !== "team" && (
+              <ReviewMarkButton
+                caseId={caseId}
+                myReview={myReview}
+                onReviewChange={handleReviewChange}
+                disabled={busy}
+              />
+            )}
+
             {canAnnotate && (
               <button
                 type="button"
                 onClick={save}
-                disabled={saving || !dirty}
-                title="Save 3D Mask (Ctrl+S)"
-                className={`inline-flex items-center gap-1.5 rounded-md px-3 py-1 font-medium transition cursor-pointer ${
+                disabled={isReviewLocked || saving || !dirty}
+                title={isReviewLocked
+                  ? lockTooltip
+                  : isReview
+                  ? (isReviewer ? "Submit review (Ctrl+S)" : "Save (Ctrl+S)")
+                  : "Save 3D Mask (Ctrl+S)"}
+                className={`inline-flex items-center gap-1.5 rounded-md px-3 py-1 font-medium transition cursor-pointer disabled:cursor-not-allowed disabled:opacity-40 ${
                   savedSuccess
                     ? "bg-emerald-600 text-white"
-                    : "bg-primary text-primary-foreground hover:bg-primary/90 disabled:opacity-40"
+                    : "bg-primary text-primary-foreground hover:bg-primary/90"
                 }`}
               >
                 {saving ? (
@@ -3192,7 +3863,11 @@ export default function Viewer({
                 ) : (
                   <Save className="h-3.5 w-3.5" />
                 )}
-                {savedSuccess ? "Saved!" : dirty ? "Save" : "Saved"}
+                {savedSuccess
+                  ? (isReview ? (isReviewer ? "Submitted!" : "Saved!") : "Saved!")
+                  : dirty
+                  ? (isReview ? (isReviewer ? "Submit review" : "Save") : "Save")
+                  : (isReview ? (isReviewer ? "Submitted" : "Saved") : "Saved")}
               </button>
             )}
 
@@ -3331,6 +4006,7 @@ export default function Viewer({
                   <kbd className="font-mono">T (hold)</kbd><span>Peek under the labels</span>
                   <kbd className="font-mono">[ ]</kbd><span>Brush or torch size</span>
                   <kbd className="font-mono">V</kbd><span>Cycle which labels show</span>
+                  <kbd className="font-mono">O</kbd><span>Toggle outline mode</span>
                   <kbd className="font-mono">&uarr;&darr;&larr;&rarr;</kbd><span>Step slice (hovered view)</span>
                   <kbd className="font-mono">PgUp/PgDn</kbd><span>Step 10 slices</span>
                   <kbd className="font-mono">Shift+click</kbd><span>Move crosshair</span>
@@ -3458,11 +4134,15 @@ export default function Viewer({
                 }}
                 onPointerUp={(e) => { if (e.pointerType === "touch") pinches.current[p].up(e); }}
                 onPointerCancel={(e) => { if (e.pointerType === "touch") pinches.current[p].up(e); }}>
-              <div className="flex h-full w-full items-center justify-center"
+              <div className="relative flex h-full w-full items-center justify-center"
                 style={{ transform: `translate(${pan[p].x}px, ${pan[p].y}px) scale(${zoom[p]})`, transformOrigin: "center" }}>
               <canvas
                 ref={(el) => { canvases.current[p] = el; }}
                 className={`${
+                  isReview && !scanComplete && (vol.axes[p].slice !== 2 || s >= slicesDone)
+                    ? "invisible"
+                    : ""
+                } ${
                   tool === "pan" || (spaceHeld && canZoomPan) ? (panning === p ? "cursor-grabbing" : "cursor-grab")
                     : tool === "torch" ? "cursor-none" : "cursor-crosshair"
                 } rounded`}
@@ -3482,6 +4162,13 @@ export default function Viewer({
                   touchAction: "none",
                 }}
                 onPointerDown={(e) => {
+                  if (isReview && !scanComplete) {
+                    setStatus("Painting disabled until scan download is complete");
+                    return;
+                  }
+                  if (isReviewLocked && (tool === "brush" || tool === "pencil" || tool === "move")) {
+                    return;
+                  }
                   setActivePlane(p);
                   const touch = e.pointerType === "touch";
                   if (e.pointerType === "pen") {
@@ -3495,8 +4182,8 @@ export default function Viewer({
                     if (e.button === 0 && canZoomPan) startPan(p, e);
                     return;
                   }
-                  if (tool === "move" && !e.shiftKey) {
-                    if (e.button === 0 && canAnnotate) startMove(p, e);
+                  if (tool === "move") {
+                    if (e.button === 0 && canAnnotate && !isReviewLocked) startMove(p, e);
                     return;
                   }
                   const hit = toVoxel(p, e);
@@ -3505,10 +4192,10 @@ export default function Viewer({
                     if (canMoveSlices) moveCursor(p, hit.a, hit.b);
                     return;
                   }
-                  if (e.button !== 0 || !canAnnotate) return;
+                  if (e.button !== 0 || !canAnnotate || isReviewLocked) return;
                   if (tool === "pencil") {
                     pencilPlane.current = p;
-                    outline.current = [[hit.fa ?? hit.a, hit.fb ?? hit.b]];
+                    pencilTrace.current = [[hit.fa ?? hit.a, hit.fb ?? hit.b]];
                     beginStroke(p, e);
                     setOutlineTick((n) => n + 1);
                   } else {
@@ -3530,9 +4217,9 @@ export default function Viewer({
                     const g = planeGeom(p, vol);
                     collab.updateCursor({ x: hit.a / g.w, y: hit.b / g.h, plane: p });
                   }
-                  if (tool === "move" && !moveDrag.current) {
+                  if (tool === "move" && !moveDrag.current && !boxSelecting) {
                     const sel = moveSel.current;
-                    const pt = sel && sel.plane === p && sel.region.masks.has(s) ? toPlanePoint(p, e.clientX, e.clientY) : null;
+                    const pt = sel && sel.plane === p && sel.combined.masks.has(s) ? toPlanePoint(p, e.clientX, e.clientY) : null;
                     const over = pt && sel ? handleAt(sel.to, pt.x, pt.y, pt.tol) : null;
                     const next = over ? HANDLE_CURSOR[over] : hit && labels?.[sampleAt(p, vol, hit.a, hit.b, s)] ? "pointer" : "crosshair";
                     if (next !== moveCursorStyle) setMoveCursorStyle(next);
@@ -3574,10 +4261,21 @@ export default function Viewer({
                 // the brush mid-stroke. Arrow keys step slices instead.
                 onMouseEnter={() => setActivePlane(p)}
               />
+              {isReview && !scanComplete && (
+                vol.axes[p].slice !== 2 ? (
+                  <div className="absolute inset-0 flex items-center justify-center text-xs text-muted-foreground pointer-events-none">
+                    Loading...
+                  </div>
+                ) : s >= slicesDone ? (
+                  <div className="absolute inset-0 flex items-center justify-center text-xs text-muted-foreground pointer-events-none">
+                    Loading slice {s + 1} of {depth}
+                  </div>
+                ) : null
+              )}
               </div>
               </div>
               <input type="range" min={0} max={depth - 1} value={s}
-                disabled={!canMoveSlices}
+                disabled={!canMoveSlices || (isReview && !scanComplete && vol.axes[p].slice !== 2)}
                 onChange={(e) => {
                   const v = Number(e.target.value);
                   setCursor((c) => setAxis(c, g.axis.slice, v));

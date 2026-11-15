@@ -5,7 +5,7 @@ import path from "node:path";
 import zlib from "node:zlib";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { eq, and } from "drizzle-orm";
+import { eq, and, isNotNull } from "drizzle-orm";
 import { db, caseAnnotation } from "@bme/db";
 import { isReviewMode } from "~/lib/app-mode";
 import { getReviewUser, reviewEdit, safeAnnotator } from "~/lib/review-auth";
@@ -126,10 +126,53 @@ export async function GET(
   if (isReviewMode()) return reviewHandler(_req, caseId);
 
   if (!ID.test(caseId)) return NextResponse.json({ error: "bad case id" }, { status: 400 });
+
+  const isDeleted = _req.nextUrl.searchParams.get("deleted") === "1";
+  const by = _req.nextUrl.searchParams.get("by");
+
+  if (isDeleted) {
+    let annotatorToFind = "_main";
+    if (by !== null && by !== "") {
+      if (!ANNOTATOR_RE.test(by)) {
+        return NextResponse.json({ error: "bad annotator name" }, { status: 400 });
+      }
+      annotatorToFind = by;
+    }
+
+    try {
+      const [row] = await db
+        .select()
+        .from(caseAnnotation)
+        .where(
+          and(
+            eq(caseAnnotation.caseId, caseId),
+            eq(caseAnnotation.annotator, annotatorToFind),
+            isNotNull(caseAnnotation.deletedAt),
+          ),
+        )
+        .limit(1);
+
+      if (!row || !row.labelsGzB64) {
+        return NextResponse.json({ exists: false, error: "deleted annotation labels not found" }, { status: 404 });
+      }
+
+      const rawBuf = zlib.gunzipSync(Buffer.from(row.labelsGzB64, "base64"));
+      return new NextResponse(new Uint8Array(rawBuf), {
+        headers: {
+          "Content-Type": "application/octet-stream",
+          "Content-Length": String(rawBuf.length),
+          "Cache-Control": "no-store",
+        },
+      });
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : String(e);
+      return NextResponse.json({ error: `failed to load deleted annotation: ${msg}` }, { status: 500 });
+    }
+  }
+
   const series = _req.nextUrl.searchParams.get("series") ?? "";
   const seriesArg = /^[a-z0-9-]{1,32}$/.test(series) ? [series] : [];
 
-  const by = _req.nextUrl.searchParams.get("by");
   let seg = path.join(root(), "data", "annotations", caseId, `${caseId}.seg.nrrd`);
 
   if (by !== null) {

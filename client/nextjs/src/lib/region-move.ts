@@ -172,6 +172,168 @@ export function dragBox(start: Box, handle: Handle, dx: number, dy: number, keep
 
 export const sameBox = (p: Box, q: Box) => p.x0 === q.x0 && p.y0 === q.y0 && p.x1 === q.x1 && p.y1 === q.y1;
 
+export function sameRegion(p: Region, q: Region): boolean {
+  if (p === q) return true;
+  if (p.label !== q.label || p.size !== q.size || !sameBox(p.from, q.from)) return false;
+  for (const [s, pm] of p.masks) {
+    const qm = q.masks.get(s);
+    if (!qm) return false;
+    for (let i = 0; i < pm.length; i++) {
+      if (pm[i] !== qm[i]) return false;
+    }
+  }
+  return true;
+}
+
+/**
+ * Combine several regions into one group region covering the union bounding box.
+ * Relative placement of every region's voxels is preserved.
+ */
+export function combineRegions(regions: Region[]): Region | null {
+  if (regions.length === 0) return null;
+  if (regions.length === 1) return regions[0];
+
+  let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+  let totalSize = 0;
+  for (const r of regions) {
+    if (r.from.x0 < x0) x0 = r.from.x0;
+    if (r.from.y0 < y0) y0 = r.from.y0;
+    if (r.from.x1 > x1) x1 = r.from.x1;
+    if (r.from.y1 > y1) y1 = r.from.y1;
+    totalSize += r.size;
+  }
+
+  const from: Box = { x0, y0, x1, y1 };
+  const bw = x1 - x0;
+  const bh = y1 - y0;
+  const masks = new Map<number, Uint8Array>();
+
+  for (const r of regions) {
+    const rw = r.from.x1 - r.from.x0;
+    const rh = r.from.y1 - r.from.y0;
+    const ox = r.from.x0 - x0;
+    const oy = r.from.y0 - y0;
+
+    for (const [s, rm] of r.masks) {
+      let gm = masks.get(s);
+      if (!gm) {
+        gm = new Uint8Array(bw * bh);
+        masks.set(s, gm);
+      }
+      for (let ry = 0; ry < rh; ry++) {
+        const rRow = ry * rw;
+        const gRow = (oy + ry) * bw;
+        for (let rx = 0; rx < rw; rx++) {
+          const v = rm[rRow + rx];
+          if (v) gm[gRow + (ox + rx)] = v;
+        }
+      }
+    }
+  }
+
+  return {
+    label: regions[0].label,
+    from,
+    masks,
+    size: totalSize,
+  };
+}
+
+/**
+ * Which region in `regions` contains in-plane voxel (a, b) on slice s.
+ */
+export function findRegionAt(regions: Region[], a: number, b: number, s: number): Region | null {
+  for (const r of regions) {
+    if (!r.masks.has(s)) continue;
+    if (a < r.from.x0 || a >= r.from.x1 || b < r.from.y0 || b >= r.from.y1) continue;
+    const rw = r.from.x1 - r.from.x0;
+    const m = r.masks.get(s)!;
+    if (m[(a - r.from.x0) + rw * (b - r.from.y0)] !== 0) {
+      return r;
+    }
+  }
+  return null;
+}
+
+/**
+ * Every painted region that intersects `box` on slice `s`.
+ * Visible labels only; bone marrow claims its lesions first, remaining
+ * visible marks are selected individually.
+ */
+export function findRegionsInBox(
+  box: Box,
+  s: number,
+  g: PlaneAccess,
+  allSlices: boolean,
+  visible: (label: number) => boolean,
+): Region[] {
+  const { w, h, depth, flat, labels } = g;
+  const x0 = Math.max(0, Math.min(w, box.x0));
+  const x1 = Math.max(0, Math.min(w, box.x1));
+  const y0 = Math.max(0, Math.min(h, box.y0));
+  const y1 = Math.max(0, Math.min(h, box.y1));
+  if (x0 >= x1 || y0 >= y1) return [];
+
+  const plane = w * h;
+  const covered = new Uint8Array(plane * (allSlices ? depth : 1));
+  const markCovered = (r: Region) => {
+    const rw = r.from.x1 - r.from.x0;
+    const rh = r.from.y1 - r.from.y0;
+    for (const [sl, rm] of r.masks) {
+      if (!allSlices && sl !== s) continue;
+      const sliceBase = allSlices ? sl * plane : 0;
+      for (let ry = 0; ry < rh; ry++) {
+        const b = r.from.y0 + ry;
+        if (b < 0 || b >= h) continue;
+        for (let rx = 0; rx < rw; rx++) {
+          if (rm[rx + rw * ry]) {
+            const a = r.from.x0 + rx;
+            if (a >= 0 && a < w) {
+              covered[a + w * b + sliceBase] = 1;
+            }
+          }
+        }
+      }
+    }
+  };
+
+  const found: Region[] = [];
+
+  // Pass 1: bone marrow (label 1) takes precedence, carrying marks inside it
+  for (let b = y0; b < y1; b++) {
+    for (let a = x0; a < x1; a++) {
+      const p = a + w * b + (allSlices ? s * plane : 0);
+      if (covered[p]) continue;
+      const v = labels[flat(a, b, s)];
+      if (v === 1 && visible(1)) {
+        const r = selectRegion({ a, b, s }, g, allSlices, visible);
+        if (r) {
+          found.push(r);
+          markCovered(r);
+        }
+      }
+    }
+  }
+
+  // Pass 2: remaining visible labels
+  for (let b = y0; b < y1; b++) {
+    for (let a = x0; a < x1; a++) {
+      const p = a + w * b + (allSlices ? s * plane : 0);
+      if (covered[p]) continue;
+      const v = labels[flat(a, b, s)];
+      if (v > 1 && visible(v)) {
+        const r = selectRegion({ a, b, s }, g, allSlices, visible);
+        if (r) {
+          found.push(r);
+          markCovered(r);
+        }
+      }
+    }
+  }
+
+  return found;
+}
+
 export const HANDLE_CURSOR: Record<Handle, string> = {
   move: "move",
   n: "ns-resize", s: "ns-resize",

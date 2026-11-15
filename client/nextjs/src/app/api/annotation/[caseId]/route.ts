@@ -5,11 +5,12 @@ import path from "node:path";
 import zlib from "node:zlib";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { eq, and } from "drizzle-orm";
-import { db, caseAnnotation } from "@bme/db";
+import { eq, and, isNull, isNotNull, inArray, asc } from "drizzle-orm";
+import { db, caseAnnotation, reviewEdit, reviewEditVersion, caseOwner, ownerForCase, caseReview } from "@bme/db";
 import { isReviewMode } from "~/lib/app-mode";
-import { getReviewUser, reviewEdit, safeAnnotator } from "~/lib/review-auth";
+import { getReviewUser, safeAnnotator } from "~/lib/review-auth";
 import { runAnnotationSync } from "~/lib/annotation-sync";
+import { logEvents } from "~/lib/annotation-events";
 
 function safeAnnotatorLocal(name: string | null | undefined): string | null {
   if (!name) return null;
@@ -43,8 +44,11 @@ async function reviewGetHandler(
     .from(caseAnnotation)
     .where(eq(caseAnnotation.caseId, caseId));
 
-  const mainRow = rows.find((r) => r.annotator === "_main");
-  const personRows = rows.filter((r) => r.annotator !== "_main");
+  const activeRows = rows.filter((r) => !r.deletedAt);
+  const tombstonedRows = rows.filter((r) => Boolean(r.deletedAt));
+
+  const mainRow = activeRows.find((r) => r.annotator === "_main");
+  const personRows = activeRows.filter((r) => r.annotator !== "_main");
 
   personRows.sort((a, b) => {
     const timeA = a.createdAt ? new Date(a.createdAt).getTime() : 0;
@@ -66,6 +70,31 @@ async function reviewGetHandler(
       isMain,
     };
   });
+
+  const deleted = tombstonedRows.map((r) => ({
+    name: r.annotator,
+    deletedAt: (r.deletedAt || new Date()).toISOString(),
+    reason: r.deletedReason ?? null,
+    supersededBy: r.supersededBy ?? null,
+  }));
+
+  let annotatedBy: string | null = null;
+  try {
+    const [ownerRow] = await db
+      .select()
+      .from(caseOwner)
+      .where(eq(caseOwner.caseId, caseId))
+      .limit(1);
+    if (ownerRow) {
+      annotatedBy = ownerRow.annotatedBy ?? null;
+    } else if (typeof ownerForCase === "function") {
+      annotatedBy = ownerForCase(caseId) ?? null;
+    }
+  } catch {
+    if (typeof ownerForCase === "function") {
+      annotatedBy = ownerForCase(caseId) ?? null;
+    }
+  }
 
   let review: { status: string; updatedAt: string } | null = null;
   const user = await getReviewUser(req);
@@ -91,8 +120,60 @@ async function reviewGetHandler(
     }
   }
 
+  const annotatedByAll: string[] = [];
+  const seenAnnotators = new Set<string>();
+  if (annotatedBy) {
+    annotatedByAll.push(annotatedBy);
+    seenAnnotators.add(annotatedBy);
+  }
+  for (const item of personRows) {
+    if (item.annotator && item.annotator !== "_main" && !seenAnnotators.has(item.annotator)) {
+      annotatedByAll.push(item.annotator);
+      seenAnnotators.add(item.annotator);
+    }
+  }
+
+  const reviewRows = await db
+    .select()
+    .from(caseReview)
+    .where(eq(caseReview.caseId, caseId))
+    .orderBy(asc(caseReview.markedAt));
+
+  const reviews = reviewRows.map((r) => ({
+    reviewer: r.reviewer,
+    role: r.role,
+    status: r.status,
+    locked: r.locked,
+    markedAt: (r.markedAt || r.updatedAt || new Date()).toISOString(),
+  }));
+
+  let myReview: {
+    reviewer: string;
+    role: string;
+    status: string;
+    locked: boolean;
+    markedAt: string;
+  } | null = null;
+
+  if (user) {
+    const safeMe = safeAnnotator(user.displayName) || safeAnnotator(user.username);
+    const found = reviews.find((r) => r.reviewer === safeMe);
+    if (found) {
+      myReview = found;
+    }
+  }
+
   if (!mainRow) {
-    return NextResponse.json({ exists: false, annotators, review });
+    return NextResponse.json({
+      exists: false,
+      annotators,
+      review,
+      reviews,
+      myReview,
+      annotatedBy,
+      annotatedByAll,
+      deleted,
+    });
   }
 
   return NextResponse.json({
@@ -101,6 +182,11 @@ async function reviewGetHandler(
     bytes: mainRow.bytes,
     annotators,
     review,
+    reviews,
+    myReview,
+    annotatedBy,
+    annotatedByAll,
+    deleted,
   });
 }
 
@@ -127,45 +213,175 @@ async function reviewPostHandler(
   const baseAnnotator = req.nextUrl.searchParams.get("base") || null;
 
   const safeMe = safeAnnotator(user.displayName) || safeAnnotator(user.username);
-  const kind = user.role === "team" ? "team" : "review";
-  const labelsGzB64 = zlib.gzipSync(body).toString("base64");
-  const now = new Date();
 
-  const [existing] = await db
+  const [myReviewRow] = await db
+    .select()
+    .from(caseReview)
+    .where(
+      and(
+        eq(caseReview.caseId, caseId),
+        eq(caseReview.reviewer, safeMe),
+      ),
+    )
+    .limit(1);
+
+  if (myReviewRow?.locked) {
+    return NextResponse.json(
+      { error: "You marked this case as reviewed. Unmark it to edit." },
+      { status: 423 },
+    );
+  }
+
+  const base = baseAnnotator || "_main";
+  const [earlierEdit] = await db
     .select()
     .from(reviewEdit)
     .where(
       and(
         eq(reviewEdit.caseId, caseId),
         eq(reviewEdit.reviewer, safeMe),
-        eq(reviewEdit.status, "open"),
       ),
     )
     .limit(1);
 
-  if (existing) {
-    await db
-      .update(reviewEdit)
-      .set({
-        labelsGzB64,
-        note,
-        baseAnnotator,
-        kind,
-        updatedAt: now,
-      })
-      .where(eq(reviewEdit.id, existing.id));
-  } else {
-    await db.insert(reviewEdit).values({
-      caseId,
-      reviewer: safeMe,
-      baseAnnotator,
+  if (!earlierEdit) {
+    const [baseRow] = await db
+      .select()
+      .from(caseAnnotation)
+      .where(
+        and(
+          eq(caseAnnotation.caseId, caseId),
+          eq(caseAnnotation.annotator, base),
+        ),
+      )
+      .limit(1);
+
+    if (baseRow?.labelsGzB64) {
+      try {
+        const baseBuf = zlib.gunzipSync(Buffer.from(baseRow.labelsGzB64, "base64"));
+        if (body.equals(baseBuf)) {
+          return NextResponse.json({ ok: true, unchanged: true });
+        }
+      } catch {
+        // ignore decompression failure and continue save
+      }
+    }
+  }
+
+  const kind = user.role === "team" ? "team" : "review";
+  const labelsGzB64 = zlib.gzipSync(body).toString("base64");
+  const now = new Date();
+
+  await db.transaction(async (tx) => {
+    const [existing] = await tx
+      .select()
+      .from(reviewEdit)
+      .where(
+        and(
+          eq(reviewEdit.caseId, caseId),
+          eq(reviewEdit.reviewer, safeMe),
+          eq(reviewEdit.status, "open"),
+        ),
+      )
+      .limit(1);
+
+    let editId: string;
+    if (existing) {
+      editId = existing.id;
+      await tx
+        .update(reviewEdit)
+        .set({
+          labelsGzB64,
+          note,
+          baseAnnotator,
+          kind,
+          updatedAt: now,
+        })
+        .where(eq(reviewEdit.id, existing.id));
+    } else {
+      const [inserted] = await tx
+        .insert(reviewEdit)
+        .values({
+          caseId,
+          reviewer: safeMe,
+          baseAnnotator,
+          labelsGzB64,
+          note,
+          status: "open",
+          kind,
+          createdAt: now,
+          updatedAt: now,
+        })
+        .returning({ id: reviewEdit.id });
+      editId = inserted.id;
+    }
+
+    await tx.insert(reviewEditVersion).values({
+      reviewEditId: editId,
       labelsGzB64,
       note,
-      status: "open",
-      kind,
-      createdAt: now,
-      updatedAt: now,
+      savedAt: now,
     });
+
+    if (user.role === "radiologist") {
+      const base = baseAnnotator || "_main";
+      const targets = base === "_main" ? ["_main"] : [base, "_main"];
+      await tx
+        .update(caseAnnotation)
+        .set({
+          deletedAt: now,
+          deletedBy: safeMe,
+          deletedReason: "superseded",
+          supersededBy: safeMe,
+        })
+        .where(
+          and(
+            eq(caseAnnotation.caseId, caseId),
+            inArray(caseAnnotation.annotator, targets),
+            isNull(caseAnnotation.deletedAt),
+          ),
+        );
+    }
+  });
+
+  try {
+    if (user.role === "radiologist") {
+      await logEvents([
+        {
+          caseId,
+          annotator: safeMe,
+          actor: safeMe,
+          action: "review-submit",
+        },
+        {
+          caseId,
+          annotator: safeMe,
+          actor: safeMe,
+          action: "supersede",
+          details: { base },
+        },
+      ]);
+    } else if (user.role === "team") {
+      await logEvents([
+        {
+          caseId,
+          annotator: safeMe,
+          actor: safeMe,
+          action: "team-submit",
+        },
+      ]);
+    } else {
+      await logEvents([
+        {
+          caseId,
+          annotator: safeMe,
+          actor: safeMe,
+          action: "review-submit",
+        },
+      ]);
+    }
+  } catch (err) {
+    console.error("failed to log review event:", err);
   }
 
   return NextResponse.json({
@@ -199,9 +415,50 @@ export async function GET(
 
   if (!ID.test(caseId)) return NextResponse.json({ error: "bad case id" }, { status: 400 });
 
+  let deleted: { name: string; deletedAt: string; reason: string | null; supersededBy: string | null }[] = [];
+  try {
+    const tombstonedRows = await db
+      .select()
+      .from(caseAnnotation)
+      .where(
+        and(
+          eq(caseAnnotation.caseId, caseId),
+          isNotNull(caseAnnotation.deletedAt),
+        ),
+      );
+    deleted = tombstonedRows.map((r) => ({
+      name: r.annotator,
+      deletedAt: (r.deletedAt || new Date()).toISOString(),
+      reason: r.deletedReason ?? null,
+      supersededBy: r.supersededBy ?? null,
+    }));
+  } catch {
+    deleted = [];
+  }
+  const tombstonedNames = new Set(deleted.map((d) => d.name));
+
+  let annotatedBy: string | null = null;
+  try {
+    const [ownerRow] = await db
+      .select()
+      .from(caseOwner)
+      .where(eq(caseOwner.caseId, caseId))
+      .limit(1);
+    if (ownerRow) {
+      annotatedBy = ownerRow.annotatedBy ?? null;
+    } else if (typeof ownerForCase === "function") {
+      annotatedBy = ownerForCase(caseId) ?? null;
+    }
+  } catch {
+    if (typeof ownerForCase === "function") {
+      annotatedBy = ownerForCase(caseId) ?? null;
+    }
+  }
+
   const caseDir = path.join(root(), "data", "annotations", caseId);
   const seg = path.join(caseDir, `${caseId}.seg.nrrd`);
-  const mainExists = fs.existsSync(seg);
+  const mainIsTombstoned = tombstonedNames.has("_main");
+  const mainExists = !mainIsTombstoned && fs.existsSync(seg);
 
   let mainStat: fs.Stats | null = null;
   if (mainExists) {
@@ -226,11 +483,13 @@ export async function GET(
         if (!f.isFile()) continue;
         const m = f.name.match(new RegExp(`^${caseId}__([A-Za-z0-9_-]{1,40})\\.seg\\.nrrd$`));
         if (!m) continue;
+        const name = m[1];
+        if (tombstonedNames.has(name)) continue;
         const filePath = path.join(caseDir, f.name);
         try {
           const st = fs.statSync(filePath);
           annotatorsList.push({
-            name: m[1],
+            name,
             savedAt: st.mtime.toISOString(),
             mtimeMs: st.mtimeMs,
             size: st.size,
@@ -261,8 +520,78 @@ export async function GET(
     };
   });
 
+  let reviews: {
+    reviewer: string;
+    role: string;
+    status: string;
+    locked: boolean;
+    markedAt: string;
+  }[] = [];
+  try {
+    const reviewRows = await db
+      .select()
+      .from(caseReview)
+      .where(eq(caseReview.caseId, caseId))
+      .orderBy(asc(caseReview.markedAt));
+
+    reviews = reviewRows.map((r) => ({
+      reviewer: r.reviewer,
+      role: r.role,
+      status: r.status,
+      locked: r.locked,
+      markedAt: (r.markedAt || r.updatedAt || new Date()).toISOString(),
+    }));
+  } catch {
+    reviews = [];
+  }
+
+  const annotatedByAll: string[] = [];
+  const seenAnnotators = new Set<string>();
+  if (annotatedBy) {
+    annotatedByAll.push(annotatedBy);
+    seenAnnotators.add(annotatedBy);
+  }
+
+  let personCopyNames: string[] = [];
+  try {
+    const dbActive = await db
+      .select({ annotator: caseAnnotation.annotator, createdAt: caseAnnotation.createdAt })
+      .from(caseAnnotation)
+      .where(
+        and(
+          eq(caseAnnotation.caseId, caseId),
+          isNull(caseAnnotation.deletedAt),
+        ),
+      );
+    const dbPersons = dbActive.filter((r) => r.annotator !== "_main");
+    dbPersons.sort((a, b) => {
+      const timeA = a.createdAt ? new Date(a.createdAt).getTime() : 0;
+      const timeB = b.createdAt ? new Date(b.createdAt).getTime() : 0;
+      return timeA - timeB;
+    });
+    personCopyNames = dbPersons.map((p) => p.annotator);
+  } catch {
+    personCopyNames = [];
+  }
+  if (personCopyNames.length === 0) {
+    personCopyNames = annotatorsList.map((a) => a.name);
+  }
+  for (const name of personCopyNames) {
+    if (name && name !== "_main" && !seenAnnotators.has(name)) {
+      annotatedByAll.push(name);
+      seenAnnotators.add(name);
+    }
+  }
+
   if (!mainExists || !mainStat) {
-    return NextResponse.json({ exists: false, annotators });
+    return NextResponse.json({
+      exists: false,
+      annotators,
+      annotatedBy,
+      annotatedByAll,
+      reviews,
+      deleted,
+    });
   }
 
   return NextResponse.json({
@@ -270,6 +599,10 @@ export async function GET(
     savedAt: mainStat.mtime.toISOString(),
     bytes: mainStat.size,
     annotators,
+    annotatedBy,
+    annotatedByAll,
+    reviews,
+    deleted,
   });
 }
 
@@ -306,6 +639,17 @@ export async function POST(
     const safeMe = annotator ? safeAnnotatorLocal(annotator) : null;
     runAnnotationSync({ me: safeMe, only: [caseId] }).catch(() => {
       // Swallowed: local save must never fail or slow down because of the database
+    });
+
+    logEvents([
+      {
+        caseId,
+        annotator: safeMe ?? undefined,
+        actor: safeMe ?? undefined,
+        action: "save",
+      },
+    ]).catch(() => {
+      // fire and forget
     });
 
     return NextResponse.json({ ok: true, detail: stdout.trim(), cloud: "queued" });

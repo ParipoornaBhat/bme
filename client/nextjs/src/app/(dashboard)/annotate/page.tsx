@@ -1,6 +1,7 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { Suspense, useEffect, useMemo, useState } from "react";
+import { useRouter, useSearchParams } from "next/navigation";
 import { Boxes, CheckCircle2, ChevronLeft, ChevronRight, Circle, Download, Flag, Layers, Search, Users } from "lucide-react";
 import type { FlagRecord } from "~/lib/flag-store";
 import { useFocusMode } from "~/lib/useFocusMode";
@@ -22,9 +23,10 @@ type Case = {
   savedAt: string | null;
   sourceName: string | null;
   flag: FlagRecord | null;
+  reviewedBy?: Array<{ reviewer: string; status: "reviewed" | "reviewed_with_edits"; locked: boolean }>;
 };
 
-const ALL_FILTERS = ["all", "bme", "non_bme", "annotated", "unannotated", "flagged"] as const;
+const ALL_FILTERS = ["all", "bme", "non_bme", "annotated", "unannotated", "flagged", "reviewed", "not_reviewed"] as const;
 type Filter = (typeof ALL_FILTERS)[number];
 
 function matchesFilter(c: Case, f: Filter) {
@@ -33,22 +35,35 @@ function matchesFilter(c: Case, f: Filter) {
   if (f === "annotated") return c.annotated;
   if (f === "unannotated") return !c.annotated;
   if (f === "flagged") return Boolean(c.flag);
+  if (f === "reviewed") return Boolean(c.reviewedBy && c.reviewedBy.length > 0);
+  if (f === "not_reviewed") return !c.reviewedBy || c.reviewedBy.length === 0;
   return true;
 }
 
-export default function AnnotatePage() {
+function AnnotatePageContent() {
   const isReview = isReviewMode();
+  const router = useRouter();
+  const searchParams = useSearchParams();
+
+  const urlCase = searchParams.get("case");
+  const urlBy = searchParams.get("by");
+  const urlDeleted = searchParams.get("deleted");
+  const urlCompare = searchParams.get("compare");
+
   const filters = useMemo(
-    () => (isReview ? (["all", "bme", "non_bme", "annotated", "unannotated"] as const) : ALL_FILTERS),
+    () =>
+      isReview
+        ? (["all", "bme", "non_bme", "annotated", "unannotated", "reviewed", "not_reviewed"] as const)
+        : ALL_FILTERS,
     [isReview],
   );
-  const [tab, setTab] = useState<"2d" | "3d">(isReview ? "3d" : "2d");
+  const [tab, setTab] = useState<"2d" | "3d">(isReview || urlCase ? "3d" : "2d");
   const [cases, setCases] = useState<Case[]>([]);
   const [annotators, setAnnotators] = useState<string[]>([]);
   const [who, setWho] = useState("");
   const [q, setQ] = useState("");
   const [filter, setFilter] = useState<Filter>("all");
-  const [selected, setSelected] = useState<string | null>(null);
+  const [selected, setSelected] = useState<string | null>(urlCase ?? null);
   const [showNames, setShowNames] = useState(false);
   const [ledger, setLedger] = useState<Record<string, { annotator: string | null; at: string; localFile: boolean }>>({});
   const [needFrom, setNeedFrom] = useState<string[]>([]);
@@ -57,9 +72,17 @@ export default function AnnotatePage() {
   // Held here, not in the viewer: the viewer is remounted on every case switch.
   const focus = useFocusMode<ViewerView>();
 
+  // If urlCase changes in URL, switch to it and ensure 3D tab
+  useEffect(() => {
+    if (urlCase && urlCase !== selected) {
+      setSelected(urlCase);
+      setTab("3d");
+    }
+  }, [urlCase, selected]);
+
   // Restore tab and filters from localStorage
   useEffect(() => {
-    if (isReview) {
+    if (isReview || urlCase) {
       setTab("3d");
       return;
     }
@@ -73,7 +96,7 @@ export default function AnnotatePage() {
       const savedFilter = localStorage.getItem("bme_annotate_3d_filter") as Filter | null;
       if (savedFilter && ALL_FILTERS.includes(savedFilter)) setFilter(savedFilter);
     } catch { /* ignore */ }
-  }, [isReview]);
+  }, [isReview, urlCase]);
 
   const handleTabChange = (newTab: "2d" | "3d") => {
     setTab(newTab);
@@ -90,6 +113,7 @@ export default function AnnotatePage() {
     try {
       localStorage.setItem("bme_annotate_3d_selected", caseId);
     } catch { /* ignore */ }
+    router.replace(`/annotate?case=${encodeURIComponent(caseId)}`);
   };
 
   const handleWhoChange = (val: string) => {
@@ -113,21 +137,20 @@ export default function AnnotatePage() {
     } catch { /* ignore */ }
   };
 
-
   const load = async () => {
     try {
-    const res = await fetch("/api/cases", { cache: "no-store" });
-    if (!res.ok) throw new Error("cases unavailable");
-    const j = await res.json();
-    const list: Case[] = j.cases ?? [];
-    setCases(list);
-    setAnnotators(j.annotators ?? []);
-    setShowNames(Boolean(j.showSourceNames));
-    setSelected((prev) => {
-      const want = prev ?? localStorage.getItem("bme_annotate_3d_selected");
-      return want && list.some((c) => c.id === want) ? want : null;
-    });
-    setCasesState("ready");
+      const res = await fetch("/api/cases", { cache: "no-store" });
+      if (!res.ok) throw new Error("cases unavailable");
+      const j = await res.json();
+      const list: Case[] = j.cases ?? [];
+      setCases(list);
+      setAnnotators(j.annotators ?? []);
+      setShowNames(Boolean(j.showSourceNames));
+      setSelected((prev) => {
+        const want = urlCase ?? prev ?? localStorage.getItem("bme_annotate_3d_selected");
+        return want && list.some((c) => c.id === want) ? want : (list[0]?.id ?? null);
+      });
+      setCasesState("ready");
     } catch {
       setCases([]);
       setSelected(null);
@@ -186,7 +209,7 @@ export default function AnnotatePage() {
                 <button
                   key={id}
                   onClick={() => handleTabChange(id)}
-                  className={`inline-flex items-center gap-1.5 rounded-md px-3 py-1 text-xs font-medium transition ${
+                  className={`inline-flex items-center gap-1.5 rounded-md px-3 py-1 text-xs font-medium transition cursor-pointer ${
                     tab === id
                       ? "bg-primary text-primary-foreground font-semibold"
                       : "text-muted-foreground hover:text-foreground hover:bg-muted"
@@ -219,214 +242,251 @@ export default function AnnotatePage() {
       <div className="flex min-h-0 flex-1 flex-col">
         {!isReview && tab === "2d" && <Painter2D />}
 
-      {/* Mobile/Tablet Case List Toggle for 3D */}
-      {tab === "3d" && (
-        <div className="flex lg:hidden items-center justify-between gap-2 bg-card/90 backdrop-blur p-2 rounded-lg border border-border mb-2">
-          <button
-            type="button"
-            onClick={() => setCaseListCollapsed(!caseListCollapsed)}
-            className="inline-flex items-center gap-1.5 rounded-md border border-border bg-background px-2.5 py-1.5 text-xs font-semibold text-foreground hover:bg-muted transition shadow-sm cursor-pointer"
-          >
-            <Boxes className="h-3.5 w-3.5 text-primary" />
-            <span>{caseListCollapsed ? `Show Cases (${cases.length})` : "Hide Cases"}</span>
-            {caseListCollapsed ? <ChevronRight className="h-3.5 w-3.5" /> : <ChevronLeft className="h-3.5 w-3.5" />}
-          </button>
-          {selected && (
-            <span className="text-xs font-mono font-medium text-muted-foreground truncate max-w-[160px]">
-              Case: <strong className="text-foreground">{selected}</strong>
-            </span>
-          )}
-        </div>
-      )}
-
-      {tab === "3d" && (
-        // On a wide screen the case list and the viewer share the window
-        // height, and only the list scrolls, so the toolbar never leaves view.
-        <div className={`grid gap-3 lg:min-h-0 lg:flex-1 lg:grid-rows-[minmax(0,1fr)] ${caseListCollapsed ? "grid-cols-1" : "lg:grid-cols-[230px_minmax(0,1fr)]"}`}>
-          {!caseListCollapsed && (
-            <div className="flex min-h-0 flex-col gap-3 rounded-lg border border-border bg-card p-2.5">
-              <div className="flex items-center gap-1.5">
-                <div className="relative flex-1">
-                  <Search className="absolute left-2.5 top-2.5 h-4 w-4 text-muted-foreground" />
-                  <input
-                    value={q}
-                    onChange={(e) => handleQChange(e.target.value)}
-                    placeholder="Find case"
-                    className="w-full rounded-md border border-border bg-background py-1.5 pl-8 pr-2 text-sm"
-                  />
-                </div>
-                <button
-                  type="button"
-                  onClick={() => setCaseListCollapsed(true)}
-                  title="Collapse case list"
-                  className="p-1.5 rounded border border-border bg-background text-muted-foreground hover:text-foreground hover:bg-muted transition cursor-pointer"
-                >
-                  <ChevronLeft className="h-4 w-4" />
-                </button>
-              </div>
-
-              <div className="relative">
-                <Users className="absolute left-2.5 top-2.5 h-4 w-4 text-muted-foreground" />
-                <select
-                  value={who}
-                  onChange={(e) => handleWhoChange(e.target.value)}
-                  className="w-full rounded-md border border-border bg-background py-1.5 pl-8 pr-2 text-sm"
-                >
-                  <option value="">Everyone&apos;s cases</option>
-                  {annotators.map((a) => (
-                    <option key={a} value={a}>{a}</option>
-                  ))}
-                </select>
-              </div>
-
-              <div className="flex flex-wrap gap-1 text-xs">
-                {filters.map((f) => {
-                  const count = f === "all" ? undefined : cases.filter((c) => matchesFilter(c, f)).length;
-                  return (
-                    <button
-                      key={f}
-                      type="button"
-                      onClick={() => handleFilterChange(f)}
-                      className={`inline-flex items-center gap-1 rounded px-2 py-1 transition cursor-pointer ${
-                        filter === f
-                          ? f === "flagged"
-                            ? "bg-amber-500 text-white font-medium"
-                            : "bg-primary text-primary-foreground font-medium"
-                          : f === "flagged" && (count ?? 0) > 0
-                          ? "bg-amber-500/15 text-amber-500 hover:bg-amber-500/25"
-                          : "bg-muted text-muted-foreground hover:text-foreground"
-                      }`}
-                    >
-                      {f === "flagged" && <Flag className="h-3 w-3 fill-current" />}
-                      <span>{f.replace("_", " ")}</span>
-                      {count !== undefined && <span className="opacity-70 text-[10px]">({count})</span>}
-                    </button>
-                  );
-                })}
-              </div>
-
-              <div className="max-h-[min(calc(100vh_-_250px),1100px)] space-y-1 overflow-y-auto rounded-lg border border-border p-1 lg:max-h-none lg:min-h-0 lg:flex-1">
-                {visible.map((c) => (
-                  <button
-                    key={c.id}
-                    onClick={() => handleSelectCase(c.id)}
-                    title={c.sourceName ?? undefined}
-                    className={`flex w-full items-center gap-2 rounded-md px-2.5 py-2 text-left text-sm transition cursor-pointer ${
-                      selected === c.id ? "bg-accent" : "hover:bg-accent/50"
-                    }`}
-                  >
-                    {c.annotated ? (
-                      <CheckCircle2 className="h-4 w-4 shrink-0 text-emerald-500" />
-                    ) : !isReview && ledger[c.id] ? (
-                      <Download className="h-4 w-4 shrink-0 text-amber-500" />
-                    ) : (
-                      <Circle className="h-4 w-4 shrink-0 text-muted-foreground/40" />
-                    )}
-                    <span className="flex-1">
-                      <span className="font-medium tabular-nums">{c.id}</span>
-                      {!isReview && ledger[c.id]?.annotator && (
-                        <span className="block text-[10px] leading-tight text-muted-foreground">
-                          {c.annotated ? "by " : "ask "}{ledger[c.id].annotator}
-                        </span>
-                      )}
-                    </span>
-                    {!isReview && c.flag && (
-                      <span title={`Flagged: ${c.flag.reason || "Not Sure"}`}>
-                        <Flag className="h-3.5 w-3.5 shrink-0 fill-amber-400 text-amber-400" />
-                      </span>
-                    )}
-                    {c.isotropic && (
-                      <span className="rounded bg-muted px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
-                        Iso
-                      </span>
-                    )}
-                    <span
-                      className={`h-2 w-2 shrink-0 rounded-full ${
-                        c.cls === "bme" ? "bg-rose-500" : "bg-slate-400"
-                      }`}
-                      title={c.cls === "bme" ? "BME positive" : "No BME"}
-                    />
-                  </button>
-                ))}
-                {casesState === "loading" && (
-                  <p className="p-4 text-center text-xs text-muted-foreground">Loading cases…</p>
-                )}
-                {casesState === "error" && (
-                  <p className="p-4 text-center text-xs text-destructive">Could not load the case list.</p>
-                )}
-                {casesState === "ready" && cases.length === 0 && (
-                  <p className="p-4 text-center text-xs text-muted-foreground">
-                    No 3D cases yet. Add folders under data/newbme and run pnpm data:process:bme.
-                  </p>
-                )}
-                {casesState === "ready" && cases.length > 0 && visible.length === 0 && (
-                  <p className="p-4 text-center text-xs text-muted-foreground">
-                    No cases match.
-                  </p>
-                )}
-              </div>
-
-              <p className="shrink-0 text-[11px] leading-snug text-muted-foreground">
-                <span className="mr-2 inline-block h-2 w-2 rounded-full bg-rose-500" />BME
-                <span className="ml-3 mr-2 inline-block h-2 w-2 rounded-full bg-slate-400" />No BME
-                <br />
-                <strong>Iso</strong> = thin slices, best for 3D. Annotate these first.
-                {!isReview && (
-                  <>
-                    <br />
-                    <Download className="mr-1 inline h-3 w-3 text-amber-500" />
-                    means a teammate annotated it — ask them to send the file.
-                  </>
-                )}
-              </p>
-            </div>
-          )}
-
-          <div className="flex min-h-0 flex-col">
-            {caseListCollapsed && (
-              <div className="mb-2 hidden lg:flex items-center">
-                <button
-                  type="button"
-                  onClick={() => setCaseListCollapsed(false)}
-                  className="inline-flex items-center gap-1.5 rounded-md border border-border bg-card px-2.5 py-1 text-xs font-semibold text-foreground hover:bg-muted transition shadow-sm cursor-pointer"
-                >
-                  <Boxes className="h-3.5 w-3.5 text-primary" />
-                  <span>Show Cases ({cases.length})</span>
-                </button>
-              </div>
-            )}
-            {casesState === "loading" ? (
-              <div className="flex h-96 items-center justify-center gap-2 rounded-lg border border-dashed border-border text-sm text-muted-foreground">
-                Loading cases…
-              </div>
-            ) : casesState === "error" ? (
-              <div className="flex h-96 items-center justify-center rounded-lg border border-dashed border-border px-6 text-center text-sm text-muted-foreground">
-                Could not load the case list. Refresh the page once the server is up.
-              </div>
-            ) : cases.length === 0 ? (
-              <div className="flex h-96 items-center justify-center rounded-lg border border-dashed border-border px-6 text-center text-sm text-muted-foreground">
-                No 3D cases yet. Put one folder per patient in data/newbme, then run pnpm data:process:bme.
-              </div>
-            ) : selected ? (
-              <Viewer
-                key={selected}
-                caseId={selected}
-                onSaved={load}
-                savedOnDisk={cases.find((c) => c.id === selected)?.annotated ?? false}
-                flag={cases.find((c) => c.id === selected)?.flag ?? null}
-                focus={focus}
-                onPrevCase={prevCase ? () => handleSelectCase(prevCase) : undefined}
-                onNextCase={nextCase ? () => handleSelectCase(nextCase) : undefined}
-              />
-            ) : (
-              <div className="flex h-96 items-center justify-center rounded-lg border border-dashed border-border text-sm text-muted-foreground">
-                Pick a case from the list to start annotating.
-              </div>
+        {/* Mobile/Tablet Case List Toggle for 3D */}
+        {tab === "3d" && (
+          <div className="flex lg:hidden items-center justify-between gap-2 bg-card/90 backdrop-blur p-2 rounded-lg border border-border mb-2">
+            <button
+              type="button"
+              onClick={() => setCaseListCollapsed(!caseListCollapsed)}
+              className="inline-flex items-center gap-1.5 rounded-md border border-border bg-background px-2.5 py-1.5 text-xs font-semibold text-foreground hover:bg-muted transition shadow-sm cursor-pointer"
+            >
+              <Boxes className="h-3.5 w-3.5 text-primary" />
+              <span>{caseListCollapsed ? `Show Cases (${cases.length})` : "Hide Cases"}</span>
+              {caseListCollapsed ? <ChevronRight className="h-3.5 w-3.5" /> : <ChevronLeft className="h-3.5 w-3.5" />}
+            </button>
+            {selected && (
+              <span className="text-xs font-mono font-medium text-muted-foreground truncate max-w-[160px]">
+                Case: <strong className="text-foreground">{selected}</strong>
+              </span>
             )}
           </div>
-        </div>
-      )}
+        )}
+
+        {tab === "3d" && (
+          <div className={`grid gap-3 lg:min-h-0 lg:flex-1 lg:grid-rows-[minmax(0,1fr)] ${caseListCollapsed ? "grid-cols-1" : "lg:grid-cols-[230px_minmax(0,1fr)]"}`}>
+            {!caseListCollapsed && (
+              <div className="flex min-h-0 flex-col gap-3 rounded-lg border border-border bg-card p-2.5">
+                <div className="flex items-center gap-1.5">
+                  <div className="relative flex-1">
+                    <Search className="absolute left-2.5 top-2.5 h-4 w-4 text-muted-foreground" />
+                    <input
+                      value={q}
+                      onChange={(e) => handleQChange(e.target.value)}
+                      placeholder="Find case"
+                      className="w-full rounded-md border border-border bg-background py-1.5 pl-8 pr-2 text-sm"
+                    />
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setCaseListCollapsed(true)}
+                    title="Collapse case list"
+                    className="p-1.5 rounded border border-border bg-background text-muted-foreground hover:text-foreground hover:bg-muted transition cursor-pointer"
+                  >
+                    <ChevronLeft className="h-4 w-4" />
+                  </button>
+                </div>
+
+                <div className="relative">
+                  <Users className="absolute left-2.5 top-2.5 h-4 w-4 text-muted-foreground" />
+                  <select
+                    value={who}
+                    onChange={(e) => handleWhoChange(e.target.value)}
+                    className="w-full rounded-md border border-border bg-background py-1.5 pl-8 pr-2 text-sm cursor-pointer"
+                  >
+                    <option value="">Everyone&apos;s cases</option>
+                    {annotators.map((a) => (
+                      <option key={a} value={a}>{a}</option>
+                    ))}
+                  </select>
+                </div>
+
+                <div className="flex flex-wrap gap-1 text-xs">
+                  {filters.map((f) => {
+                    const count = f === "all" ? undefined : cases.filter((c) => matchesFilter(c, f)).length;
+                    return (
+                      <button
+                        key={f}
+                        type="button"
+                        onClick={() => handleFilterChange(f)}
+                        className={`inline-flex items-center gap-1 rounded px-2 py-1 transition cursor-pointer ${
+                          filter === f
+                            ? f === "flagged"
+                              ? "bg-amber-500 text-white font-medium"
+                              : "bg-primary text-primary-foreground font-medium"
+                            : f === "flagged" && (count ?? 0) > 0
+                            ? "bg-amber-500/15 text-amber-500 hover:bg-amber-500/25"
+                            : "bg-muted text-muted-foreground hover:text-foreground"
+                        }`}
+                      >
+                        {f === "flagged" && <Flag className="h-3 w-3 fill-current" />}
+                        <span>{f.replace("_", " ")}</span>
+                        {count !== undefined && <span className="opacity-70 text-[10px]">({count})</span>}
+                      </button>
+                    );
+                  })}
+                </div>
+
+                <div className="max-h-[min(calc(100vh_-_250px),1100px)] space-y-1 overflow-y-auto rounded-lg border border-border p-1 lg:max-h-none lg:min-h-0 lg:flex-1">
+                  {visible.map((c) => (
+                    <button
+                      key={c.id}
+                      onClick={() => handleSelectCase(c.id)}
+                      title={c.sourceName ?? undefined}
+                      className={`flex w-full items-center gap-2 rounded-md px-2.5 py-2 text-left text-sm transition cursor-pointer ${
+                        selected === c.id ? "bg-accent" : "hover:bg-accent/50"
+                      }`}
+                    >
+                      {c.annotated ? (
+                        <CheckCircle2 className="h-4 w-4 shrink-0 text-emerald-500" />
+                      ) : !isReview && ledger[c.id] ? (
+                        <Download className="h-4 w-4 shrink-0 text-amber-500" />
+                      ) : (
+                        <Circle className="h-4 w-4 shrink-0 text-muted-foreground/40" />
+                      )}
+                      <span className="flex-1">
+                        <span className="font-medium tabular-nums">{c.id}</span>
+                        {!isReview && ledger[c.id]?.annotator && (
+                          <span className="block text-[10px] leading-tight text-muted-foreground">
+                            {c.annotated ? "by " : "ask "}{ledger[c.id].annotator}
+                          </span>
+                        )}
+                      </span>
+                      {c.reviewedBy && c.reviewedBy.length > 0 && (
+                        <span className="flex items-center gap-0.5 shrink-0">
+                          {c.reviewedBy.map((rb, idx) => {
+                            const statusText =
+                              rb.status === "reviewed_with_edits"
+                                ? `Reviewed with edits by ${rb.reviewer}`
+                                : `Reviewed by ${rb.reviewer}`;
+                            const initial = rb.reviewer ? rb.reviewer.charAt(0).toUpperCase() : "R";
+                            return (
+                              <span
+                                key={idx}
+                                title={statusText}
+                                className={`inline-flex h-4 w-4 shrink-0 items-center justify-center rounded-full text-[10px] font-bold leading-none ${
+                                  rb.status === "reviewed_with_edits"
+                                    ? "bg-amber-500/20 text-amber-500 border border-amber-500/40"
+                                    : "bg-emerald-500/20 text-emerald-500 border border-emerald-500/40"
+                                }`}
+                              >
+                                {initial}
+                              </span>
+                            );
+                          })}
+                        </span>
+                      )}
+                      {!isReview && c.flag && (
+                        <span title={`Flagged: ${c.flag.reason || "Not Sure"}`}>
+                          <Flag className="h-3.5 w-3.5 shrink-0 fill-amber-400 text-amber-400" />
+                        </span>
+                      )}
+                      {c.isotropic && (
+                        <span className="rounded bg-muted px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+                          Iso
+                        </span>
+                      )}
+                      <span
+                        className={`h-2 w-2 shrink-0 rounded-full ${
+                          c.cls === "bme" ? "bg-rose-500" : "bg-slate-400"
+                        }`}
+                        title={c.cls === "bme" ? "BME positive" : "No BME"}
+                      />
+                    </button>
+                  ))}
+                  {casesState === "loading" && (
+                    <p className="p-4 text-center text-xs text-muted-foreground">Loading cases…</p>
+                  )}
+                  {casesState === "error" && (
+                    <p className="p-4 text-center text-xs text-destructive">Could not load the case list.</p>
+                  )}
+                  {casesState === "ready" && cases.length === 0 && (
+                    <p className="p-4 text-center text-xs text-muted-foreground">
+                      No 3D cases yet. Add folders under data/newbme and run pnpm data:process:bme.
+                    </p>
+                  )}
+                  {casesState === "ready" && cases.length > 0 && visible.length === 0 && (
+                    <p className="p-4 text-center text-xs text-muted-foreground">
+                      No cases match.
+                    </p>
+                  )}
+                </div>
+
+                <p className="shrink-0 text-[11px] leading-snug text-muted-foreground">
+                  <span className="mr-2 inline-block h-2 w-2 rounded-full bg-rose-500" />BME
+                  <span className="ml-3 mr-2 inline-block h-2 w-2 rounded-full bg-slate-400" />No BME
+                  <br />
+                  <strong>Iso</strong> = thin slices, best for 3D. Annotate these first.
+                  {!isReview && (
+                    <>
+                      <br />
+                      <Download className="mr-1 inline h-3 w-3 text-amber-500" />
+                      means a teammate annotated it — ask them to send the file.
+                    </>
+                  )}
+                </p>
+              </div>
+            )}
+
+            <div className="flex min-h-0 flex-col">
+              {caseListCollapsed && (
+                <div className="mb-2 hidden lg:flex items-center">
+                  <button
+                    type="button"
+                    onClick={() => setCaseListCollapsed(false)}
+                    className="inline-flex items-center gap-1.5 rounded-md border border-border bg-card px-2.5 py-1 text-xs font-semibold text-foreground hover:bg-muted transition shadow-sm cursor-pointer"
+                  >
+                    <Boxes className="h-3.5 w-3.5 text-primary" />
+                    <span>Show Cases ({cases.length})</span>
+                  </button>
+                </div>
+              )}
+              {casesState === "loading" ? (
+                <div className="flex h-96 items-center justify-center gap-2 rounded-lg border border-dashed border-border text-sm text-muted-foreground">
+                  Loading cases…
+                </div>
+              ) : casesState === "error" ? (
+                <div className="flex h-96 items-center justify-center rounded-lg border border-dashed border-border px-6 text-center text-sm text-muted-foreground">
+                  Could not load the case list. Refresh the page once the server is up.
+                </div>
+              ) : cases.length === 0 ? (
+                <div className="flex h-96 items-center justify-center rounded-lg border border-dashed border-border px-6 text-center text-sm text-muted-foreground">
+                  No 3D cases yet. Put one folder per patient in data/newbme, then run pnpm data:process:bme.
+                </div>
+              ) : selected ? (
+                <Viewer
+                  key={`${selected}-${urlBy || ""}-${urlDeleted || ""}-${urlCompare || ""}`}
+                  caseId={selected}
+                  onSaved={load}
+                  savedOnDisk={cases.find((c) => c.id === selected)?.annotated ?? false}
+                  flag={cases.find((c) => c.id === selected)?.flag ?? null}
+                  focus={focus}
+                  onPrevCase={prevCase ? () => handleSelectCase(prevCase) : undefined}
+                  onNextCase={nextCase ? () => handleSelectCase(nextCase) : undefined}
+                  nextCaseId={nextCase ?? undefined}
+                />
+              ) : (
+                <div className="flex h-96 items-center justify-center rounded-lg border border-dashed border-border text-sm text-muted-foreground">
+                  Pick a case from the list to start annotating.
+                </div>
+              )}
+            </div>
+          </div>
+        )}
       </div>
     </div>
+  );
+}
+
+export default function AnnotatePage() {
+  return (
+    <Suspense
+      fallback={
+        <div className="flex h-96 items-center justify-center text-sm text-muted-foreground">
+          Loading annotation workspace…
+        </div>
+      }
+    >
+      <AnnotatePageContent />
+    </Suspense>
   );
 }

@@ -145,6 +145,7 @@ const STORAGE_KEY = "bme_overlay_view";
 export function useOverlayView() {
   const [opacity, setOpacityState] = useState<number>(100);
   const [view, setViewState] = useState<OverlayViewMode>("both");
+  const [outline, setOutlineState] = useState<boolean>(false);
 
   useEffect(() => {
     try {
@@ -156,6 +157,9 @@ export function useOverlayView() {
         }
         if (["both", "lesion", "bone", "none"].includes(parsed.view)) {
           setViewState(parsed.view);
+        }
+        if (typeof parsed.outline === "boolean") {
+          setOutlineState(parsed.outline);
         }
       }
     } catch {
@@ -187,6 +191,18 @@ export function useOverlayView() {
     });
   }, []);
 
+  const setOutline = useCallback((val: boolean | ((prev: boolean) => boolean)) => {
+    setOutlineState((prev) => {
+      const next = typeof val === "function" ? val(prev) : val;
+      try {
+        const saved = localStorage.getItem(STORAGE_KEY);
+        const current = saved ? JSON.parse(saved) : {};
+        localStorage.setItem(STORAGE_KEY, JSON.stringify({ ...current, outline: next }));
+      } catch { /* ignore */ }
+      return next;
+    });
+  }, []);
+
   const cycleView = useCallback(() => {
     const order: OverlayViewMode[] = ["both", "lesion", "bone", "none"];
     setView((curr) => {
@@ -198,8 +214,10 @@ export function useOverlayView() {
   return {
     opacity,
     view,
+    outline,
     setOpacity,
     setView,
+    setOutline,
     cycleView,
   };
 }

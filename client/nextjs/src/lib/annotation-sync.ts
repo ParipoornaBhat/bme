@@ -10,10 +10,14 @@ import {
   db,
   caseAnnotation,
   reviewEdit,
+  reviewAccount,
+  caseOwner,
+  ownerForCase,
   decide,
   type DecideInput,
   type SyncAction,
 } from "@bme/db";
+import { logEvents, type NewAnnotationEvent } from "./annotation-events";
 
 const exec = promisify(execFile);
 
@@ -51,6 +55,7 @@ export type SyncReport = {
   pushed: number;
   pulled: number;
   recorded: number;
+  retired?: number;
   appliedOnline: number;
   conflicts: { caseId: string; annotator: string }[];
   skipped: { caseId: string; annotator: string; why: SyncSkippedReason }[];
@@ -85,7 +90,7 @@ function getPythonPath(r: string): string {
   return candidates.find((p) => p === "python" || p === "python3" || fs.existsSync(p))!;
 }
 
-function formatBackupTimestamp(d: Date): string {
+function formatBackupTimestamp(d: Date, reason?: string): string {
   const pad = (n: number) => String(n).padStart(2, "0");
   const yyyy = d.getFullYear();
   const mm = pad(d.getMonth() + 1);
@@ -93,7 +98,8 @@ function formatBackupTimestamp(d: Date): string {
   const hh = pad(d.getHours());
   const min = pad(d.getMinutes());
   const ss = pad(d.getSeconds());
-  return `${yyyy}${mm}${dd}-${hh}${min}${ss}-cloud`;
+  const stamp = `${yyyy}${mm}${dd}-${hh}${min}${ss}`;
+  return reason ? `${stamp}-${reason}` : `${stamp}-cloud`;
 }
 
 interface LocalFileInfo {
@@ -113,6 +119,9 @@ interface RemoteIndexEntry {
   updatedAt: Date;
   scanFingerprint: string | null;
   createdAt: Date;
+  deletedAt: Date | null;
+  deletedReason: string | null;
+  supersededBy: string | null;
 }
 
 const GLOBAL_LOCK_KEY = Symbol.for("bme.annotationSync.lock");
@@ -171,10 +180,13 @@ async function executeSync(options: AnnotationSyncOptions): Promise<SyncReport> 
   const skipped: { caseId: string; annotator: string; why: SyncSkippedReason }[] = [];
   const changedCases: string[] = [];
   const dryRunActions: { caseId: string; annotator: string; action: string }[] = [];
+  const eventRows: NewAnnotationEvent[] = [];
 
   let pushed = 0;
   let pulled = 0;
   let recorded = 0;
+  let retired = 0;
+  let appliedOnline = 0;
 
   try {
     const onlyCases = options.only
@@ -182,7 +194,7 @@ async function executeSync(options: AnnotationSyncOptions): Promise<SyncReport> 
       : null;
     const onlySet = onlyCases ? new Set(onlyCases) : null;
 
-    // Step A: read the remote index only
+    // Step A: read the remote index with deletedAt, deletedReason, supersededBy
     let remoteRows: {
       caseId: string;
       annotator: string;
@@ -191,6 +203,9 @@ async function executeSync(options: AnnotationSyncOptions): Promise<SyncReport> 
       updatedAt: Date;
       scanFingerprint: string | null;
       createdAt: Date;
+      deletedAt: Date | null;
+      deletedReason: string | null;
+      supersededBy: string | null;
     }[] = [];
 
     const baseQuery = db
@@ -202,6 +217,9 @@ async function executeSync(options: AnnotationSyncOptions): Promise<SyncReport> 
         updatedAt: caseAnnotation.updatedAt,
         scanFingerprint: caseAnnotation.scanFingerprint,
         createdAt: caseAnnotation.createdAt,
+        deletedAt: caseAnnotation.deletedAt,
+        deletedReason: caseAnnotation.deletedReason,
+        supersededBy: caseAnnotation.supersededBy,
       })
       .from(caseAnnotation);
 
@@ -229,6 +247,9 @@ async function executeSync(options: AnnotationSyncOptions): Promise<SyncReport> 
         updatedAt: row.updatedAt,
         scanFingerprint: row.scanFingerprint,
         createdAt: row.createdAt,
+        deletedAt: row.deletedAt,
+        deletedReason: row.deletedReason,
+        supersededBy: row.supersededBy,
       });
     }
 
@@ -350,7 +371,6 @@ async function executeSync(options: AnnotationSyncOptions): Promise<SyncReport> 
 
     // Step D: decide() each key, then apply (skipped entirely when dryRun)
     const allKeys = new Set<string>([...localMap.keys(), ...remoteMap.keys()]);
-    const backupDirName = formatBackupTimestamp(new Date());
     let successCount = 0;
 
     function persistSyncState() {
@@ -410,7 +430,24 @@ async function executeSync(options: AnnotationSyncOptions): Promise<SyncReport> 
         localScanFingerprint,
       };
 
-      const action: SyncAction = decide(decideInput);
+      // Rule for tombstoned remote row:
+      // - local file exists and sha == rem.sha or state.sha == loc.sha -> retire-local
+      // - local file exists, differs, and state.sha != loc.sha -> conflict
+      // - no local file -> none
+      let action: SyncAction;
+      if (rem?.deletedAt) {
+        if (loc) {
+          if (loc.sha256 === rem.sha256 || (stateEntry && stateEntry.sha === loc.sha256)) {
+            action = "retire-local" as SyncAction;
+          } else {
+            action = "conflict";
+          }
+        } else {
+          action = "none";
+        }
+      } else {
+        action = decide(decideInput);
+      }
 
       if (action === "push-insert" || action === "push-update") {
         const fileEntry = loc ? pyCase?.files?.[loc.fileName] : undefined;
@@ -425,7 +462,7 @@ async function executeSync(options: AnnotationSyncOptions): Promise<SyncReport> 
 
       if (dryRun) {
         if (action !== "none") {
-          dryRunActions.push({ caseId, annotator, action });
+          dryRunActions.push({ caseId, annotator, action: action as string });
         }
         if (action === "push-insert" || action === "push-update") {
           pushed++;
@@ -433,6 +470,8 @@ async function executeSync(options: AnnotationSyncOptions): Promise<SyncReport> 
           pulled++;
         } else if (action === "record") {
           recorded++;
+        } else if ((action as string) === "retire-local") {
+          retired++;
         } else if (action === "conflict") {
           conflicts.push({ caseId, annotator });
         } else if (action === "skip-scan-mismatch") {
@@ -447,6 +486,45 @@ async function executeSync(options: AnnotationSyncOptions): Promise<SyncReport> 
 
       // Applying actions in non-dry-run mode
       if (action === "none") {
+        continue;
+      }
+
+      if ((action as string) === "retire-local") {
+        if (loc) {
+          const reason = rem?.deletedReason || "deleted";
+          const backupDirName = formatBackupTimestamp(new Date(), reason);
+          const backupCaseDir = path.join(
+            repoRoot,
+            "data",
+            "annotations_backup",
+            backupDirName,
+            caseId,
+          );
+          fs.mkdirSync(backupCaseDir, { recursive: true });
+          const targetPath = path.join(backupCaseDir, loc.fileName);
+          try {
+            fs.renameSync(loc.filePath, targetPath);
+            console.log(`[retire-local] Moved ${loc.filePath} -> ${targetPath}`);
+            syncState[key] = { sha: loc.sha256, at: new Date().toISOString() };
+            retired++;
+            if (!changedCases.includes(caseId)) {
+              changedCases.push(caseId);
+            }
+            eventRows.push({
+              caseId,
+              annotator,
+              actor: me || "sync",
+              action: "retire-local",
+              sha256: loc.sha256,
+              details: { reason, backupPath: targetPath },
+              at: new Date(),
+            });
+            successCount++;
+            if (successCount % 25 === 0) persistSyncState();
+          } catch (moveErr) {
+            console.error(`Failed to move file to backup during retire-local:`, moveErr);
+          }
+        }
         continue;
       }
 
@@ -515,6 +593,15 @@ async function executeSync(options: AnnotationSyncOptions): Promise<SyncReport> 
           } else {
             pushed++;
             syncState[key] = { sha: loc.sha256, at: new Date().toISOString() };
+            eventRows.push({
+              caseId,
+              annotator,
+              actor: me || "sync",
+              action: "push",
+              sha256: loc.sha256,
+              details: { type: "insert" },
+              at: new Date(),
+            });
             successCount++;
             if (successCount % 25 === 0) persistSyncState();
           }
@@ -560,6 +647,15 @@ async function executeSync(options: AnnotationSyncOptions): Promise<SyncReport> 
           } else {
             pushed++;
             syncState[key] = { sha: loc.sha256, at: new Date().toISOString() };
+            eventRows.push({
+              caseId,
+              annotator,
+              actor: me || "sync",
+              action: "push",
+              sha256: loc.sha256,
+              details: { type: "update" },
+              at: new Date(),
+            });
             successCount++;
             if (successCount % 25 === 0) persistSyncState();
           }
@@ -610,7 +706,7 @@ async function executeSync(options: AnnotationSyncOptions): Promise<SyncReport> 
               repoRoot,
               "data",
               "annotations_backup",
-              backupDirName,
+              formatBackupTimestamp(new Date(), "cloud"),
               caseId,
             );
             fs.mkdirSync(backupCaseDir, { recursive: true });
@@ -629,6 +725,15 @@ async function executeSync(options: AnnotationSyncOptions): Promise<SyncReport> 
             changedCases.push(caseId);
           }
           syncState[key] = { sha: row.sha256, at: new Date().toISOString() };
+          eventRows.push({
+            caseId,
+            annotator,
+            actor: me || "sync",
+            action: "pull",
+            sha256: row.sha256,
+            details: { type: action },
+            at: new Date(),
+          });
           successCount++;
           if (successCount % 25 === 0) persistSyncState();
         } catch {
@@ -638,7 +743,242 @@ async function executeSync(options: AnnotationSyncOptions): Promise<SyncReport> 
       }
     }
 
-    let appliedOnline = 0;
+    // Apply open review edits for radiologists (any laptop, safely once)
+    if (!dryRun) {
+      try {
+        const openRadEdits = await db
+          .select({
+            id: reviewEdit.id,
+            caseId: reviewEdit.caseId,
+            reviewer: reviewEdit.reviewer,
+            labelsGzB64: reviewEdit.labelsGzB64,
+            baseAnnotator: reviewEdit.baseAnnotator,
+          })
+          .from(reviewEdit)
+          .innerJoin(reviewAccount, eq(reviewEdit.reviewer, reviewAccount.username))
+          .where(
+            and(
+              eq(reviewEdit.kind, "review"),
+              eq(reviewEdit.status, "open"),
+              eq(reviewAccount.role, "radiologist"),
+            ),
+          );
+
+        for (const edit of openRadEdits) {
+          if (onlySet && !onlySet.has(edit.caseId)) continue;
+          if (!isValidCaseId(edit.caseId)) continue;
+
+          const scanPath = path.join(
+            repoRoot,
+            "data",
+            "nifti",
+            edit.caseId,
+            `${edit.caseId}_primary.nii.gz`,
+          );
+          if (!fs.existsSync(scanPath)) continue;
+
+          const claimToken = crypto.randomUUID();
+          const claimer = me || process.env.USER || process.env.USERNAME || "sync";
+
+          const claimed = await db
+            .update(reviewEdit)
+            .set({
+              status: "applying",
+              claimToken,
+              appliedBy: claimer,
+              updatedAt: new Date(),
+            })
+            .where(
+              and(
+                eq(reviewEdit.id, edit.id),
+                eq(reviewEdit.status, "open"),
+              ),
+            )
+            .returning({ id: reviewEdit.id });
+
+          if (claimed.length === 0) {
+            continue;
+          }
+
+          let rawBuf: Buffer;
+          try {
+            const gzBuf = Buffer.from(edit.labelsGzB64, "base64");
+            rawBuf = zlib.gunzipSync(gzBuf);
+          } catch (e) {
+            console.error(`Decompress error on radiologist edit ${edit.id}:`, e);
+            await db
+              .update(reviewEdit)
+              .set({
+                status: "open",
+                claimToken: null,
+                appliedBy: null,
+                updatedAt: new Date(),
+              })
+              .where(eq(reviewEdit.id, edit.id));
+            continue;
+          }
+
+          const tmpRawPath = path.join(
+            os.tmpdir(),
+            `bme-rad-${edit.caseId}-${process.pid}-${Date.now()}.raw`,
+          );
+
+          try {
+            fs.writeFileSync(tmpRawPath, rawBuf);
+            const pythonExe = getPythonPath(repoRoot);
+            const writeSegScript = path.join(repoRoot, "ml", "scripts", "write_seg.py");
+
+            await exec(
+              pythonExe,
+              [writeSegScript, repoRoot, edit.caseId, tmpRawPath, "--main", edit.reviewer],
+              {
+                cwd: repoRoot,
+                timeout: 120_000,
+              },
+            );
+
+            const caseDir = path.join(annotationsDir, edit.caseId);
+            const radFileName = `${edit.caseId}__${edit.reviewer}.seg.nrrd`;
+            const mainFileName = `${edit.caseId}.seg.nrrd`;
+            const radFilePath = path.join(caseDir, radFileName);
+            const mainFilePath = path.join(caseDir, mainFileName);
+
+            if (!fs.existsSync(radFilePath) || !fs.existsSync(mainFilePath)) {
+              throw new Error("write_seg completed but output files were missing");
+            }
+
+            const radBuf = fs.readFileSync(radFilePath);
+            const radSha = crypto.createHash("sha256").update(radBuf).digest("hex");
+            const mainBuf = fs.readFileSync(mainFilePath);
+            const mainSha = crypto.createHash("sha256").update(mainBuf).digest("hex");
+            const hasBone = rawBuf.includes(1);
+
+            // Push radiologist row
+            await db
+              .insert(caseAnnotation)
+              .values({
+                caseId: edit.caseId,
+                annotator: edit.reviewer,
+                contentB64: radBuf.toString("base64"),
+                labelsGzB64: edit.labelsGzB64,
+                sha256: radSha,
+                bytes: radBuf.length,
+                scanFingerprint: null,
+                hasBone,
+                savedBy: edit.reviewer,
+                deletedAt: null,
+                deletedBy: null,
+                deletedReason: null,
+                supersededBy: null,
+                createdAt: new Date(),
+                updatedAt: new Date(),
+              })
+              .onConflictDoUpdate({
+                target: [caseAnnotation.caseId, caseAnnotation.annotator],
+                set: {
+                  contentB64: radBuf.toString("base64"),
+                  labelsGzB64: edit.labelsGzB64,
+                  sha256: radSha,
+                  bytes: radBuf.length,
+                  hasBone,
+                  savedBy: edit.reviewer,
+                  deletedAt: null,
+                  deletedBy: null,
+                  deletedReason: null,
+                  supersededBy: null,
+                  updatedAt: new Date(),
+                },
+              });
+
+            // Push _main row, clearing any tombstone on _main because it is new content
+            await db
+              .insert(caseAnnotation)
+              .values({
+                caseId: edit.caseId,
+                annotator: "_main",
+                contentB64: mainBuf.toString("base64"),
+                labelsGzB64: edit.labelsGzB64,
+                sha256: mainSha,
+                bytes: mainBuf.length,
+                scanFingerprint: null,
+                hasBone,
+                savedBy: edit.reviewer,
+                deletedAt: null,
+                deletedBy: null,
+                deletedReason: null,
+                supersededBy: null,
+                createdAt: new Date(),
+                updatedAt: new Date(),
+              })
+              .onConflictDoUpdate({
+                target: [caseAnnotation.caseId, caseAnnotation.annotator],
+                set: {
+                  contentB64: mainBuf.toString("base64"),
+                  labelsGzB64: edit.labelsGzB64,
+                  sha256: mainSha,
+                  bytes: mainBuf.length,
+                  hasBone,
+                  savedBy: edit.reviewer,
+                  deletedAt: null,
+                  deletedBy: null,
+                  deletedReason: null,
+                  supersededBy: null,
+                  updatedAt: new Date(),
+                },
+              });
+
+            syncState[`${edit.caseId}/${edit.reviewer}`] = { sha: radSha, at: new Date().toISOString() };
+            syncState[`${edit.caseId}/_main`] = { sha: mainSha, at: new Date().toISOString() };
+
+            await db
+              .update(reviewEdit)
+              .set({
+                status: "applied",
+                appliedAt: new Date(),
+                claimToken: null,
+                updatedAt: new Date(),
+              })
+              .where(eq(reviewEdit.id, edit.id));
+
+            appliedOnline++;
+            if (!changedCases.includes(edit.caseId)) {
+              changedCases.push(edit.caseId);
+            }
+
+            eventRows.push({
+              caseId: edit.caseId,
+              annotator: edit.reviewer,
+              actor: claimer,
+              action: "review-apply",
+              sha256: radSha,
+              details: { role: "radiologist", main: true },
+              at: new Date(),
+            });
+          } catch (applyErr) {
+            console.error(`Failed to apply radiologist review edit ${edit.id}:`, applyErr);
+            await db
+              .update(reviewEdit)
+              .set({
+                status: "open",
+                claimToken: null,
+                appliedBy: null,
+                updatedAt: new Date(),
+              })
+              .where(eq(reviewEdit.id, edit.id));
+          } finally {
+            try {
+              if (fs.existsSync(tmpRawPath)) fs.unlinkSync(tmpRawPath);
+            } catch {
+              // ignore
+            }
+          }
+        }
+      } catch (err) {
+        console.error("Error processing radiologist review edits:", err);
+      }
+    }
+
+    // Apply open team edits for me
     if (!dryRun && me) {
       try {
         const openTeamEdits = await db
@@ -724,6 +1064,21 @@ async function executeSync(options: AnnotationSyncOptions): Promise<SyncReport> 
       persistSyncState();
 
       // Step E: main-file fallback.
+      let ownerByCase = new Map<string, string | null>();
+      try {
+        const ownerRows = await db
+          .select({
+            caseId: caseOwner.caseId,
+            annotatedBy: caseOwner.annotatedBy,
+          })
+          .from(caseOwner);
+        for (const o of ownerRows) {
+          ownerByCase.set(o.caseId, o.annotatedBy);
+        }
+      } catch {
+        // case_owner table query failed or not populated
+      }
+
       for (const cid of allCaseIds) {
         if (onlySet && !onlySet.has(cid)) {
           continue;
@@ -740,15 +1095,36 @@ async function executeSync(options: AnnotationSyncOptions): Promise<SyncReport> 
           continue;
         }
 
-        // Check for local annotator copies
+        // Must not recreate a main file whose _main row is tombstoned unless a new non-tombstoned annotation replaced it
+        const remMain = remoteMap.get(`${cid}/_main`);
+        if (remMain?.deletedAt) {
+          const mainDeletedAt = remMain.deletedAt;
+          const hasReplacement = Array.from(remoteMap.values()).some(
+            (r) =>
+              r.caseId === cid &&
+              r.annotator !== "_main" &&
+              !r.deletedAt &&
+              (r.annotator === remMain.supersededBy || r.createdAt >= mainDeletedAt),
+          );
+          if (!hasReplacement) {
+            continue;
+          }
+        }
+
+        // Check for local annotator copies (excluding any tombstoned copies)
         const files = fs.readdirSync(caseDir, { withFileTypes: true });
         const localAnnotators: { name: string; file: string; mtimeMs: number }[] = [];
         for (const f of files) {
           if (!f.isFile()) continue;
           const m = f.name.match(new RegExp(`^${cid}__([A-Za-z0-9_-]{1,40})\\.seg\\.nrrd$`));
           if (m) {
+            const annotatorName = m[1];
+            const rem = remoteMap.get(`${cid}/${annotatorName}`);
+            if (rem?.deletedAt) {
+              continue;
+            }
             const st = fs.statSync(path.join(caseDir, f.name));
-            localAnnotators.push({ name: m[1], file: f.name, mtimeMs: st.mtimeMs });
+            localAnnotators.push({ name: annotatorName, file: f.name, mtimeMs: st.mtimeMs });
           }
         }
 
@@ -756,28 +1132,36 @@ async function executeSync(options: AnnotationSyncOptions): Promise<SyncReport> 
           continue;
         }
 
-        // Find earliest created_at annotator from remote index
-        const matchingRemoteRows: RemoteIndexEntry[] = [];
-        for (const la of localAnnotators) {
-          const rem = remoteMap.get(`${cid}/${la.name}`);
-          if (rem) matchingRemoteRows.push(rem);
-        }
+        // Prefer case_owner.annotated_by person's copy, then earliest created_at
+        const ownerName =
+          ownerByCase.get(cid) ??
+          (typeof ownerForCase === "function" ? ownerForCase(cid) : null);
 
         let chosenAnnotator: string | null = null;
-        if (matchingRemoteRows.length > 0) {
-          matchingRemoteRows.sort((a, b) => {
-            const tDiff = a.createdAt.getTime() - b.createdAt.getTime();
-            if (tDiff !== 0) return tDiff;
-            return a.annotator.localeCompare(b.annotator);
-          });
-          chosenAnnotator = matchingRemoteRows[0].annotator;
+        if (ownerName && localAnnotators.some((la) => la.name === ownerName)) {
+          chosenAnnotator = ownerName;
         } else {
-          localAnnotators.sort((a, b) => {
-            const tDiff = a.mtimeMs - b.mtimeMs;
-            if (tDiff !== 0) return tDiff;
-            return a.name.localeCompare(b.name);
-          });
-          chosenAnnotator = localAnnotators[0].name;
+          const matchingRemoteRows: RemoteIndexEntry[] = [];
+          for (const la of localAnnotators) {
+            const rem = remoteMap.get(`${cid}/${la.name}`);
+            if (rem && !rem.deletedAt) matchingRemoteRows.push(rem);
+          }
+
+          if (matchingRemoteRows.length > 0) {
+            matchingRemoteRows.sort((a, b) => {
+              const tDiff = a.createdAt.getTime() - b.createdAt.getTime();
+              if (tDiff !== 0) return tDiff;
+              return a.annotator.localeCompare(b.annotator);
+            });
+            chosenAnnotator = matchingRemoteRows[0].annotator;
+          } else {
+            localAnnotators.sort((a, b) => {
+              const tDiff = a.mtimeMs - b.mtimeMs;
+              if (tDiff !== 0) return tDiff;
+              return a.name.localeCompare(b.name);
+            });
+            chosenAnnotator = localAnnotators[0].name;
+          }
         }
 
         if (chosenAnnotator) {
@@ -796,6 +1180,11 @@ async function executeSync(options: AnnotationSyncOptions): Promise<SyncReport> 
       }
     }
 
+    // Batch insert logged events at end of sync
+    if (!dryRun && eventRows.length > 0) {
+      await logEvents(eventRows);
+    }
+
     return {
       ok: true,
       dryRun,
@@ -804,6 +1193,7 @@ async function executeSync(options: AnnotationSyncOptions): Promise<SyncReport> 
       pushed,
       pulled,
       recorded,
+      retired,
       appliedOnline,
       conflicts,
       skipped,
@@ -829,6 +1219,7 @@ async function executeSync(options: AnnotationSyncOptions): Promise<SyncReport> 
       pushed: 0,
       pulled: 0,
       recorded: 0,
+      retired: 0,
       appliedOnline: 0,
       conflicts: [],
       skipped: [],

@@ -90,10 +90,12 @@ function extractCookie(req: Request | NextRequest, name: string): string | null 
   return match ? decodeURIComponent(match[1]) : null;
 }
 
+export type ReviewRole = "radiologist" | "reviewer" | "team";
+
 export interface ReviewUser {
   username: string;
   displayName: string;
-  role: string;
+  role: ReviewRole;
 }
 
 export async function getReviewUser(
@@ -115,7 +117,7 @@ export async function getReviewUser(
     return {
       username: row.username,
       displayName: row.displayName,
-      role: row.role || "reviewer",
+      role: (row.role as ReviewRole) || "reviewer",
     };
   } catch {
     return null;
