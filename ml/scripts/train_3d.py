@@ -1193,6 +1193,7 @@ class OrthoGateMedNeXt3D(nn.Module):
     """OrthoGate-MedNeXt3D:
     Fast Tensor-Core 5x5x3 effective FOV blocks + GroupNorm + ASPP3D bottleneck +
     Bone-Guided Spatial Attention + Deep Supervision + Bottleneck C-Net Gatekeeper (< 2.0 MB/fold).
+    Supports in_channels=1 (single-stage) or in_channels=2 (cascaded Stage 2 refiner).
     """
 
     def __init__(
@@ -1201,6 +1202,7 @@ class OrthoGateMedNeXt3D(nn.Module):
         double_conv: bool = True,
         aniso: bool = True,
         norm_type: str = "group",
+        in_channels: int = 1,
         **kwargs,
     ):
         super().__init__()
@@ -1210,6 +1212,7 @@ class OrthoGateMedNeXt3D(nn.Module):
         self.double_conv = double_conv
         self.aniso = aniso
         self.norm_type = resolved_norm
+        self.in_channels = in_channels
 
         c1 = base_channels
         c2 = base_channels * 2
@@ -1220,7 +1223,7 @@ class OrthoGateMedNeXt3D(nn.Module):
             return nn.Sequential(*[_OrthoMedNeXtBlock3D(ch, norm_type=resolved_norm) for _ in range(blocks)])
 
         self.stem = nn.Sequential(
-            nn.Conv3d(1, c1, kernel_size=3, padding=1, bias=False),
+            nn.Conv3d(in_channels, c1, kernel_size=3, padding=1, bias=False),
             _make_norm3d(c1, resolved_norm),
             nn.GELU(),
         )
@@ -1274,20 +1277,106 @@ class OrthoGateMedNeXt3D(nn.Module):
         return seg
 
 
+class GlobalContextNet3D(nn.Module):
+    """Stage 1: Whole-Knee Global Context Network.
+    Operates on full-volume downsampled MRI (e.g. 128x128x32).
+    Generates joint-wide coarse Bone & BME probability heatmaps.
+    Features: 3-stage ConvNeXt-style blocks + GroupNorm + ASPP bottleneck + C-Net head.
+    """
+
+    def __init__(
+        self,
+        base_channels: int = 16,
+        aniso: bool = True,
+        norm_type: str = "group",
+        in_channels: int = 1,
+        **kwargs,
+    ):
+        super().__init__()
+        resolved_norm = norm_type if norm_type in ("group", "instance", "batch") else "group"
+        self.model_arch = "global_context_net"
+        self.base_channels = base_channels
+        self.aniso = aniso
+        self.norm_type = resolved_norm
+        self.in_channels = in_channels
+
+        c1 = base_channels
+        c2 = base_channels * 2
+        c3 = base_channels * 4
+        k1 = (2, 2, 1) if aniso else (2, 2, 2)
+
+        def stage(ch: int, blocks: int = 1) -> nn.Sequential:
+            return nn.Sequential(*[_OrthoMedNeXtBlock3D(ch, norm_type=resolved_norm) for _ in range(blocks)])
+
+        self.stem = nn.Sequential(
+            nn.Conv3d(in_channels, c1, kernel_size=3, padding=1, bias=False),
+            _make_norm3d(c1, resolved_norm),
+            nn.GELU(),
+        )
+        self.enc1 = stage(c1, blocks=1)
+        self.down1 = nn.Sequential(
+            nn.Conv3d(c1, c2, kernel_size=k1, stride=k1, bias=False),
+            _make_norm3d(c2, resolved_norm),
+        )
+        self.enc2 = stage(c2, blocks=1)
+        self.down2 = nn.Sequential(
+            nn.Conv3d(c2, c3, kernel_size=2, stride=2, bias=False),
+            _make_norm3d(c3, resolved_norm),
+        )
+        self.enc3 = stage(c3, blocks=1)
+        self.aspp = _ASPP3D(c3, norm_type=resolved_norm)
+        self.cnet = CNetHead3D(c3)
+
+        self.up2 = nn.ConvTranspose3d(c3, c2, kernel_size=2, stride=2)
+        self.fuse2 = nn.Sequential(nn.Conv3d(c2 * 2, c2, 1, bias=False), _make_norm3d(c2, resolved_norm), nn.GELU())
+        self.dec2 = stage(c2, blocks=1)
+
+        self.up1 = nn.ConvTranspose3d(c2, c1, kernel_size=k1, stride=k1)
+        self.fuse1 = nn.Sequential(nn.Conv3d(c1 * 2, c1, 1, bias=False), _make_norm3d(c1, resolved_norm), nn.GELU())
+        self.dec1 = stage(c1, blocks=1)
+
+        self.out_bone = nn.Conv3d(c1, 1, kernel_size=1)
+        self.bone_attn = _BoneGuidedAttention3D(c1, norm_type=resolved_norm)
+        self.out_bme = nn.Conv3d(c1, 1, kernel_size=1)
+
+    def forward(self, x: torch.Tensor, return_cnet: bool = False):
+        e1 = self.enc1(self.stem(x))
+        e2 = self.enc2(self.down1(e1))
+        e3 = self.aspp(self.enc3(self.down2(e2)))
+
+        cnet_logit = self.cnet(e3)
+
+        d2 = self.dec2(self.fuse2(torch.cat([self.up2(e3), e2], dim=1)))
+        d1 = self.dec1(self.fuse1(torch.cat([self.up1(d2), e1], dim=1)))
+
+        bone_logit = self.out_bone(d1)
+        bme_feat = self.bone_attn(d1, bone_logit)
+        bme_logit = self.out_bme(bme_feat)
+        seg = torch.cat([bone_logit, bme_logit], dim=1)
+
+        if return_cnet:
+            return seg, cnet_logit
+        return seg
+
+
 def build_model(
     arch: str = "mednext",
     base_channels: int = 16,
     double_conv: bool = False,
     aniso: bool = False,
     norm_type: str = "instance",
+    in_channels: int = 1,
     **kwargs,
 ) -> nn.Module:
     name = kwargs.get("name", arch)
     width = kwargs.get("width", base_channels)
     aniso = kwargs.get("aniso", aniso)
     norm_type = kwargs.get("norm_type", norm_type)
-    if name == "orthogate_mednext":
-        return OrthoGateMedNeXt3D(base_channels=width, double_conv=double_conv, aniso=aniso, norm_type=norm_type)
+    in_channels = kwargs.get("in_channels", in_channels)
+    if name == "global_context_net":
+        return GlobalContextNet3D(base_channels=width, aniso=aniso, norm_type=norm_type, in_channels=in_channels)
+    if name in ("orthogate_mednext", "orthogate_mednext_cascade"):
+        return OrthoGateMedNeXt3D(base_channels=width, double_conv=double_conv, aniso=aniso, norm_type=norm_type, in_channels=in_channels)
     if name == "mednext":
         return MedNeXt3D(base_channels=width)
     if name in ("cnet_dual_unet", "cnet_attention_unet"):
