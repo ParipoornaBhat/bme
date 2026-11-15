@@ -243,3 +243,7 @@ notebooks/scratch/
 .env*
 
 /.claude/
+
+# local agent notes (not shared)
+docs/handoff/
+docs/PLAN_*.md
