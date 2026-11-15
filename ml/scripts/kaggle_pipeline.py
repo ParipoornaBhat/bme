@@ -354,6 +354,109 @@ def get_kaggle_username(api: Any) -> str:
     return username
 
 
+BATCH_RECORD_NAME = "kaggle_batches.json"
+
+
+def read_batch_record(src_dir: Path) -> Dict[str, Any]:
+    path = get_staging_dir(src_dir) / BATCH_RECORD_NAME
+    if path.exists():
+        return json.loads(path.read_text(encoding="utf-8"))
+    return {"owner": "", "batches": {}, "annotations": None}
+
+
+def write_batch_record(src_dir: Path, record: Dict[str, Any]) -> None:
+    path = get_staging_dir(src_dir) / BATCH_RECORD_NAME
+    path.write_text(json.dumps(record, indent=2), encoding="utf-8")
+
+
+def run_upload_batches(
+    src_dir: Path,
+    export_dir: Path,
+    dataset_slug: str,
+    api: Any,
+    username: str,
+    approved_hash: str,
+    approval_file: Path,
+    approval_data: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Scans: each new set of scans goes up once as its own batch dataset.
+    Annotations: one small dataset, re-sent in full only when its content changed."""
+    import sys as _sys
+    _sys.path.insert(0, str(Path(__file__).resolve().parent))
+    import kaggle_batches as kb
+
+    record = read_batch_record(src_dir)
+    record["owner"] = username
+    staging = get_staging_dir(src_dir)
+    uploaded: List[str] = []
+
+    nifti_dir = export_dir / "data" / "nifti"
+    if not nifti_dir.is_dir():
+        nifti_dir = export_dir / "nifti"
+    local_scans = kb.scan_index(nifti_dir)
+    new = kb.new_scans(local_scans, list(record["batches"].values()))
+    if new:
+        name = kb.next_batch_name(dataset_slug, record["batches"].keys())
+        folder = staging / "batch_upload" / name
+        manifest = kb.build_batch_folder(new, folder)
+        size = sum(p.stat().st_size for p in folder.rglob("*") if p.is_file())
+        print("=" * 60)
+        print(f"UPLOAD NEW SCANS as {username}/{name}: {len(new)} scan(s), {size / (1024 * 1024):.1f} MB")
+        print("=" * 60)
+        meta = {"title": name, "id": f"{username}/{name}", "licenses": [{"name": "CC0-1.0"}], "isPrivate": True}
+        (folder / "dataset-metadata.json").write_text(json.dumps(meta, indent=2), encoding="utf-8")
+        api.dataset_create_new(folder=str(folder), public=False, dir_mode="zip", quiet=False)
+        record["batches"][name] = manifest
+        uploaded.append(name)
+        shutil.rmtree(folder, ignore_errors=True)
+    else:
+        print("SCANS: no new scans, nothing uploaded")
+
+    ann_name = f"{dataset_slug}-annotations"
+    ann_folder = staging / "annotations_upload"
+    if ann_folder.exists():
+        shutil.rmtree(ann_folder)
+    ann_folder.mkdir(parents=True)
+    for item in export_dir.rglob("*"):
+        if not item.is_file():
+            continue
+        rel = item.relative_to(export_dir)
+        if item.name.endswith("_primary.nii.gz") or item.suffix.lower() == ".zip" or "mapping" in item.name.lower():
+            continue
+        dst = ann_folder / rel
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(item, dst)
+    ann_hash, ann_files, ann_bytes, _cases = compute_export_hash_and_stats(ann_folder)
+    previous = record.get("annotations")
+    if previous and previous.get("hash") == ann_hash:
+        print("ANNOTATIONS: unchanged, nothing uploaded")
+    else:
+        print("=" * 60)
+        print(f"UPLOAD ANNOTATIONS as {username}/{ann_name}: {ann_files} file(s), {ann_bytes / (1024 * 1024):.1f} MB")
+        print("=" * 60)
+        meta = {"title": ann_name, "id": f"{username}/{ann_name}", "licenses": [{"name": "CC0-1.0"}], "isPrivate": True, "description": ann_hash}
+        (ann_folder / "dataset-metadata.json").write_text(json.dumps(meta, indent=2), encoding="utf-8")
+        if previous:
+            api.dataset_create_version(folder=str(ann_folder), version_notes=ann_hash[:12], dir_mode="zip", quiet=False)
+        else:
+            api.dataset_create_new(folder=str(ann_folder), public=False, dir_mode="zip", quiet=False)
+        record["annotations"] = {"name": ann_name, "hash": ann_hash}
+        uploaded.append(ann_name)
+    shutil.rmtree(ann_folder, ignore_errors=True)
+
+    write_batch_record(src_dir, record)
+    approval_data["uploaded_hash"] = approved_hash
+    approval_data["uploaded_version"] = "batched"
+    approval_file.write_text(json.dumps(approval_data, indent=2), encoding="utf-8")
+    return {
+        "status": "UPLOADED" if uploaded else "UP_TO_DATE",
+        "uploaded": uploaded,
+        "dataset_slug": f"{username}/{dataset_slug}",
+        "hash": approved_hash,
+        "batches": list(record["batches"]),
+    }
+
+
 def run_upload(
     src_dir: Path,
     export_dir: Path,
@@ -401,6 +504,8 @@ def run_upload(
 
     username = get_kaggle_username(api)
     full_slug = f"{username}/{dataset_slug}"
+    if os.environ.get("BME_KAGGLE_BATCHES") == "1":
+        return run_upload_batches(src_dir, export_dir, dataset_slug, api, username, approved_hash, approval_file, approval_data)
 
     # Query remote dataset (read-only): if exists, is private, and carries approved hash -> skip upload
     try:
@@ -651,6 +756,12 @@ def run_launch_kernel(
     }
     config_mode = mode_map.get(mode, "quick_test")
     full_dataset_slug = f"{dataset_owner or username}/{dataset_slug}"
+    _rec = read_batch_record(src_dir)
+    if _rec.get("batches") and _rec.get("annotations"):
+        _owner = _rec.get("owner") or dataset_owner or username
+        dataset_sources = [f"{_owner}/{n}" for n in _rec["batches"]] + [f"{_owner}/{_rec['annotations']['name']}"]
+    else:
+        dataset_sources = [full_dataset_slug]
     full_kernel_slug = f"{username}/{kernel_slug}"
 
     nb_path = src_dir / "ml" / "notebooks" / "train_3d_colab.ipynb"
@@ -701,9 +812,7 @@ def run_launch_kernel(
         "is_private": True,
         "enable_gpu": True,
         "enable_internet": True,
-        "dataset_sources": [
-            full_dataset_slug,
-        ],
+        "dataset_sources": dataset_sources,
     }
     if accelerator:
         meta["machine_shape"] = accelerator
