@@ -160,6 +160,17 @@ Running `pnpm data:share` on the hub produces two archives in `inbox/outgoing/`:
 
 ---
 
+## Reviewer site scans
+
+Run `pnpm review:scans` after importing new cases to keep the hosted reviewer site in step with this laptop.
+The process splits into two steps around a manual drag-and-drop upload to the public Google Drive folder:
+1. `pnpm review:scans` stages missing scans at `drive-upload/<CASE>_primary.nii.gz` using hard links that cost no disk space.
+2. Upload `drive-upload/` contents to the Drive folder manually (the folder is view-only for the application).
+3. `pnpm review:scans --finish` updates `data/review_scan_ids.json`, runs `pnpm review:setup`, and unlinks the hard links.
+The `drive-upload/` folder is deleted once empty. Scans on Google Drive are never deleted by this command.
+
+---
+
 ## 7. From data to training
 
 After importing or merging new data on the hub:

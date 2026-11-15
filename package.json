@@ -71,6 +71,8 @@
     "data:cloud:backfill": "node scripts/annotation-sync.js --apply --backfill",
     "review:setup": "pnpm --filter @bme/db review:setup",
     "review:inbox": "node scripts/review-inbox.js",
+    "review:scans": "node scripts/review-scans.js",
+    "review:scans:finish": "node scripts/review-scans.js --finish",
     "vercel:login": "node scripts/vercel.js login",
     "vercel:link": "node scripts/vercel.js link",
     "vercel:secrets": "node scripts/vercel.js secrets",

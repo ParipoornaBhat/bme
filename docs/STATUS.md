@@ -70,6 +70,13 @@ Phases are defined in [PRD.md](PRD.md) §8.
 
 In order. Each step's output is the next step's input.
 
+- **2026-11-15:** Reviewer site: scans on Drive (145), accounts and annotation sync in the online DB. New cases: run `pnpm review:scans`, upload `drive-upload/` to the Drive folder, then `pnpm review:scans --finish`. Hosted deploy to bme.paripoorna.me pending (`pnpm vercel:link`, `vercel:secrets`, `vercel:deploy`).
+- 2026-11-15: Annotation safety. Radiologist accounts (Kanupriya) replace an annotation automatically: her version is saved under her name, the replaced one is marked deleted online (never removed from the DB) and moved to `data/annotations_backup/` on the next sync. Reviewer accounts only flag. Every hosted save is kept as a version.
+- 2026-11-15: "Annotated by" comes only from the `case_owner` table (1-15 Paripoorna, 16-30 Elvin, 31-45 Aditi, 46-61 Reegan; BME-062 to 085 from each case's one personal copy). Change it only in the Activities page.
+- 2026-11-15: Per-case review status ("Reviewed" / "Reviewed with edits", several reviewers per case, lock on mark). Activities page (local only): log, reviews, deleted (open, compare, restore), owners.
+- 2026-11-15: Viewer: opacity slider and outline-only toggle (O) in the toolbar; Move tool supports Ctrl/Shift+click and box select. Hosted site streams the scan (axial from slice 1), caches scans in the browser and prefetches the next case.
+- Known problem: the hosted features were checked by typecheck, unit tests and a production build, not yet click-tested end to end (reviewer save, supersede on a second laptop, Activities restore).
+
 - **2026-11-13 (Data pipeline & documentation):** Unified data menu (`pnpm data`, `scripts/data-menu.js`), `inbox/` staging tree, and single data document in [docs/DATA.md](DATA.md). Team decision needed on whether the 24 new BME cases (BME-062..BME-085, edema only) are included in training before locking `pnpm train:split`.
 
 0a. **24 new BME cases from the 2026-11-11 Drive download (BME-062 to BME-085).** The
