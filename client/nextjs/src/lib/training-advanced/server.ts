@@ -64,10 +64,22 @@ function runBridgeCommand(args: string[], timeoutMs = 25000): Promise<any> {
             return reject(new Error(stderr || error.message));
           }
         }
+        // The bridge may print progress lines (for example the H200 route)
+        // before its JSON result; the result is the last line that parses.
+        const lines = stdout.trim().split(/\r?\n/);
+        for (let i = lines.length - 1; i >= 0; i--) {
+          const line = lines[i].trim();
+          if (!line.startsWith("{") && !line.startsWith("[")) continue;
+          try {
+            return resolve(JSON.parse(line));
+          } catch {
+            /* not this line */
+          }
+        }
+        const start = stdout.indexOf("{");
         try {
-          const res = JSON.parse(stdout.trim());
-          resolve(res);
-        } catch (e) {
+          resolve(JSON.parse(start >= 0 ? stdout.slice(start) : stdout.trim()));
+        } catch {
           reject(new Error(`Failed to parse bridge output: ${stdout.slice(0, 200)}`));
         }
       }

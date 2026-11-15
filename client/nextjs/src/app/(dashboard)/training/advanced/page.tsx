@@ -994,6 +994,7 @@ export default function AdvancedTrainingPage() {
                 <th className="px-3 py-3">Folds</th>
                 <th className="px-3 py-3">Iteration</th>
                 <th className="px-3 py-3">Status</th>
+                <th className="px-3 py-3">Started</th>
                 <th className="px-3 py-3">Started By</th>
                 <th className="px-3 py-3">Where</th>
                 <th className="px-3 py-3">Account</th>
@@ -1043,6 +1044,11 @@ export default function AdvancedTrainingPage() {
                       >
                         {r.status}
                       </span>
+                    </td>
+                    <td className="px-3 py-3 whitespace-nowrap tabular-nums" title={r.startedAt ? new Date(r.startedAt).toLocaleString() : undefined}>
+                      {r.startedAt
+                        ? new Date(r.startedAt).toLocaleString([], { day: "2-digit", month: "short", year: "numeric", hour: "2-digit", minute: "2-digit" })
+                        : "-"}
                     </td>
                     <td className="px-3 py-3 whitespace-nowrap">
                       {r.startedBy?.name || r.startedBy?.usn || "-"}
