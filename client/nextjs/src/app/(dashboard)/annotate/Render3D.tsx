@@ -1,38 +1,55 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Box, Expand, Loader2, Maximize2, Shrink } from "lucide-react";
+import { Box, Expand, Loader2, Maximize2, RotateCcw, Shrink, Sparkles } from "lucide-react";
 import { Pinch } from "~/lib/pinch";
 import { wheelZoomFactor } from "~/lib/wheel-zoom";
+import {
+  initGL,
+  createGLMesh,
+  destroyGLMesh,
+  createBoxMesh,
+  destroyLineMesh,
+  buildOrientMatrix,
+  mat4Create,
+  mat4Perspective,
+  mat4LookAt,
+  mat4Multiply,
+  mat3FromMat4,
+  mat3InvertAndTranspose,
+  getOrientationLetters,
+  parseHexColor,
+  type AxisEnds,
+  type GLState,
+  type GLMesh,
+  type OrientationLetter,
+  type Vec3,
+} from "./gl3d";
+import type { MeshData, MeshWorkerOutput } from "./mesh3d.worker";
 
-/**
- * The 3D quadrant, matching how 3D Slicer presents a segmentation.
- *
- * ALL SEGMENTS, NOT THE SELECTED ONE
- * An earlier version rendered only whichever segment was active in the toolbar,
- * so painting bone marrow and then switching to edema made the view go empty —
- * it looked broken when it was merely showing an empty layer. Every segment is
- * built, each can be hidden, and Slicer does the same.
- *
- * SCALE IS THE POINT
- * The camera frames the whole VOLUME and draws a wireframe of its bounds with
- * orientation letters, so a small lesion looks small. Framing on the segment's
- * own bounding box (the first attempt here) zoomed everything to fill the
- * canvas, making a 200 mm^3 speck and a 20,000 mm^3 region indistinguishable.
- * "Fit" is a button for when you do want a close look.
- *
- * Geometry is in millimetres via the voxel spacing, so proportions stay true on
- * ~10:1 anisotropic data instead of stretching along the slice axis.
- */
-
-type P3 = [number, number, number];
-type Quad = { z: number; pts: [number, number][]; shade: number; color: string };
 type SegDef = { value: number; label: string; color: string };
 
-type AxisEnds = { atZero: string; atMax: string };
+type Preset = "A" | "P" | "L" | "R" | "S" | "I";
+
+const PRESET_ANGLES: Record<Preset, { yaw: number; pitch: number }> = {
+  A: { yaw: 0, pitch: 0 },
+  P: { yaw: Math.PI, pitch: 0 },
+  L: { yaw: Math.PI / 2, pitch: 0 },
+  R: { yaw: -Math.PI / 2, pitch: 0 },
+  S: { yaw: 0, pitch: 1.53 },
+  I: { yaw: 0, pitch: -1.53 },
+};
 
 export default function Render3D({
-  labels, dims, spacing, orient, segments, hidden: controlledHidden, expanded = false, onToggleExpand, fill = false,
+  labels,
+  dims,
+  spacing,
+  orient,
+  segments,
+  hidden: controlledHidden,
+  expanded = false,
+  onToggleExpand,
+  fill = false,
 }: {
   labels: Uint8Array | null;
   dims: [number, number, number];
@@ -48,318 +65,806 @@ export default function Render3D({
   fill?: boolean;
 }) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
-  const [built, setBuilt] = useState<Array<{ value: number; quads: P3[][] }> | null>(null);
+  const boxRef = useRef<HTMLDivElement | null>(null);
+
+  const [webglAvailable, setWebglAvailable] = useState(true);
+  const [built, setBuilt] = useState(false);
+  const [building, setBuilding] = useState(false);
   const [counts, setCounts] = useState<Record<number, number>>({});
   const [internalHidden, setInternalHidden] = useState<Set<number>>(new Set());
   const hidden = controlledHidden !== undefined ? controlledHidden : internalHidden;
-  const [building, setBuilding] = useState(false);
-  const [yaw, setYaw] = useState(0.7);
-  const [pitch, setPitch] = useState(-0.32);
-  const [zoom, setZoom] = useState(1);
+
+  const [smooth, setSmooth] = useState(true);
   const [fit, setFit] = useState(false);
-  const drag = useRef<{ id: number; x: number; y: number } | null>(null);
-  // One finger turns the surface, two pinch to zoom.
+  const [letters, setLetters] = useState<OrientationLetter[]>([]);
+
+  // Camera state refs
+  const yawRef = useRef<number>(0);
+  const pitchRef = useRef<number>(0);
+  const targetRef = useRef<Vec3>([0, 0, 0]);
+  const zoomRef = useRef<number>(1);
+  const isFitRef = useRef<boolean>(false);
+
+  // Worker and WebGL state
+  const workerRef = useRef<Worker | null>(null);
+  const activeRequestId = useRef<number>(0);
+  const glStateRef = useRef<GLState | null>(null);
+  const glMeshesRef = useRef<Record<number, GLMesh>>({});
+  const meshDataMapRef = useRef<Record<number, MeshData>>({});
+
+  // Interaction refs
+  const dragRef = useRef<{
+    pointerId: number;
+    startX: number;
+    startY: number;
+    lastX: number;
+    lastY: number;
+    isPan: boolean;
+  } | null>(null);
+
   const pinch = useRef(new Pinch());
   const pinchZoom0 = useRef(1);
-  // The canvas is drawn at the size of the space it has, so it stays sharp
-  // when the view is expanded.
-  const boxRef = useRef<HTMLDivElement | null>(null);
-  const [size, setSize] = useState({ w: 460, h: 460 });
+
+  const inertiaRef = useRef<{ velYaw: number; velPitch: number } | null>(null);
+  const animRef = useRef<{
+    startTime: number;
+    duration: number;
+    startYaw: number;
+    startPitch: number;
+    endYaw: number;
+    endPitch: number;
+  } | null>(null);
+
+  const renderQueuedRef = useRef(false);
+
+  // Clean up WebGL resources
+  const cleanupGL = useCallback(() => {
+    const glState = glStateRef.current;
+    if (!glState) return;
+    const { gl, meshProgram, lineProgram, boxMesh } = glState;
+
+    for (const mesh of Object.values(glMeshesRef.current)) {
+      destroyGLMesh(gl, mesh);
+    }
+    glMeshesRef.current = {};
+
+    if (boxMesh) {
+      destroyLineMesh(gl, boxMesh);
+    }
+
+    gl.deleteProgram(meshProgram);
+    gl.deleteProgram(lineProgram);
+    glStateRef.current = null;
+  }, []);
+
+  // Update GL meshes when worker finishes
+  const updateGLMeshes = useCallback((results: Record<number, MeshData>) => {
+    const glState = glStateRef.current;
+    if (!glState) return;
+    const { gl } = glState;
+
+    // Destroy existing segment meshes
+    for (const mesh of Object.values(glMeshesRef.current)) {
+      destroyGLMesh(gl, mesh);
+    }
+    glMeshesRef.current = {};
+
+    for (const [valStr, data] of Object.entries(results)) {
+      const v = Number(valStr);
+      if (data.positions.length > 0 && data.indices.length > 0) {
+        const mesh = createGLMesh(gl, data.positions, data.normals, data.indices);
+        if (mesh) {
+          glMeshesRef.current[v] = mesh;
+        }
+      }
+    }
+  }, []);
+
+  // Trigger frame rendering
+  const requestRender = useCallback(() => {
+    if (renderQueuedRef.current) return;
+    renderQueuedRef.current = true;
+    requestAnimationFrame(() => {
+      renderQueuedRef.current = false;
+      drawScene();
+    });
+  }, []);
+
+  // Main WebGL drawing function
+  const drawScene = useCallback(() => {
+    const canvas = canvasRef.current;
+    const glState = glStateRef.current;
+    if (!canvas || !glState) return;
+
+    const { gl, meshProgram, lineProgram, meshUniforms, meshAttribs, lineUniforms, lineAttribs } = glState;
+
+    const width = canvas.width;
+    const height = canvas.height;
+    if (width <= 0 || height <= 0) return;
+
+    // Handle smooth view preset animation
+    let needNextFrame = false;
+    const now = performance.now();
+    const anim = animRef.current;
+    if (anim) {
+      const elapsed = now - anim.startTime;
+      const progress = Math.min(1, elapsed / anim.duration);
+      // Cubic ease out
+      const ease = 1 - Math.pow(1 - progress, 3);
+      yawRef.current = anim.startYaw + (anim.endYaw - anim.startYaw) * ease;
+      pitchRef.current = anim.startPitch + (anim.endPitch - anim.startPitch) * ease;
+      if (progress < 1) {
+        needNextFrame = true;
+      } else {
+        animRef.current = null;
+      }
+    }
+
+    // Handle trackball inertia
+    const inertia = inertiaRef.current;
+    if (inertia) {
+      yawRef.current += inertia.velYaw;
+      pitchRef.current = Math.max(-1.55, Math.min(1.55, pitchRef.current + inertia.velPitch));
+      inertia.velYaw *= 0.91;
+      inertia.velPitch *= 0.91;
+      if (Math.hypot(inertia.velYaw, inertia.velPitch) > 0.0001) {
+        needNextFrame = true;
+      } else {
+        inertiaRef.current = null;
+      }
+    }
+
+    const { modelMatrix, extents } = buildOrientMatrix(orient, dims, spacing);
+
+    // Update bounding box line mesh if extents changed
+    if (!glState.boxMesh) {
+      glState.boxMesh = createBoxMesh(gl, extents);
+    }
+
+    gl.viewport(0, 0, width, height);
+    gl.clearColor(0.02, 0.03, 0.04, 1.0);
+    gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+
+    const aspect = width / height;
+    const fov = (35 * Math.PI) / 180;
+    const maxDim = Math.max(extents[0], extents[1], extents[2]);
+    const baseDistance = (maxDim * 1.3) / (2 * Math.tan(fov / 2));
+    const dist = baseDistance / Math.max(0.1, zoomRef.current);
+
+    const near = Math.max(1, dist * 0.05);
+    const far = Math.max(1000, dist * 10);
+
+    const projMatrix = mat4Perspective(mat4Create(), fov, aspect, near, far);
+
+    // Spherical camera positioning around target
+    const yaw = yawRef.current;
+    const pitch = pitchRef.current;
+    const target = targetRef.current;
+
+    const eye: Vec3 = [
+      target[0] - dist * Math.cos(pitch) * Math.sin(yaw),
+      target[1] + dist * Math.cos(pitch) * Math.cos(yaw),
+      target[2] + dist * Math.sin(pitch),
+    ];
+    const up: Vec3 = [0, 0, 1];
+
+    const viewMatrix = mat4LookAt(mat4Create(), eye, target, up);
+    const viewProjMatrix = mat4Multiply(mat4Create(), projMatrix, viewMatrix);
+
+    // Update HTML overlay orientation letters
+    const cssW = canvas.clientWidth || width;
+    const cssH = canvas.clientHeight || height;
+    const overlayLetters = getOrientationLetters(viewProjMatrix, extents, cssW, cssH);
+    setLetters(overlayLetters);
+
+    // 1. Draw volume bounding box wireframe
+    if (glState.boxMesh) {
+      gl.useProgram(lineProgram);
+      gl.uniformMatrix4fv(lineUniforms.u_viewProj, false, viewProjMatrix);
+      gl.uniform4f(lineUniforms.u_color, 0.706, 0.333, 0.784, 0.45);
+
+      gl.enable(gl.BLEND);
+      gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+      gl.depthMask(false);
+
+      gl.bindBuffer(gl.ARRAY_BUFFER, glState.boxMesh.posBuffer);
+      gl.enableVertexAttribArray(lineAttribs.a_position);
+      gl.vertexAttribPointer(lineAttribs.a_position, 3, gl.FLOAT, false, 0, 0);
+
+      gl.drawArrays(gl.LINES, 0, glState.boxMesh.vertexCount);
+
+      gl.disableVertexAttribArray(lineAttribs.a_position);
+      gl.depthMask(true);
+      gl.disable(gl.BLEND);
+    }
+
+    // 2. Draw 3D surface meshes
+    const normalMatrix = mat3InvertAndTranspose(
+      mat3FromMat4(new Float32Array(9), mat4Multiply(mat4Create(), viewMatrix, modelMatrix)),
+      mat3FromMat4(new Float32Array(9), mat4Multiply(mat4Create(), viewMatrix, modelMatrix))
+    );
+
+    gl.useProgram(meshProgram);
+    gl.uniformMatrix4fv(meshUniforms.u_model, false, modelMatrix);
+    gl.uniformMatrix4fv(meshUniforms.u_view, false, viewMatrix);
+    gl.uniformMatrix4fv(meshUniforms.u_projection, false, projMatrix);
+    gl.uniformMatrix3fv(meshUniforms.u_normalMatrix, false, normalMatrix);
+
+    gl.enable(gl.DEPTH_TEST);
+    gl.depthFunc(gl.LEQUAL);
+
+    // Pass 1: Opaque segments (edema: 2, uncertain: 3, and any non-bone segments)
+    gl.depthMask(true);
+    gl.disable(gl.BLEND);
+    gl.disable(gl.CULL_FACE);
+    gl.uniform1f(meshUniforms.u_alpha, 1.0);
+
+    for (const seg of segments) {
+      if (seg.value === 1) continue; // Bone marrow is drawn in Pass 2
+      if (hidden.has(seg.value)) continue;
+
+      const mesh = glMeshesRef.current[seg.value];
+      if (!mesh || mesh.indexCount === 0) continue;
+
+      const [r, g, b] = parseHexColor(seg.color);
+      gl.uniform3f(meshUniforms.u_color, r, g, b);
+
+      gl.bindBuffer(gl.ARRAY_BUFFER, mesh.posBuffer);
+      gl.enableVertexAttribArray(meshAttribs.a_position);
+      gl.vertexAttribPointer(meshAttribs.a_position, 3, gl.FLOAT, false, 0, 0);
+
+      gl.bindBuffer(gl.ARRAY_BUFFER, mesh.normBuffer);
+      gl.enableVertexAttribArray(meshAttribs.a_normal);
+      gl.vertexAttribPointer(meshAttribs.a_normal, 3, gl.FLOAT, false, 0, 0);
+
+      gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, mesh.indexBuffer);
+      gl.drawElements(gl.TRIANGLES, mesh.indexCount, gl.UNSIGNED_INT, 0);
+    }
+
+    // Pass 2: Semi-transparent bone marrow (segment value 1)
+    // alpha 0.35, depth write off, back faces culled
+    const boneSeg = segments.find((s) => s.value === 1);
+    if (boneSeg && !hidden.has(1)) {
+      const boneMesh = glMeshesRef.current[1];
+      if (boneMesh && boneMesh.indexCount > 0) {
+        gl.enable(gl.BLEND);
+        gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+        gl.depthMask(false);
+        gl.enable(gl.CULL_FACE);
+        gl.cullFace(gl.BACK);
+
+        const [r, g, b] = parseHexColor(boneSeg.color);
+        gl.uniform3f(meshUniforms.u_color, r, g, b);
+        gl.uniform1f(meshUniforms.u_alpha, 0.35);
+
+        gl.bindBuffer(gl.ARRAY_BUFFER, boneMesh.posBuffer);
+        gl.enableVertexAttribArray(meshAttribs.a_position);
+        gl.vertexAttribPointer(meshAttribs.a_position, 3, gl.FLOAT, false, 0, 0);
+
+        gl.bindBuffer(gl.ARRAY_BUFFER, boneMesh.normBuffer);
+        gl.enableVertexAttribArray(meshAttribs.a_normal);
+        gl.vertexAttribPointer(meshAttribs.a_normal, 3, gl.FLOAT, false, 0, 0);
+
+        gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, boneMesh.indexBuffer);
+        gl.drawElements(gl.TRIANGLES, boneMesh.indexCount, gl.UNSIGNED_INT, 0);
+
+        gl.depthMask(true);
+        gl.disable(gl.CULL_FACE);
+        gl.disable(gl.BLEND);
+      }
+    }
+
+    gl.bindBuffer(gl.ARRAY_BUFFER, null);
+    gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, null);
+
+    if (needNextFrame) {
+      requestRender();
+    }
+  }, [orient, dims, spacing, segments, hidden, requestRender]);
+
+  // Canvas resize with ResizeObserver and devicePixelRatio
   useEffect(() => {
     const box = boxRef.current;
-    if (!box || !fill) return;
-    const ro = new ResizeObserver(() => {
-      const w = Math.max(80, Math.floor(box.clientWidth));
-      const h = Math.max(80, Math.floor(box.clientHeight));
-      setSize((cur) => (cur.w === w && cur.h === h ? cur : { w, h }));
-    });
-    ro.observe(box);
-    return () => ro.disconnect();
-  }, [fill]);
+    const canvas = canvasRef.current;
+    if (!box || !canvas) return;
 
-  // Ctrl+wheel (or a touchpad pinch) zooms; a plain wheel scrolls the page.
+    const onResize = () => {
+      const rect = box.getBoundingClientRect();
+      const dpr = window.devicePixelRatio || 1;
+      const w = Math.max(80, Math.floor(rect.width));
+      const h = Math.max(80, Math.floor(rect.height));
+
+      const pw = Math.floor(w * dpr);
+      const ph = Math.floor(h * dpr);
+
+      if (canvas.width !== pw || canvas.height !== ph) {
+        canvas.width = pw;
+        canvas.height = ph;
+        requestRender();
+      }
+    };
+
+    const ro = new ResizeObserver(onResize);
+    ro.observe(box);
+    onResize();
+
+    return () => ro.disconnect();
+  }, [fill, requestRender]);
+
+  // Initialise WebGL
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+
+    cleanupGL();
+    const state = initGL(canvas);
+    if (!state) {
+      setWebglAvailable(false);
+      return;
+    }
+    setWebglAvailable(true);
+    glStateRef.current = state;
+    requestRender();
+
+    return () => {
+      cleanupGL();
+      if (workerRef.current) {
+        workerRef.current.terminate();
+        workerRef.current = null;
+      }
+    };
+  }, [cleanupGL, requestRender]);
+
+  // Re-render when hidden segments or labels change
+  useEffect(() => {
+    requestRender();
+  }, [hidden, requestRender]);
+
+  // Worker mesh builder
+  const build = useCallback(() => {
+    if (!labels) return;
+    setBuilding(true);
+    const reqId = ++activeRequestId.current;
+
+    if (workerRef.current) {
+      workerRef.current.terminate();
+    }
+
+    const worker = new Worker(new URL("./mesh3d.worker.ts", import.meta.url));
+    workerRef.current = worker;
+
+    worker.onmessage = (e: MessageEvent<MeshWorkerOutput>) => {
+      if (e.data.requestId !== activeRequestId.current) return;
+      const res = e.data.results;
+      meshDataMapRef.current = res;
+
+      const newCounts: Record<number, number> = {};
+      for (const [valStr, data] of Object.entries(res)) {
+        newCounts[Number(valStr)] = data.voxelCount;
+      }
+      setCounts(newCounts);
+      setBuilt(true);
+      setBuilding(false);
+
+      updateGLMeshes(res);
+      requestRender();
+    };
+
+    worker.onerror = () => {
+      setBuilding(false);
+    };
+
+    // Transfer a copy of labels so original memory remains intact
+    const copy = labels.slice();
+    worker.postMessage(
+      {
+        requestId: reqId,
+        labels: copy,
+        dims,
+        spacing,
+        values: segments.map((s) => s.value),
+        smoothIters: smooth ? 6 : 0,
+      },
+      [copy.buffer]
+    );
+  }, [labels, dims, spacing, segments, smooth, updateGLMeshes, requestRender]);
+
+  // Rebuild if smooth setting changes while meshes are already built
+  useEffect(() => {
+    if (built) {
+      build();
+    }
+  }, [smooth]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Zoom via wheel
   useEffect(() => {
     const cv = canvasRef.current;
     if (!cv) return;
+
     const onWheel = (e: WheelEvent) => {
       const factor = wheelZoomFactor(e);
       if (factor === null) return;
       e.preventDefault();
-      setZoom((z) => Math.max(0.4, Math.min(8, z * factor)));
+      zoomRef.current = Math.max(0.2, Math.min(10, zoomRef.current * factor));
+      requestRender();
     };
+
     cv.addEventListener("wheel", onWheel, { passive: false });
     return () => cv.removeEventListener("wheel", onWheel);
-  }, []);
+  }, [requestRender]);
 
-  const mm: P3 = [dims[0] * spacing[0], dims[1] * spacing[1], dims[2] * spacing[2]];
+  // Camera presets animation (250 ms)
+  const setPreset = useCallback(
+    (preset: Preset) => {
+      const targetAngles = PRESET_ANGLES[preset];
+      const curYaw = yawRef.current;
+      const curPitch = pitchRef.current;
 
-  const build = useCallback(() => {
-    if (!labels) return;
-    setBuilding(true);
-    // Yield first so the button shows its loading state before the main thread
-    // is occupied by the extraction loop.
-    setTimeout(() => {
-      const [nx, ny, nz] = dims;
-      const [sx, sy, sz] = spacing;
-      const step = Math.max(1, Math.round(Math.cbrt((nx * ny * nz) / 180_000)));
-      const at = (i: number, j: number, k: number) =>
-        i < 0 || j < 0 || k < 0 || i >= nx || j >= ny || k >= nz
-          ? 0 : labels[i + nx * (j + ny * k)];
+      let deltaYaw = ((targetAngles.yaw - curYaw + Math.PI) % (2 * Math.PI)) - Math.PI;
+      if (deltaYaw < -Math.PI) deltaYaw += 2 * Math.PI;
 
-      const out: Array<{ value: number; quads: P3[][] }> = [];
-      const voxels: Record<number, number> = {};
+      animRef.current = {
+        startTime: performance.now(),
+        duration: 250,
+        startYaw: curYaw,
+        startPitch: curPitch,
+        endYaw: curYaw + deltaYaw,
+        endPitch: targetAngles.pitch,
+      };
+      requestRender();
+    },
+    [requestRender]
+  );
 
-      for (const seg of segments) {
-        const v = seg.value;
-        const quads: P3[][] = [];
-        let count = 0;
-        for (let k = 0; k < nz; k += step) {
-          for (let j = 0; j < ny; j += step) {
-            for (let i = 0; i < nx; i += step) {
-              if (at(i, j, k) !== v) continue;
-              count++;
-              const x = i * sx, y = j * sy, z = k * sz;
-              const dx = step * sx, dy = step * sy, dz = step * sz;
-              // Boundary faces only; interior ones are never visible.
-              if (at(i, j, k - step) !== v)
-                quads.push([[x, y, z], [x + dx, y, z], [x + dx, y + dy, z], [x, y + dy, z]]);
-              if (at(i, j, k + step) !== v)
-                quads.push([[x, y, z + dz], [x + dx, y, z + dz], [x + dx, y + dy, z + dz], [x, y + dy, z + dz]]);
-              if (at(i - step, j, k) !== v)
-                quads.push([[x, y, z], [x, y + dy, z], [x, y + dy, z + dz], [x, y, z + dz]]);
-              if (at(i + step, j, k) !== v)
-                quads.push([[x + dx, y, z], [x + dx, y + dy, z], [x + dx, y + dy, z + dz], [x + dx, y, z + dz]]);
-              if (at(i, j - step, k) !== v)
-                quads.push([[x, y, z], [x + dx, y, z], [x + dx, y, z + dz], [x, y, z + dz]]);
-              if (at(i, j + step, k) !== v)
-                quads.push([[x, y + dy, z], [x + dx, y + dy, z], [x + dx, y + dy, z + dz], [x, y + dy, z + dz]]);
-            }
-          }
-        }
-        voxels[v] = count * step * step * step;
-        if (quads.length) out.push({ value: v, quads });
-      }
+  // Reset to full volume framing
+  const resetView = useCallback(() => {
+    targetRef.current = [0, 0, 0];
+    zoomRef.current = 1;
+    yawRef.current = 0;
+    pitchRef.current = 0;
+    inertiaRef.current = null;
+    animRef.current = null;
+    isFitRef.current = false;
+    setFit(false);
+    requestRender();
+  }, [requestRender]);
 
-      setCounts(voxels);
-      setBuilt(out);
-      setBuilding(false);
-    }, 20);
-  }, [labels, dims, spacing, segments]);
-
-  useEffect(() => {
-    const cv = canvasRef.current;
-    if (!cv) return;
-    const ctx = cv.getContext("2d");
-    if (!ctx) return;
-    const W = cv.width, H = cv.height;
-    ctx.fillStyle = "#05080b";
-    ctx.fillRect(0, 0, W, H);
-
-    const visible = (built ?? []).filter((b) => !hidden.has(b.value));
-
-    let cx = mm[0] / 2, cy = mm[1] / 2, cz = mm[2] / 2;
-    let extent = Math.max(mm[0], mm[1], mm[2]);
-    if (fit && visible.length) {
-      let mnX = Infinity, mnY = Infinity, mnZ = Infinity;
-      let mxX = -Infinity, mxY = -Infinity, mxZ = -Infinity;
-      for (const g of visible) for (const q of g.quads) for (const [x, y, z] of q) {
-        if (x < mnX) mnX = x; if (x > mxX) mxX = x;
-        if (y < mnY) mnY = y; if (y > mxY) mxY = y;
-        if (z < mnZ) mnZ = z; if (z > mxZ) mxZ = z;
-      }
-      cx = (mnX + mxX) / 2; cy = (mnY + mxY) / 2; cz = (mnZ + mxZ) / 2;
-      extent = Math.max(mxX - mnX, mxY - mnY, mxZ - mnZ, 1) * 1.7;
+  // Fit camera to visible meshes
+  const toggleFit = useCallback(() => {
+    if (isFitRef.current) {
+      resetView();
+      return;
     }
 
-    const scale = ((Math.min(W, H) * 0.78) / extent) * zoom;
-    const cosY = Math.cos(yaw), sinY = Math.sin(yaw);
-    const cosP = Math.cos(pitch), sinP = Math.sin(pitch);
-    const project = ([x, y, z]: P3) => {
-      const dx = x - cx, dy = y - cy, dz = z - cz;
-      const rx = dx * cosY - dz * sinY;
-      const rz = dx * sinY + dz * cosY;
-      const ry = dy * cosP - rz * sinP;
-      // Canvas Y grows downward. Negate so superior is up, as in Slicer's 3D view.
-      return { sx: W / 2 + rx * scale, sy: H / 2 - ry * scale, depth: dy * sinP + rz * cosP };
-    };
+    const { modelMatrix, extents } = buildOrientMatrix(orient, dims, spacing);
+    const maxDim = Math.max(extents[0], extents[1], extents[2]);
 
-    // volume bounds
-    const corners = [
-      [0, 0, 0], [mm[0], 0, 0], [mm[0], mm[1], 0], [0, mm[1], 0],
-      [0, 0, mm[2]], [mm[0], 0, mm[2]], [mm[0], mm[1], mm[2]], [0, mm[1], mm[2]],
-    ].map((p) => project(p as P3));
-    ctx.save();
-    ctx.strokeStyle = "#b455c8";
-    ctx.globalAlpha = 0.5;
-    ctx.beginPath();
-    for (const [a, b] of [[0, 1], [1, 2], [2, 3], [3, 0], [4, 5], [5, 6], [6, 7], [7, 4],
-                          [0, 4], [1, 5], [2, 6], [3, 7]] as [number, number][]) {
-      ctx.moveTo(corners[a].sx, corners[a].sy);
-      ctx.lineTo(corners[b].sx, corners[b].sy);
-    }
-    ctx.stroke();
-    ctx.restore();
+    let minX = Infinity, minY = Infinity, minZ = Infinity;
+    let maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity;
+    let hasPoints = false;
 
-    // orientation letters, as Slicer labels its 3D view
-    ctx.save();
-    ctx.fillStyle = "#c07dd4";
-    ctx.globalAlpha = 0.85;
-    ctx.font = "600 12px ui-sans-serif, system-ui";
-    ctx.textAlign = "center";
-    ctx.textBaseline = "middle";
-    const [ei, ej, ek] = orient;
-    for (const [pt, letter] of [
-      [[mm[0] / 2, mm[1] / 2, mm[2]], ek.atMax], [[mm[0] / 2, mm[1] / 2, 0], ek.atZero],
-      [[mm[0] / 2, 0, mm[2] / 2], ej.atZero], [[mm[0] / 2, mm[1], mm[2] / 2], ej.atMax],
-      [[0, mm[1] / 2, mm[2] / 2], ei.atZero], [[mm[0], mm[1] / 2, mm[2] / 2], ei.atMax],
-    ] as Array<[P3, string]>) {
-      const q = project(pt);
-      ctx.fillText(letter, q.sx, q.sy);
-    }
-    ctx.restore();
+    for (const seg of segments) {
+      if (hidden.has(seg.value)) continue;
+      const data = meshDataMapRef.current[seg.value];
+      if (!data || data.positions.length === 0) continue;
 
-    if (!visible.length) return;
+      const pos = data.positions;
+      for (let i = 0; i < pos.length; i += 3) {
+        const px = pos[i], py = pos[i + 1], pz = pos[i + 2];
+        const wx = modelMatrix[0] * px + modelMatrix[4] * py + modelMatrix[8] * pz + modelMatrix[12];
+        const wy = modelMatrix[1] * px + modelMatrix[5] * py + modelMatrix[9] * pz + modelMatrix[13];
+        const wz = modelMatrix[2] * px + modelMatrix[6] * py + modelMatrix[10] * pz + modelMatrix[14];
 
-    // One depth-sorted pass across all segments, so a lesion inside bone is
-    // occluded correctly rather than always drawn on top.
-    const drawn: Quad[] = [];
-    for (const group of visible) {
-      const col = segments.find((s) => s.value === group.value)?.color ?? "#ffffff";
-      for (const quad of group.quads) {
-        const pr = quad.map(project);
-        const ux = pr[1].sx - pr[0].sx, uy = pr[1].sy - pr[0].sy;
-        const vx = pr[2].sx - pr[0].sx, vy = pr[2].sy - pr[0].sy;
-        drawn.push({
-          z: pr.reduce((s, p) => s + p.depth, 0) / pr.length,
-          pts: pr.map((p) => [p.sx, p.sy] as [number, number]),
-          shade: Math.min(1, 0.45 + Math.abs(ux * vy - uy * vx) / 700),
-          color: col,
-        });
+        if (wx < minX) minX = wx; if (wx > maxX) maxX = wx;
+        if (wy < minY) minY = wy; if (wy > maxY) maxY = wy;
+        if (wz < minZ) minZ = wz; if (wz > maxZ) maxZ = wz;
+        hasPoints = true;
       }
     }
-    drawn.sort((a, b) => b.z - a.z);
 
-    for (const t of drawn) {
-      const r = parseInt(t.color.slice(1, 3), 16),
-        g = parseInt(t.color.slice(3, 5), 16),
-        b = parseInt(t.color.slice(5, 7), 16);
-      ctx.beginPath();
-      ctx.moveTo(t.pts[0][0], t.pts[0][1]);
-      for (let i = 1; i < t.pts.length; i++) ctx.lineTo(t.pts[i][0], t.pts[i][1]);
-      ctx.closePath();
-      ctx.fillStyle = `rgb(${Math.round(r * t.shade)},${Math.round(g * t.shade)},${Math.round(b * t.shade)})`;
-      ctx.fill();
+    if (!hasPoints) {
+      resetView();
+      return;
     }
-  }, [built, hidden, yaw, pitch, zoom, fit, mm, segments, orient, size]);
 
-  const voxel = spacing[0] * spacing[1] * spacing[2];
-  const totalFaces = (built ?? []).reduce((n, g) => n + g.quads.length, 0);
+    const cx = (minX + maxX) / 2;
+    const cy = (minY + maxY) / 2;
+    const cz = (minZ + maxZ) / 2;
+    const fitExtent = Math.max(maxX - minX, maxY - minY, maxZ - minZ, 1) * 1.35;
+
+    targetRef.current = [cx, cy, cz];
+    zoomRef.current = Math.max(0.2, Math.min(10, maxDim / fitExtent));
+    isFitRef.current = true;
+    setFit(true);
+    requestRender();
+  }, [orient, dims, spacing, segments, hidden, resetView, requestRender]);
+
+  // Volume format calculation (exact)
+  const voxelVolumeMm3 = spacing[0] * spacing[1] * spacing[2];
+  const mm = [dims[0] * spacing[0], dims[1] * spacing[1], dims[2] * spacing[2]];
+
+  const formatVolume = (voxelCount: number) => {
+    const ml = (voxelCount * voxelVolumeMm3) / 1000;
+    const decimals = ml < 0.1 ? 3 : 2;
+    const mlStr = ml.toFixed(decimals);
+    return `${voxelCount.toLocaleString()} voxels, ${mlStr} ml (${mlStr} cm³)`;
+  };
 
   return (
-    <div className={`flex min-h-0 flex-col overflow-hidden rounded-lg border-2 border-neutral-700 bg-black p-1.5 ${fill ? "flex-1" : ""}`}
+    <div
+      className={`flex min-h-0 flex-col overflow-hidden rounded-lg border-2 border-neutral-700 bg-black p-1.5 ${
+        fill ? "flex-1" : ""
+      }`}
       onDoubleClick={(e) => {
         if (onToggleExpand && !(e.target as HTMLElement).closest("button")) onToggleExpand();
-      }}>
-      <div className="mb-1 flex h-6 shrink-0 select-none items-center justify-between gap-2 px-1 text-neutral-400"
-        title={onToggleExpand ? "Double-click the view for full size" : undefined}>
-        <span className="inline-flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wider">
-          <Box className="h-3.5 w-3.5" /> 3D
+      }}
+    >
+      {/* Top Header & View Controls */}
+      <div
+        className="mb-1 flex h-6 shrink-0 select-none items-center justify-between gap-1.5 px-1 text-neutral-400"
+        title={onToggleExpand ? "Double-click the view for full size" : undefined}
+      >
+        <span className="inline-flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wider text-neutral-300">
+          <Box className="h-3.5 w-3.5 text-neutral-400" /> 3D
         </span>
-        <span className="flex items-center gap-1 text-[11px]">
-          <button onClick={() => setFit((v) => !v)} disabled={!built}
-            title={fit ? "Show at true size in the volume" : "Zoom to what is painted"}
+
+        {/* View Presets & Action Buttons */}
+        <div className="flex items-center gap-1 text-[11px]">
+          <div className="inline-flex rounded border border-neutral-700 bg-neutral-900/60 p-0.5">
+            {(["A", "P", "L", "R", "S", "I"] as Preset[]).map((p) => (
+              <button
+                key={p}
+                type="button"
+                onClick={() => setPreset(p)}
+                title={`Orient view ${p}`}
+                className="h-4.5 min-w-[17px] rounded px-1 text-[10px] font-medium text-neutral-300 transition hover:bg-neutral-800 hover:text-white"
+              >
+                {p}
+              </button>
+            ))}
+          </div>
+
+          <button
+            type="button"
+            onClick={toggleFit}
+            disabled={!built}
+            title={fit ? "Show at true size in volume" : "Zoom to visible painted segments"}
             className={`inline-flex h-5 items-center gap-1 rounded border px-1.5 disabled:opacity-40 ${
-              fit ? "border-primary text-primary" : "border-neutral-700 text-neutral-300 hover:bg-neutral-800"}`}>
+              fit ? "border-primary text-primary" : "border-neutral-700 text-neutral-300 hover:bg-neutral-800"
+            }`}
+          >
             <Maximize2 className="h-3 w-3" /> Fit
           </button>
-          <button onClick={build} disabled={building}
+
+          <button
+            type="button"
+            onClick={resetView}
+            title="Reset view to whole volume center"
+            className="flex h-5 w-5 items-center justify-center rounded border border-neutral-700 text-neutral-300 hover:bg-neutral-800 hover:text-white"
+          >
+            <RotateCcw className="h-3 w-3" />
+          </button>
+
+          <button
+            type="button"
+            onClick={() => setSmooth((s) => !s)}
+            title={smooth ? "Smooth surfaces on (Taubin filter)" : "Raw voxel surfaces"}
+            className={`inline-flex h-5 items-center gap-1 rounded border px-1.5 ${
+              smooth ? "border-neutral-700 text-neutral-300 hover:bg-neutral-800" : "border-neutral-800 text-neutral-500"
+            }`}
+          >
+            <Sparkles className="h-2.5 w-2.5" />
+            <span>Smooth: {smooth ? "On" : "Off"}</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={build}
+            disabled={building || !labels}
             className={`h-5 rounded border px-2 disabled:opacity-40 ${
-              built ? "border-neutral-700 text-neutral-300 hover:bg-neutral-800" : "border-primary bg-primary/15 text-primary hover:bg-primary/25"}`}>
+              built
+                ? "border-neutral-700 text-neutral-300 hover:bg-neutral-800"
+                : "border-primary bg-primary/15 text-primary hover:bg-primary/25"
+            }`}
+          >
             {building ? "Building…" : built ? "Rebuild" : "Build"}
           </button>
+
           {onToggleExpand && (
-            <button type="button" onClick={onToggleExpand}
-              title={expanded ? "Back to all four views" : "Full view (or double-click the view)"}
-              className="flex h-5 w-6 items-center justify-center rounded border border-neutral-700 text-neutral-300 hover:bg-neutral-800 hover:text-white">
+            <button
+              type="button"
+              onClick={onToggleExpand}
+              title={expanded ? "Back to all four views" : "Full view (or double-click header)"}
+              className="flex h-5 w-6 items-center justify-center rounded border border-neutral-700 text-neutral-300 hover:bg-neutral-800 hover:text-white"
+            >
               {expanded ? <Shrink className="h-3 w-3" /> : <Expand className="h-3 w-3" />}
             </button>
           )}
-        </span>
+        </div>
       </div>
 
-      <div ref={boxRef} className={fill ? "relative min-h-[120px] flex-1" : "relative flex min-h-0 flex-1 items-center justify-center"}>
-        <canvas ref={canvasRef} width={fill ? size.w : 460} height={fill ? size.h : 460}
+      {/* Canvas Area with HTML Orientation Letters Overlay */}
+      <div
+        ref={boxRef}
+        className={fill ? "relative min-h-[120px] flex-1" : "relative flex min-h-0 flex-1 items-center justify-center"}
+      >
+        <canvas
+          ref={canvasRef}
           className={`${fill ? "absolute inset-0 h-full w-full" : ""} cursor-grab rounded active:cursor-grabbing`}
-          style={{ ...(fill ? {} : { maxWidth: "100%", maxHeight: "100%" }), touchAction: "none" }}
+          style={{ ...(fill ? {} : { width: "460px", height: "460px", maxWidth: "100%", maxHeight: "100%" }), touchAction: "none" }}
+          onContextMenu={(e) => e.preventDefault()}
+          onDoubleClick={(e) => {
+            e.stopPropagation();
+            resetView();
+          }}
           onPointerDown={(e) => {
             e.currentTarget.setPointerCapture(e.pointerId);
             if (e.pointerType === "touch") {
               pinch.current.down(e);
-              if (pinch.current.active) { drag.current = null; pinchZoom0.current = zoom; return; }
+              if (pinch.current.active) {
+                dragRef.current = null;
+                pinchZoom0.current = zoomRef.current;
+                return;
+              }
             }
-            drag.current = { id: e.pointerId, x: e.clientX, y: e.clientY };
+            inertiaRef.current = null;
+            animRef.current = null;
+
+            const isPan = e.button === 2 || (e.button === 0 && e.shiftKey);
+            dragRef.current = {
+              pointerId: e.pointerId,
+              startX: e.clientX,
+              startY: e.clientY,
+              lastX: e.clientX,
+              lastY: e.clientY,
+              isPan,
+            };
           }}
           onPointerMove={(e) => {
             if (e.pointerType === "touch") {
               const f = pinch.current.move(e);
-              if (f) { setZoom(Math.max(0.4, Math.min(8, pinchZoom0.current * f.scale))); return; }
+              if (f) {
+                zoomRef.current = Math.max(0.2, Math.min(10, pinchZoom0.current * f.scale));
+                requestRender();
+                return;
+              }
             }
-            const start = drag.current;
-            if (!start || start.id !== e.pointerId) return;
-            const dx = e.clientX - start.x;
-            const dy = e.clientY - start.y;
-            drag.current = { id: e.pointerId, x: e.clientX, y: e.clientY };
-            setYaw((v) => v + dx * 0.01);
-            setPitch((v) => Math.max(-1.45, Math.min(1.45, v + dy * 0.01)));
+            const drag = dragRef.current;
+            if (!drag || drag.pointerId !== e.pointerId) return;
+
+            const dx = e.clientX - drag.lastX;
+            const dy = e.clientY - drag.lastY;
+            drag.lastX = e.clientX;
+            drag.lastY = e.clientY;
+
+            if (drag.isPan) {
+              // Pan target in camera space
+              const yaw = yawRef.current;
+              const pitch = pitchRef.current;
+              const dist =
+                (Math.max(mm[0], mm[1], mm[2]) * 1.3) /
+                (2 * Math.tan(((35 * Math.PI) / 180) / 2) * Math.max(0.1, zoomRef.current));
+              const cv = canvasRef.current;
+              const scale = (dist * 0.0016) / (cv ? cv.clientHeight / 460 : 1);
+
+              // Camera right and up in world space
+              const cosY = Math.cos(yaw), sinY = Math.sin(yaw);
+              const cosP = Math.cos(pitch), sinP = Math.sin(pitch);
+              const right: Vec3 = [-cosY, -sinY, 0];
+              const camUp: Vec3 = [-sinP * sinY, sinP * cosY, cosP];
+
+              targetRef.current = [
+                targetRef.current[0] - right[0] * dx * scale - camUp[0] * dy * scale,
+                targetRef.current[1] - right[1] * dx * scale - camUp[1] * dy * scale,
+                targetRef.current[2] - right[2] * dx * scale - camUp[2] * dy * scale,
+              ];
+            } else {
+              // Orbit rotation
+              yawRef.current += dx * 0.008;
+              pitchRef.current = Math.max(-1.55, Math.min(1.55, pitchRef.current + dy * 0.008));
+              inertiaRef.current = { velYaw: dx * 0.008, velPitch: dy * 0.008 };
+            }
+
+            requestRender();
           }}
-          onPointerUp={(e) => { pinch.current.up(e); drag.current = null; }}
-          onPointerCancel={(e) => { pinch.current.up(e); drag.current = null; }}
+          onPointerUp={(e) => {
+            pinch.current.up(e);
+            if (dragRef.current?.pointerId === e.pointerId) {
+              dragRef.current = null;
+            }
+            requestRender();
+          }}
+          onPointerCancel={(e) => {
+            pinch.current.up(e);
+            if (dragRef.current?.pointerId === e.pointerId) {
+              dragRef.current = null;
+            }
+          }}
         />
-        {!built && (
+
+        {/* Orientation Letters Overlay */}
+        <div className="pointer-events-none absolute inset-0 overflow-hidden">
+          {letters.map(({ letter, x, y, visible }) => {
+            if (!visible) return null;
+            return (
+              <span
+                key={letter}
+                className="absolute font-semibold text-[12px] text-[#c07dd4] select-none"
+                style={{
+                  left: `${x}px`,
+                  top: `${y}px`,
+                  transform: "translate(-50%, -50%)",
+                  textShadow: "0 0 3px rgba(0,0,0,0.9)",
+                }}
+              >
+                {letter}
+              </span>
+            );
+          })}
+        </div>
+
+        {/* Fallback when WebGL is unavailable */}
+        {!webglAvailable && (
+          <div className="pointer-events-none absolute inset-0 flex items-center justify-center text-sm text-neutral-400">
+            3D view needs WebGL
+          </div>
+        )}
+
+        {/* Build guidance badge */}
+        {!built && webglAvailable && (
           <div className="pointer-events-none absolute inset-x-0 bottom-3 flex justify-center px-5 text-center text-[11px] text-neutral-400">
             <span className="inline-flex items-center gap-2 rounded-full border border-neutral-800 bg-black/80 px-3 py-1">
-              {building
-                ? <><Loader2 className="h-3.5 w-3.5 animate-spin" /> building surface…</>
-                : "Press Build to see everything painted, in 3D"}
+              {building ? (
+                <>
+                  <Loader2 className="h-3.5 w-3.5 animate-spin" /> building surface…
+                </>
+              ) : (
+                "Press Build to see everything painted, in 3D"
+              )}
             </span>
           </div>
         )}
       </div>
 
-      <div className="mt-1 flex shrink-0 flex-wrap items-center justify-between gap-x-3 gap-y-0.5 px-1 text-[10px] text-neutral-500"
-        title={totalFaces ? `${totalFaces.toLocaleString()} faces` : undefined}>
-        {built && built.length > 0 ? (
+      {/* Numbers under the view, per segment */}
+      <div className="mt-1 flex shrink-0 flex-wrap items-center justify-between gap-x-3 gap-y-0.5 px-1 text-[10px] text-neutral-500">
+        {built && Object.keys(counts).length > 0 ? (
           <div className="flex flex-wrap gap-x-2.5 gap-y-0.5">
-            {built.map((g) => {
-              const def = segments.find((s) => s.value === g.value)!;
-              const off = hidden.has(g.value);
+            {segments.map((seg) => {
+              const count = counts[seg.value] ?? 0;
+              const off = hidden.has(seg.value);
+              const text = `${seg.label}: ${formatVolume(count)}`;
+
               if (controlledHidden !== undefined) {
                 return (
                   <span
-                    key={g.value}
-                    title={off ? "Hidden by view filter" : def.label}
+                    key={seg.value}
+                    title={off ? "Hidden by view filter" : seg.label}
                     className={`inline-flex items-center gap-1 ${off ? "opacity-35" : ""}`}
                   >
-                    <span className="h-2 w-2 rounded-sm" style={{ background: def.color }} />
-                    <span className="tabular-nums">
-                      {def.label}: {((counts[g.value] ?? 0) * voxel).toFixed(4)} mm&sup3;
-                    </span>
+                    <span className="h-2 w-2 rounded-sm" style={{ background: seg.color }} />
+                    <span className="tabular-nums text-neutral-400">{text}</span>
                   </span>
                 );
               }
+
               return (
-                <button key={g.value}
-                  onClick={() => setInternalHidden((h) => {
-                    const n = new Set(h);
-                    if (n.has(g.value)) n.delete(g.value); else n.add(g.value);
-                    return n;
-                  })}
-                  title={off ? "Show" : "Hide"}
-                  className={`inline-flex items-center gap-1 ${off ? "opacity-35" : ""}`}>
-                  <span className="h-2 w-2 rounded-sm" style={{ background: def.color }} />
-                  <span className="tabular-nums">
-                    {def.label}: {((counts[g.value] ?? 0) * voxel).toFixed(4)} mm&sup3;
-                  </span>
+                <button
+                  key={seg.value}
+                  type="button"
+                  onClick={() =>
+                    setInternalHidden((h) => {
+                      const next = new Set(h);
+                      if (next.has(seg.value)) next.delete(seg.value);
+                      else next.add(seg.value);
+                      return next;
+                    })
+                  }
+                  title={off ? `Show ${seg.label}` : `Hide ${seg.label}`}
+                  className={`inline-flex items-center gap-1 ${off ? "opacity-35" : ""}`}
+                >
+                  <span className="h-2 w-2 rounded-sm" style={{ background: seg.color }} />
+                  <span className="tabular-nums text-neutral-400">{text}</span>
                 </button>
               );
             })}
@@ -367,7 +872,9 @@ export default function Render3D({
         ) : (
           <div>volume {mm.map((v) => v.toFixed(0)).join(" x ")} mm</div>
         )}
-        <span>{fit ? "zoomed" : "true size"} &middot; drag to turn &middot; Ctrl+wheel or pinch to zoom</span>
+        <span className="text-[9.5px]">
+          {fit ? "fitted" : "true size"} &middot; drag to orbit &middot; right-drag to pan &middot; wheel/pinch to zoom
+        </span>
       </div>
     </div>
   );
