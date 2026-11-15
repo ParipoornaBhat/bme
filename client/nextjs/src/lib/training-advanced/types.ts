@@ -136,7 +136,7 @@ export interface BackgroundTask {
   id: string;
   type: "start" | "resume" | "cancel" | "sync";
   target: string;
-  status: "running" | "completed" | "failed";
+  status: "running" | "completed" | "failed" | "cancelled";
   startedAt: string;
   endedAt?: string | null;
   message?: string;

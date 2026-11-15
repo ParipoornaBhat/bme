@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
-import { spawn, execFile } from "node:child_process";
+import { spawn, spawnSync, execFile } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import type {
   AccountCard,
@@ -143,6 +143,25 @@ function clearSyncLock(targetId: string) {
   fs.rmSync(syncLockFile(targetId), { force: true });
 }
 
+const cancelledSyncs = new Set<string>();
+
+export function cancelSync(targetId: string): { success: boolean; message: string } {
+  const lock = readSyncLock(targetId);
+  if (!lock) return { success: false, message: "No sync is running for this account." };
+  cancelledSyncs.add(lock.taskId);
+  try {
+    if (process.platform === "win32") {
+      spawnSync("taskkill", ["/PID", String(lock.pid), "/T", "/F"], { windowsHide: true });
+    } else {
+      process.kill(-lock.pid, "SIGTERM");
+    }
+  } catch {
+    /* already gone */
+  }
+  clearSyncLock(targetId);
+  return { success: true, message: "Sync stopped." };
+}
+
 export async function syncDataset(
   targetId: string,
   confirmed = false
@@ -244,6 +263,13 @@ export async function syncDataset(
 
   child.on("exit", (code) => {
     clearSyncLock(targetId);
+    if (cancelledSyncs.has(taskId)) {
+      task.status = "cancelled";
+      task.endedAt = new Date().toISOString();
+      task.message = "Sync stopped by user.";
+      saveTask(task);
+      return;
+    }
     task.status = code === 0 ? "completed" : "failed";
     task.endedAt = new Date().toISOString();
     task.message = code === 0 ? "Dataset sync completed successfully." : `Dataset sync failed with exit code ${code}`;

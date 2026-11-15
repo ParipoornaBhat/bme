@@ -386,6 +386,21 @@ export default function DataSyncPage() {
   };
 
   // Filtered history tasks
+  const runningSyncFor = (targetId: string) =>
+    syncTasks.find((x) => x.status === "running" && x.target === targetId);
+
+  const stopSync = async (targetId: string) => {
+    const res = await fetch("/api/training-advanced/cancel-sync", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ targetId }),
+    });
+    const j = await res.json().catch(() => ({}));
+    if (res.ok && j.success) toast.success(j.message || "Sync stopped");
+    else toast.error(j.message || "Could not stop the sync");
+    loadData(true);
+  };
+
   const filteredSyncTasks = useMemo(() => {
     return syncTasks.filter((t) => {
       if (historyTargetFilter !== "all" && t.target !== historyTargetFilter) {
@@ -407,7 +422,7 @@ export default function DataSyncPage() {
         }
       }
       return true;
-    });
+    }).sort((a, b) => (b.startedAt || "").localeCompare(a.startedAt || ""));
   }, [syncTasks, historyTargetFilter, historyStatusFilter]);
 
   // Unique target IDs from tasks
@@ -714,7 +729,7 @@ export default function DataSyncPage() {
                       <td className="px-3.5 py-3 text-right whitespace-nowrap">
                         <button
                           onClick={() => handleH200Sync(t)}
-                          disabled={isBlocked || !isConnected || isBusy}
+                          disabled={isBlocked || !isConnected || isBusy || Boolean(runningSyncFor(t.targetId))}
                           className="inline-flex items-center gap-1.5 rounded-xl bg-primary px-3 py-1.5 text-xs font-bold text-primary-foreground hover:bg-primary/90 transition-all cursor-pointer disabled:opacity-40"
                         >
                           {isBusy ? (
@@ -724,6 +739,16 @@ export default function DataSyncPage() {
                           )}
                           Sync
                         </button>
+                        {runningSyncFor(t.targetId) && (
+                          <div className="mt-1.5 space-y-1">
+                            <div className="max-w-[260px] truncate text-[10px] text-muted-foreground" title={runningSyncFor(t.targetId)?.message}>
+                              {runningSyncFor(t.targetId)?.message}
+                            </div>
+                            <button type="button" onClick={() => { void stopSync(t.targetId); }} className="w-full rounded border border-destructive/50 px-2 py-0.5 text-[11px] text-destructive hover:bg-destructive/10">
+                              Stop
+                            </button>
+                          </div>
+                        )}
                       </td>
                     </tr>
                   );
