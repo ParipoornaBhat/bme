@@ -9,6 +9,8 @@ export interface AnnotatorItem {
   name: string;
   savedAt?: string;
   isMain?: boolean;
+  slices?: { marked: number; total: number } | null;
+  identicalTo?: string | null;
 }
 
 export interface ReviewEditInfo {
@@ -394,8 +396,24 @@ export function AnnotatorPicker({
         >
           {/* Main annotation */}
           {mainAnnotator ? (
-            <option value={mainAnnotator.name}>
-              {mainAnnotator.name} (first)
+            <option
+              value={mainAnnotator.name}
+              title={mainAnnotator.slices ? "Axial slices with paint" : undefined}
+              className={
+                mainAnnotator.slices && mainAnnotator.slices.marked < mainAnnotator.slices.total
+                  ? "text-amber-500"
+                  : undefined
+              }
+              style={
+                mainAnnotator.slices && mainAnnotator.slices.marked < mainAnnotator.slices.total
+                  ? { color: "#f59e0b" }
+                  : undefined
+              }
+            >
+              {mainAnnotator.identicalTo
+                ? `${mainAnnotator.identicalTo} (main)`
+                : `${mainAnnotator.name} (first)`}
+              {mainAnnotator.slices ? ` ${mainAnnotator.slices.marked}/${mainAnnotator.slices.total}` : ""}
             </option>
           ) : hasMainAnnotation || annotators.length === 0 ? (
             <option value="">
@@ -404,11 +422,21 @@ export function AnnotatorPicker({
           ) : null}
 
           {/* Other annotators */}
-          {otherAnnotators.map((a) => (
-            <option key={a.name} value={a.name}>
-              {a.name}
-            </option>
-          ))}
+          {otherAnnotators.map((a) => {
+            const isAmber = a.slices != null && a.slices.marked < a.slices.total;
+            return (
+              <option
+                key={a.name}
+                value={a.name}
+                title={a.slices ? "Axial slices with paint" : undefined}
+                className={isAmber ? "text-amber-500" : undefined}
+                style={isAmber ? { color: "#f59e0b" } : undefined}
+              >
+                {a.name}
+                {a.slices ? ` ${a.slices.marked}/${a.slices.total}` : ""}
+              </option>
+            );
+          })}
 
           {/* Review mode mine edit */}
           {isReview && review && (
@@ -443,6 +471,12 @@ export function AnnotatorPicker({
           </button>
         )}
       </div>
+
+      {mainAnnotator?.identicalTo && (
+        <div className="text-[11px] text-muted-foreground leading-tight">
+          same as {mainAnnotator.identicalTo}&apos;s copy
+        </div>
+      )}
 
       {/* Compare A/B Toggle and Dice Bar */}
       {isCompare && (

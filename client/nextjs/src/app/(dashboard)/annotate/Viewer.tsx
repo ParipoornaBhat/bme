@@ -428,6 +428,7 @@ export default function Viewer({
   const [labels, setLabels] = useState<Uint8Array | null>(null);
   const [status, setStatus] = useState("Loading scan…");
   const [busy, setBusy] = useState(true);
+  const [switching, setSwitching] = useState(false);
   const [seriesChoices, setSeriesChoices] = useState<{ id: string; label: string }[]>([]);
   const [annotatedSeries, setAnnotatedSeries] = useState("");
   const [seriesId, setSeriesId] = useState("");
@@ -1858,6 +1859,7 @@ export default function Viewer({
   const strokePointer = useRef<{ id: number; type: string } | null>(null);
 
   const beginStroke = (p: Plane, e: React.PointerEvent) => {
+    if (switching) return;
     window.getSelection()?.removeAllRanges();
     strokePlane.current = p;
     strokePointer.current = { id: e.pointerId, type: e.pointerType };
@@ -2081,7 +2083,7 @@ export default function Viewer({
 
   /** Grab the selection's box or handle, or select the region under the pointer. */
   const startMove = (p: Plane, e: React.PointerEvent) => {
-    if (!vol || !labels) return;
+    if (!vol || !labels || switching) return;
     const pt = toPlanePoint(p, e.clientX, e.clientY);
     if (!pt) return;
     const s = sliceOf(p, vol, cursor);
@@ -2414,8 +2416,8 @@ export default function Viewer({
     }
     if (!vol) return;
     const n = vol.dims[0] * vol.dims[1] * vol.dims[2];
-    setBusy(true);
-    setStatus("Loading annotation…");
+    setSwitching(true);
+    setStatus("Switching annotation…");
     try {
       const annotatorParam = newAnnotator === "" ? undefined : newAnnotator;
       const saved = await fetchSavedLabels(caseId, n, seriesId, withAccessRef.current, annotatorParam);
@@ -2447,7 +2449,7 @@ export default function Viewer({
       toast.error(msg);
       setStatus(msg);
     } finally {
-      setBusy(false);
+      setSwitching(false);
     }
   };
 
@@ -3102,7 +3104,7 @@ export default function Viewer({
           <RailButton
             key={id}
             active={tool === id}
-            disabled={isPaint && isReviewLocked}
+            disabled={(isPaint && isReviewLocked) || switching}
             title={isPaint && isReviewLocked ? lockTooltip : title}
             onClick={() => pickTool(id)}
           >
@@ -3113,7 +3115,7 @@ export default function Viewer({
       {canAnnotate && (
         <RailButton
           active={erasing ? "danger" : false}
-          disabled={isReviewLocked}
+          disabled={isReviewLocked || switching}
           title={isReviewLocked ? lockTooltip : "Eraser (Key 0 or E)"}
           onClick={() => toggleEraser()}
         >
@@ -3124,15 +3126,15 @@ export default function Viewer({
         ? railSize("torch", torchSize, (d) => stepTorch(d * 8))
         : canAnnotate && tool === "brush" ? railSize("brush", brush, (d) => setBrush((b) => Math.min(20, Math.max(1, b + d))))
         : canAnnotate && tool === "move" && (
-          <RailButton active={moveAllSlices} disabled={isReviewLocked} title={isReviewLocked ? lockTooltip : moveScopeTitle} onClick={() => setMoveAllSlices((v) => !v)}>
+          <RailButton active={moveAllSlices} disabled={isReviewLocked || switching} title={isReviewLocked ? lockTooltip : moveScopeTitle} onClick={() => setMoveAllSlices((v) => !v)}>
             <Layers className="h-4 w-4" />
           </RailButton>
         )}
       {canAnnotate && (
         <>
           {railDivider}
-          <RailButton disabled={isReviewLocked || undoStack.current.length === 0} title={isReviewLocked ? lockTooltip : "Undo (Ctrl+Z)"} onClick={undo}><RotateCcw className="h-4 w-4" /></RailButton>
-          <RailButton disabled={isReviewLocked || redoStack.current.length === 0} title={isReviewLocked ? lockTooltip : "Redo (Ctrl+Y)"} onClick={redo}><RotateCw className="h-4 w-4" /></RailButton>
+          <RailButton disabled={isReviewLocked || undoStack.current.length === 0 || switching} title={isReviewLocked ? lockTooltip : "Undo (Ctrl+Z)"} onClick={undo}><RotateCcw className="h-4 w-4" /></RailButton>
+          <RailButton disabled={isReviewLocked || redoStack.current.length === 0 || switching} title={isReviewLocked ? lockTooltip : "Redo (Ctrl+Y)"} onClick={redo}><RotateCw className="h-4 w-4" /></RailButton>
         </>
       )}
 
@@ -3416,14 +3418,14 @@ export default function Viewer({
               onChange={handleAnnotatorChange}
               isReview={isReview}
               userRole={reviewUser?.role === "team" ? "team" : ((reviewUser?.role as string) === "radiologist" ? "radiologist" : "reviewer")}
-              disabled={busy}
+              disabled={busy || switching}
             />
             {isReview && reviewUser?.role !== "team" && (
               <ReviewMarkButton
                 caseId={caseId}
                 myReview={myReview}
                 onReviewChange={handleReviewChange}
-                disabled={busy}
+                disabled={busy || switching}
               />
             )}
             {!isReview && (
@@ -3441,7 +3443,7 @@ export default function Viewer({
                     toast.error("Could not sync with cloud database");
                   }
                 }}
-                disabled={isSyncing || busy}
+                disabled={isSyncing || busy || switching}
                 title={syncStatus ? `Cloud Database Sync (${syncStatus})` : "Sync annotations with cloud database"}
                 className={`p-1.5 rounded border transition cursor-pointer flex items-center gap-1 ${
                   teamNotice
@@ -3530,7 +3532,7 @@ export default function Viewer({
             {canAnnotate && (
               <button
                 onClick={save}
-                disabled={isReviewLocked || saving || !dirty}
+                disabled={isReviewLocked || saving || !dirty || switching}
                 title={isReviewLocked
                   ? lockTooltip
                   : isReview
@@ -3866,7 +3868,7 @@ export default function Viewer({
                 caseId={caseId}
                 myReview={myReview}
                 onReviewChange={handleReviewChange}
-                disabled={busy}
+                disabled={busy || switching}
               />
             )}
 
@@ -3874,7 +3876,7 @@ export default function Viewer({
               <button
                 type="button"
                 onClick={save}
-                disabled={isReviewLocked || saving || !dirty}
+                disabled={isReviewLocked || saving || !dirty || switching}
                 title={isReviewLocked
                   ? lockTooltip
                   : isReview

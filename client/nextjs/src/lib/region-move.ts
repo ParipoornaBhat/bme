@@ -128,22 +128,39 @@ export function placeRegion(
 }
 
 /**
- * Which part of the box is under the point: an edge or corner within `tol`
- * voxels, the inside, or nothing.
+ * Which part of the box is under the point: one of the 8 resize handles
+ * (corners and edge midpoints) within `tol` voxels, the inside ("move"), or nothing.
  */
 export function handleAt(box: Box, x: number, y: number, tol: number): Handle | null {
-  // A small box keeps its middle for moving rather than being all handles.
-  const tx = Math.min(tol, (box.x1 - box.x0) / 4), ty = Math.min(tol, (box.y1 - box.y0) / 4);
-  const nearX0 = Math.abs(x - box.x0) <= tx, nearX1 = Math.abs(x - box.x1) <= tx;
-  const nearY0 = Math.abs(y - box.y0) <= ty, nearY1 = Math.abs(y - box.y1) <= ty;
-  const inX = x >= box.x0 - tx && x <= box.x1 + tx;
-  const inY = y >= box.y0 - ty && y <= box.y1 + ty;
-  if (!inX || !inY) return null;
-  // b runs upwards, so y1 is the top edge on screen.
-  const ns = nearY1 ? "n" : nearY0 ? "s" : "";
-  const ew = nearX1 ? "e" : nearX0 ? "w" : "";
-  if (ns || ew) return (ns + ew) as Handle;
-  return x >= box.x0 && x <= box.x1 && y >= box.y0 && y <= box.y1 ? "move" : null;
+  const mx = (box.x0 + box.x1) / 2;
+  const my = (box.y0 + box.y1) / 2;
+  const r = Math.max(tol, 2);
+
+  // Check the 8 resize handles first (corners and midpoints)
+  const nearNW = Math.abs(x - box.x0) <= r && Math.abs(y - box.y1) <= r;
+  if (nearNW) return "nw";
+  const nearNE = Math.abs(x - box.x1) <= r && Math.abs(y - box.y1) <= r;
+  if (nearNE) return "ne";
+  const nearSW = Math.abs(x - box.x0) <= r && Math.abs(y - box.y0) <= r;
+  if (nearSW) return "sw";
+  const nearSE = Math.abs(x - box.x1) <= r && Math.abs(y - box.y0) <= r;
+  if (nearSE) return "se";
+
+  const nearN = Math.abs(x - mx) <= r && Math.abs(y - box.y1) <= r;
+  if (nearN) return "n";
+  const nearS = Math.abs(x - mx) <= r && Math.abs(y - box.y0) <= r;
+  if (nearS) return "s";
+  const nearW = Math.abs(x - box.x0) <= r && Math.abs(y - my) <= r;
+  if (nearW) return "w";
+  const nearE = Math.abs(x - box.x1) <= r && Math.abs(y - my) <= r;
+  if (nearE) return "e";
+
+  // Inside the bounding box -> move
+  if (x >= box.x0 && x <= box.x1 && y >= box.y0 && y <= box.y1) {
+    return "move";
+  }
+
+  return null;
 }
 
 /**

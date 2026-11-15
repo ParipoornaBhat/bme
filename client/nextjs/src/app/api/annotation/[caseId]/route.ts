@@ -506,18 +506,83 @@ export async function GET(
   // Sort by savedAt ascending
   annotatorsList.sort((a, b) => a.mtimeMs - b.mtimeMs);
 
+  type SlicesHelperData = Record<
+    string,
+    {
+      marked: number | null;
+      total: number | null;
+      identical_to: string | null;
+      error?: string;
+    }
+  >;
+  let helperData: SlicesHelperData | null = null;
+  try {
+    const py = pythonPath();
+    const script = path.join(root(), "ml", "scripts", "annotation_slices.py");
+    const { stdout } = await exec(py, [script, root(), caseId], {
+      cwd: root(),
+      timeout: 15_000,
+    });
+    const parsed = JSON.parse(stdout.trim());
+    if (parsed && typeof parsed === "object") {
+      helperData = parsed as SlicesHelperData;
+    }
+  } catch {
+    helperData = null;
+  }
+
+  const mainFileName = `${caseId}.seg.nrrd`;
+  const mainFileInfo = helperData?.[mainFileName];
+  const mainIdenticalMatch = mainFileInfo?.identical_to?.match(
+    new RegExp(`^${caseId}__([A-Za-z0-9_-]{1,40})\\.seg\\.nrrd$`),
+  );
+  const mainIdenticalName = mainIdenticalMatch ? mainIdenticalMatch[1] : null;
+
   let matchedMain = false;
   const annotators = annotatorsList.map((item) => {
     let isMain = false;
-    if (mainStat && !matchedMain && mainStat.size === item.size) {
+    if (mainIdenticalName) {
+      if (!matchedMain && item.name === mainIdenticalName) {
+        isMain = true;
+        matchedMain = true;
+      }
+    } else if (mainStat && !matchedMain && mainStat.size === item.size) {
       isMain = true;
       matchedMain = true;
     }
-    return {
+
+    const itemFileName = `${caseId}__${item.name}.seg.nrrd`;
+    const fileInfo = helperData?.[itemFileName];
+
+    let slices: { marked: number; total: number } | null = null;
+    if (fileInfo && typeof fileInfo.marked === "number" && typeof fileInfo.total === "number") {
+      slices = { marked: fileInfo.marked, total: fileInfo.total };
+    }
+
+    const idMatch = fileInfo?.identical_to?.match(
+      new RegExp(`^${caseId}__([A-Za-z0-9_-]{1,40})\\.seg\\.nrrd$`),
+    );
+    const idName = idMatch ? idMatch[1] : null;
+    const identicalTo = isMain ? (mainIdenticalName ?? idName ?? null) : idName;
+
+    const entry: {
+      name: string;
+      savedAt: string;
+      isMain: boolean;
+      slices?: { marked: number; total: number } | null;
+      identicalTo?: string | null;
+    } = {
       name: item.name,
       savedAt: item.savedAt,
       isMain,
     };
+
+    if (helperData !== null) {
+      entry.slices = slices;
+      entry.identicalTo = identicalTo;
+    }
+
+    return entry;
   });
 
   let reviews: {
