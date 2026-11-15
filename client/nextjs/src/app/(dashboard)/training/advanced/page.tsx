@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState, useCallback, useMemo, useRef } from "react";
+import Link from "next/link";
 import { notFound } from "next/navigation";
 import { isReviewMode } from "~/lib/app-mode";
 import type {
@@ -640,6 +641,13 @@ export default function AdvancedTrainingPage() {
         </div>
 
         <div className="flex items-center gap-3">
+          <Link
+            href="/training/advanced/data"
+            className="inline-flex items-center gap-2 rounded-xl border border-border bg-card px-3.5 py-2 text-xs font-semibold text-muted-foreground transition-all hover:bg-accent hover:text-foreground cursor-pointer"
+          >
+            <Database className="h-3.5 w-3.5 text-primary" />
+            Data sync
+          </Link>
           <button
             onClick={() => loadData(false)}
             disabled={refreshing}
