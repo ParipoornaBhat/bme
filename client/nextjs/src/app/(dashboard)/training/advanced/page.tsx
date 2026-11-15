@@ -701,12 +701,19 @@ export default function AdvancedTrainingPage() {
                   <div className="text-right">
                     <span
                       className={`inline-flex items-center gap-1.5 rounded-full px-2 py-0.5 text-[11px] font-semibold ${
-                        card.connected
+                        (card as { checking?: boolean }).checking
+                          ? "bg-muted text-muted-foreground"
+                          : card.connected
                           ? "bg-emerald-500/10 text-emerald-600 dark:text-emerald-400"
                           : "bg-destructive/10 text-destructive"
                       }`}
                     >
-                      {card.connected ? (
+                      {(card as { checking?: boolean }).checking ? (
+                        <>
+                          <Loader2 className="h-3 w-3 animate-spin" />
+                          Checking
+                        </>
+                      ) : card.connected ? (
                         <>
                           <CheckCircle2 className="h-3 w-3" />
                           Connected
@@ -718,6 +725,16 @@ export default function AdvancedTrainingPage() {
                         </>
                       )}
                     </span>
+                    {!card.connected && !(card as { checking?: boolean }).checking && (
+                      <button
+                        type="button"
+                        onClick={() => { void loadData(); }}
+                        disabled={refreshing}
+                        className="mt-1.5 block w-full rounded border border-border px-2 py-0.5 text-[11px] text-muted-foreground hover:text-foreground disabled:opacity-50"
+                      >
+                        {refreshing ? "Checking..." : "Retry"}
+                      </button>
+                    )}
                   </div>
                 </div>
 

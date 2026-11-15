@@ -126,6 +126,7 @@ async function handleAccounts() {
 
   // 1. H200 cards (one per teammate; with password tested, without password marked)
   for (const acc of all) {
+    if (acc.slot && acc.slot > 1) continue;
     const id = `h200-${acc.roll}`;
     if (!usable.h200(acc)) {
       cards.push({
@@ -849,9 +850,11 @@ async function handleStart(platform, targetId, methodId, extraJson = "{}") {
 function handleAccountsQuick() {
   const env = mergedEnv();
   const cards = [];
-  for (const acc of listAccounts(env)) {
+  const all = listAccounts(env);
+  for (const acc of all) {
+    if (acc.slot && acc.slot > 1) continue;
     const usn = acc.usn || `NNM23CS${acc.roll}`;
-    const hasPass = Boolean(acc.h200 && (acc.h200.pass || acc.h200.password));
+    const hasPass = Boolean(acc.h200 && acc.h200.password);
     cards.push({
       id: `h200-${acc.roll}`,
       platform: "h200",
@@ -864,23 +867,33 @@ function handleAccountsQuick() {
       currentJob: null,
       checking: hasPass,
     });
-    for (const [slot, s] of acc.kaggleSlots ?? []) {
-      if (!s.user) continue;
-      cards.push({
-        id: `kaggle-${acc.roll}-${slot}`,
-        platform: "kaggle",
-        label: `Kaggle - ${s.user}`,
-        accountName: s.user,
-        usn,
-        roll: acc.roll,
-        slot,
-        connected: false,
-        connectionDetails: "Checking connection...",
-        currentJob: null,
-        checking: true,
-      });
-    }
   }
+  for (const acc of all) {
+    if (!acc.kaggleUser) continue;
+    cards.push({
+      id: `kaggle-${acc.roll}-${acc.slot || 1}`,
+      platform: "kaggle",
+      label: `Kaggle - ${acc.kaggleUser}`,
+      accountName: acc.kaggleUser,
+      usn: acc.usn || `NNM23CS${acc.roll}`,
+      roll: acc.roll,
+      slot: acc.slot || 1,
+      connected: false,
+      connectionDetails: "Checking connection...",
+      currentJob: null,
+      checking: true,
+    });
+  }
+  cards.push({
+    id: "this-pc",
+    platform: "local",
+    label: "This PC",
+    accountName: "local",
+    connected: true,
+    connectionDetails: "Checking device...",
+    currentJob: null,
+    checking: true,
+  });
   return { cards, quick: true };
 }
 
