@@ -72,6 +72,11 @@ if sys.platform == "win32":
 
 import psutil
 
+if os.getenv("KAGGLE_KEY", "").startswith("KGAT_"):
+    if not os.getenv("KAGGLE_API_TOKEN"):
+        os.environ["KAGGLE_API_TOKEN"] = os.environ["KAGGLE_KEY"]
+    os.environ.pop("KAGGLE_KEY", None)
+
 
 def get_expected_venv_python(src_dir: Path) -> Path:
     """Return the expected path to the virtual environment Python executable."""
@@ -885,6 +890,13 @@ def run_pipeline(
                 f"[ERROR] Remote dataset hash does not match approved hash. Re-run upload."
             )
 
+        meta_env: Dict[str, Any] = {}
+        if os.getenv("BME_RUN_METADATA"):
+            try:
+                meta_env = json.loads(os.getenv("BME_RUN_METADATA", "{}"))
+            except Exception:
+                meta_env = {}
+
         run_id = f"run_{datetime.datetime.now(datetime.timezone.utc).strftime('%Y%m%d_%H%M%S')}"
         run_state = {
             "run_id": run_id,
@@ -900,6 +912,12 @@ def run_pipeline(
             "import_name": import_name,
             "continued": bool(continue_previous),
             "dataset": full_dataset_slug,
+            "startedBy": meta_env.get("startedBy", {"usn": "", "name": ""}),
+            "platform": meta_env.get("platform", "kaggle"),
+            "account": meta_env.get("account", username),
+            "host": meta_env.get("host", socket.gethostname()),
+            "startedAt": meta_env.get("startedAt", datetime.datetime.now(datetime.timezone.utc).isoformat()),
+            "methodId": meta_env.get("methodId", import_name or model_arch),
         }
         state_file.write_text(json.dumps(run_state, indent=2), encoding="utf-8")
 
@@ -1133,9 +1151,38 @@ def run_pipeline(
 
     print(proc.stdout.strip())
 
-    # Copy run_status.json to destination if present
+    # Copy run_status.json to destination if present and carry metadata
+    run_meta = {
+        "startedBy": run_state.get("startedBy"),
+        "platform": run_state.get("platform", "kaggle"),
+        "account": run_state.get("account", username),
+        "host": run_state.get("host", socket.gethostname()),
+        "startedAt": run_state.get("startedAt", datetime.datetime.now(datetime.timezone.utc).isoformat()),
+        "methodId": run_state.get("methodId", import_name or model_arch),
+    }
+    status_dest = dest_dir / "run_status.json"
+    status_data = {}
     if status_file.exists():
-        shutil.copy2(status_file, dest_dir / "run_status.json")
+        try:
+            status_data = json.loads(status_file.read_text(encoding="utf-8"))
+        except Exception:
+            pass
+    elif status_dest.exists():
+        try:
+            status_data = json.loads(status_dest.read_text(encoding="utf-8"))
+        except Exception:
+            pass
+    status_data.update({k: v for k, v in run_meta.items() if v is not None})
+    status_dest.write_text(json.dumps(status_data, indent=2), encoding="utf-8")
+
+    metrics_dest = dest_dir / "metrics.json"
+    if metrics_dest.exists():
+        try:
+            m_data = json.loads(metrics_dest.read_text(encoding="utf-8"))
+            m_data.update({k: v for k, v in run_meta.items() if v is not None})
+            metrics_dest.write_text(json.dumps(m_data, indent=2), encoding="utf-8")
+        except Exception:
+            pass
 
     shutil.rmtree(weights_staging, ignore_errors=True)
 
@@ -1825,6 +1872,7 @@ def run_doctor(
     user_cred = home / ".kaggle" / "kaggle.json"
     env_user = os.getenv("KAGGLE_USERNAME")
     env_key = os.getenv("KAGGLE_KEY")
+    env_token = os.getenv("KAGGLE_API_TOKEN")
 
     in_repo_creds = False
     for root, dirs, files in os.walk(src_dir):
@@ -1838,7 +1886,7 @@ def run_doctor(
         print("[FAIL] Kaggle credentials detected INSIDE the repository.")
         print("  Fix: Move kaggle.json to ~/.kaggle/kaggle.json and delete it from the workspace.")
         has_fail = True
-    elif user_cred.exists() or (env_user and env_key):
+    elif user_cred.exists() or (env_user and (env_key or env_token)) or env_token:
         print("[PASS] Kaggle credentials present outside repository.")
     else:
         print("[FAIL] Kaggle credentials not found in ~/.kaggle/kaggle.json or environment.")

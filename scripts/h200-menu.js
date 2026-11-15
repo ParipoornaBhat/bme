@@ -5,6 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { ask, chooseH200 } from "./h200-login.js";
+import { findAccount, listAccounts } from "./lib/accounts.js";
 
 /**
  * pnpm h200                     menu
@@ -231,6 +232,55 @@ async function submit(sbatch, what, logPrefix, extra = "", flags = "") {
     console.log(`A ${what} job is already queued or running:\n  ${busy.out.trim()}`);
     if ((await ask("Start another anyway? [y/N] ")).toLowerCase() !== "y") return;
   }
+
+  let outFolder = "";
+  let methodId = "";
+  if (logPrefix.startsWith("aug_")) {
+    const lvl = logPrefix.slice(4);
+    outFolder = `results3d-aug-${lvl}`;
+    methodId = `unet-aug-${lvl}`;
+  } else if (logPrefix === "holdout") {
+    outFolder = "results3d-holdout";
+    methodId = "unet-holdout";
+  } else if (logPrefix === "nnunet") {
+    outFolder = extra.includes("2d") ? "results-nnunet-2d" : "results-nnunet-3d_fullres";
+    methodId = extra.includes("2d") ? "nnunet-2d" : "nnunet-3d";
+  } else if (logPrefix === "unet3d") {
+    outFolder = "results3d-h200-v2";
+    methodId = "train3d";
+  } else if (logPrefix === "unet3dplain") {
+    outFolder = "results3d-h200-plain";
+    methodId = "train3dplain";
+  } else if (logPrefix === "unet2d") {
+    outFolder = "results2dseg3d";
+    methodId = "train2d";
+  }
+
+  const allAccounts = listAccounts();
+  const account = findAccount(allAccounts, asRoll || session.roll) || null;
+  const meta = {
+    startedBy: {
+      usn: account?.usn || `NNM23CS${session.roll}`,
+      name: account?.name || "",
+    },
+    platform: "h200",
+    account: session.user,
+    host: os.hostname(),
+    startedAt: new Date().toISOString(),
+    methodId: methodId || what,
+  };
+
+  if (outFolder) {
+    try {
+      const localDir = path.join(root, "data", outFolder);
+      fs.mkdirSync(localDir, { recursive: true });
+      fs.writeFileSync(path.join(localDir, "run_status.json"), JSON.stringify(meta, null, 2), "utf8");
+      await ssh(`mkdir -p ${REMOTE}/data/${outFolder} && cat << 'EOF' > ${REMOTE}/data/${outFolder}/run_status.json\n${JSON.stringify(meta, null, 2)}\nEOF`);
+    } catch {
+      /* ignore */
+    }
+  }
+
   const r = await ssh(`cd ${REMOTE} && sbatch ${flags} ml/slurm/${sbatch} ${extra}`);
   process.stdout.write(r.out || "");
   if (r.code !== 0) fail("sbatch refused the job.", r.code);
@@ -485,7 +535,7 @@ async function checkEnv() {
 
 async function download(remoteRel, localRel, label) {
   const check = await ssh(
-    `cd ${REMOTE} && [ -f ${remoteRel}/metrics.json ] && find ${remoteRel} -maxdepth 1 -type f \\( -name 'fold_*.pt' -o -name metrics.json \\) -printf '%s %f\\n'`,
+    `cd ${REMOTE} && [ -f ${remoteRel}/metrics.json ] && find ${remoteRel} -maxdepth 1 -type f \\( -name 'fold_*.pt' -o -name metrics.json -o -name run_status.json \\) -printf '%s %f\\n'`,
   );
   if (check.code !== 0 || !check.out.includes("metrics.json")) {
     console.log(`${label} is not finished on the server yet (no ${remoteRel}/metrics.json).`);

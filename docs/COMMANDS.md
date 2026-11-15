@@ -24,6 +24,14 @@ KAGGLE_DATASET_OWNER=124        # the account that holds the shared private data
 
 `--as` takes a USN or a name: `pnpm train 3 --as paripoorna`.
 
+### Several Kaggle accounts per person
+Add extra accounts for the same person as numbered blocks: `<USN>_2_KAGGLE_USER` and `<USN>_2_KAGGLE_KEY` (or `_TOKEN`), then `_3_`, `_4_`, with no upper limit. The unnumbered block is slot 1 (default). Numbered blocks share the same teammate name and H200 login.
+`--as` accepts a USN (`NNM23CS124`), a name (`paripoorna`), a Kaggle username, or `USN:slot` (`NNM23CS124:2`).
+`pnpm accounts` lists every Kaggle slot, and `pnpm accounts --test` tests each slot.
+
+### New-style Kaggle tokens (KGAT_)
+Kaggle's new UI issues tokens starting with `KGAT_`. If the key starts with `KGAT_` (or is placed in `_KAGGLE_TOKEN`), it is passed as `KAGGLE_API_TOKEN` instead of `KAGGLE_KEY` (with `KAGGLE_USERNAME` kept). Classic keys keep working as before.
+
 ### Kaggle: a fresh account, step by step
 1. Sign in at kaggle.com and verify your phone number (Settings). GPU and internet need it.
 2. Profile picture > Settings > **API** > **Create New Token** (the label may differ).

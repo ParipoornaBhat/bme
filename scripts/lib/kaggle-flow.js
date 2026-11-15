@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import {
-  datasetOwner, explainKaggleMissing, fmt, howToAdd, kaggle, kaggleJson, kaggleLocalState,
+  createRunMetadata, datasetOwner, explainKaggleMissing, fmt, howToAdd, kaggle, kaggleJson, kaggleLocalState,
   kaggleReady, kaggleUserOf, pickAccount, requirePython, root, stagingFor, yes,
 } from "./accounts.js";
 import { pastKaggleRuns } from "./estimates.js";
@@ -73,7 +73,7 @@ export async function trainOnKaggle(method, want = "") {
   }
 
   const account = await pickAccount("kaggle", want, {
-    note: (a) => `${runNote(a)}${a.roll === owner.roll ? ", holds the dataset" : ""}`,
+    note: (a) => `${runNote(a)}${a.roll === owner.roll && (a.slot || 1) === (owner.slot || 1) ? ", holds the dataset" : ""}`,
   });
   const { run } = kaggleLocalState(account);
   let resume = false;
@@ -107,7 +107,7 @@ export async function trainOnKaggle(method, want = "") {
   }
 
   await ensureKaggleData(owner);
-  const shared = account.roll !== owner.roll;
+  const shared = account.roll !== owner.roll || (account.slot || 1) !== (owner.slot || 1);
   const ownerUser = shared ? kaggleUserOf(owner) : "";
   if (shared) {
     if (!ownerUser) stop(`Cannot tell ${owner.label}'s Kaggle user name.`, `Add NNM23CS${owner.roll}_KAGGLE_USER=<username> to .env.`);
@@ -128,6 +128,14 @@ export async function trainOnKaggle(method, want = "") {
   section("Start");
   info(`${resume ? "Continue" : "Start"} ${method.id} as ${account.label}: ${method.arch}, augmentation med, 5 folds.`);
   if (!(await yes("Go ahead?"))) return;
+
+  const meta = createRunMetadata({ account, platform: "kaggle", methodId: method.id });
+  const stagingDir = stagingFor(account);
+  fs.mkdirSync(stagingDir, { recursive: true });
+  const statePath = path.join(stagingDir, "run_state.json");
+  const existingState = kaggleLocalState(account).run || {};
+  fs.writeFileSync(statePath, JSON.stringify({ ...existingState, ...meta }, null, 2), "utf8");
+
   const args = [
     "run", "--confirm-launch", "--no-wait", "--mode", "full",
     "--model-arch", method.arch, "--kernel-slug", `bme-${method.id}`, "--import-name", method.id,
@@ -135,7 +143,14 @@ export async function trainOnKaggle(method, want = "") {
   ];
   if (resume) args.push("--continue-previous");
   if (shared) args.push("--dataset-owner", ownerUser, "--approval-dir", stagingFor(owner));
-  const r = kaggle(account, args);
+  const r = kaggle(account, args, { extraEnv: { BME_RUN_METADATA: JSON.stringify(meta) } });
+  if (r.code !== 0) stop("Kaggle did not start the run. The reason is printed above.", "Fix it and choose the method again.");
+  ok(`${method.id} is running on Kaggle as ${account.label}. This PC can sleep; nothing here waits for it.`);
+  next(
+    "pnpm runs:status   where every run is",
+    "pnpm runs:log      its log (Kaggle releases it when the run ends)",
+    "pnpm runs:get      download the scores and weights when it has finished",
+  );
   if (r.code !== 0) stop("Kaggle did not start the run. The reason is printed above.", "Fix it and choose the method again.");
   ok(`${method.id} is running on Kaggle as ${account.label}. This PC can sleep; nothing here waits for it.`);
   next(

@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
-import { python, requirePython, root, runNode, yes } from "./lib/accounts.js";
+import { createRunMetadata, findAccount, listAccounts, python, requirePython, root, runNode, yes } from "./lib/accounts.js";
 import { describeDevice, detectDevice, deviceEnv } from "./lib/device.js";
 import { METHODS, PLATFORM } from "./lib/methods.js";
 import { c, choose, info, next, ok, section, stop, title, warn } from "./lib/ui.js";
@@ -67,6 +67,14 @@ async function method(m) {
   info("Laptop setup (width 16, patch 128x128x16, batch 2): not comparable with the H200 runs.");
   info("Ctrl+C stops it safely; choosing it again continues from the last saved epoch.");
   if (!(await yes("Start?"))) return;
+
+  const allAccounts = listAccounts();
+  const account = asWho ? findAccount(allAccounts, asWho) : allAccounts[0] || null;
+  const meta = createRunMetadata({ account, platform: "local", methodId: m.id });
+  const outDir = path.join(root, "data", out);
+  fs.mkdirSync(outDir, { recursive: true });
+  fs.writeFileSync(path.join(outDir, "run_status.json"), JSON.stringify(meta, null, 2), "utf8");
+
   const args = [
     path.join(root, "ml", "scripts", "train_3d.py"), root,
     "--model", "unet", "--model-arch", m.local.arch, "--device", d.kind,
@@ -79,9 +87,17 @@ async function method(m) {
   if (d.kind === "cuda") args.push("--amp");
   if (m.local.holdout) args.push("--holdout", HOLDOUT);
   if (st === "started") args.push("--resume");
-  const r = spawnSync(python, args, { cwd: root, stdio: "inherit", env: { ...process.env, ...deviceEnv(d) } });
+  const r = spawnSync(python, args, { cwd: root, stdio: "inherit", env: { ...process.env, ...deviceEnv(d), BME_RUN_METADATA: JSON.stringify(meta) } });
   if (r.status !== 0) {
     stop("Training stopped before the end.", "Choose the same method again to continue from the last saved epoch.");
+  }
+  const metricsFile = path.join(outDir, "metrics.json");
+  if (fs.existsSync(metricsFile)) {
+    try {
+      const mData = JSON.parse(fs.readFileSync(metricsFile, "utf8"));
+      Object.assign(mData, meta);
+      fs.writeFileSync(metricsFile, JSON.stringify(mData, null, 2), "utf8");
+    } catch { /* ignore */ }
   }
   ok(`Finished: data/${out}/metrics.json`);
 }
@@ -92,7 +108,11 @@ async function quick(task) {
   process.exit(runNode("train-model.js", [task], { BME_DEVICE: d.kind }));
 }
 
-const want = process.argv[2];
+const argv = process.argv.slice(2).filter((a) => a !== "--");
+const asIdx = argv.indexOf("--as");
+const asWho = asIdx >= 0 ? argv[asIdx + 1] || "" : "";
+if (asIdx >= 0) argv.splice(asIdx, 2);
+const want = argv[0];
 requirePython();
 if (want) {
   const m = METHODS.find((x) => x.id === want || String(x.n) === want);

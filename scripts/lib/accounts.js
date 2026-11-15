@@ -1,6 +1,7 @@
 import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import net from "node:net";
+import os from "node:os";
 import path from "node:path";
 import readline from "node:readline/promises";
 import { stdin as input, stdout as output } from "node:process";
@@ -38,37 +39,141 @@ export function mergedEnv() {
 }
 
 export function listAccounts(env = mergedEnv()) {
-  const byRoll = new Map();
-  const slot = (roll) => {
-    if (!byRoll.has(roll)) byRoll.set(roll, { roll, name: "", h200: null, kaggle: null });
-    return byRoll.get(roll);
+  const people = new Map();
+  const getPerson = (roll) => {
+    if (!people.has(roll)) {
+      people.set(roll, { roll, name: "", h200: null, kaggleSlots: new Map() });
+    }
+    return people.get(roll);
   };
+
   for (const [key, value] of Object.entries(env)) {
     if (!value) continue;
-    let m = key.match(/^NNM23CS(\d{3})_(NAME|H200|KAGGLE_USER|KAGGLE_KEY|KAGGLE_TOKEN)$/i) ||
+
+    // Numbered Kaggle slot: NNM23CS124_2_KAGGLE_USER, etc.
+    let m = key.match(/^NNM23CS(\d{3})_(\d+)_(KAGGLE_USER|KAGGLE_KEY|KAGGLE_TOKEN)$/i);
+    if (m) {
+      const roll = m[1];
+      const slotNum = Number(m[2]);
+      const field = m[3].toUpperCase();
+      const p = getPerson(roll);
+      if (!p.kaggleSlots.has(slotNum)) p.kaggleSlots.set(slotNum, {});
+      const slotData = p.kaggleSlots.get(slotNum);
+      if (field === "KAGGLE_USER") slotData.user = value;
+      else if (field === "KAGGLE_KEY") {
+        if (value.startsWith("KGAT_")) slotData.token = value;
+        else slotData.key = value;
+      } else if (field === "KAGGLE_TOKEN") {
+        slotData.token = value;
+      }
+      continue;
+    }
+
+    // Default slot 1 or person metadata: NNM23CS124_NAME, NNM23CS124_H200, NNM23CS124_KAGGLE_USER, etc.
+    m = key.match(/^NNM23CS(\d{3})_(NAME|H200|KAGGLE_USER|KAGGLE_KEY|KAGGLE_TOKEN)$/i) ||
       key.match(/^H200_PASS_(\d{3})$/i);
-    if (!m) continue;
-    const a = slot(m[1]);
-    const field = (m[2] || "H200").toUpperCase();
-    if (field === "NAME") a.name = value.toLowerCase();
-    else if (field === "H200") a.h200 = { user: `nnm23cs${m[1]}_stu_cse`, password: value };
-    else {
-      a.kaggle = a.kaggle || {};
-      if (field === "KAGGLE_USER") a.kaggle.user = value;
-      if (field === "KAGGLE_KEY") a.kaggle.key = value;
-      if (field === "KAGGLE_TOKEN") a.kaggle.token = value;
+    if (m) {
+      const roll = m[1];
+      const field = (m[2] || "H200").toUpperCase();
+      const p = getPerson(roll);
+      if (field === "NAME") {
+        p.name = value.toLowerCase();
+      } else if (field === "H200") {
+        p.h200 = { user: `nnm23cs${roll}_stu_cse`, password: value };
+      } else {
+        if (!p.kaggleSlots.has(1)) p.kaggleSlots.set(1, {});
+        const slotData = p.kaggleSlots.get(1);
+        if (field === "KAGGLE_USER") slotData.user = value;
+        else if (field === "KAGGLE_KEY") {
+          if (value.startsWith("KGAT_")) slotData.token = value;
+          else slotData.key = value;
+        } else if (field === "KAGGLE_TOKEN") {
+          slotData.token = value;
+        }
+      }
     }
   }
-  for (const a of byRoll.values()) {
-    if (a.kaggle && !(a.kaggle.token || (a.kaggle.user && a.kaggle.key))) a.kaggle.incomplete = true;
-    a.label = a.name ? `${a.name} (${a.roll})` : a.roll;
+
+  const result = [];
+  for (const p of people.values()) {
+    const usn = `NNM23CS${p.roll}`;
+    const slots = [...p.kaggleSlots.entries()].sort((a, b) => a[0] - b[0]);
+    if (slots.length > 0) {
+      for (const [slotNum, slotData] of slots) {
+        if (!(slotData.token || (slotData.user && slotData.key))) {
+          slotData.incomplete = true;
+        }
+        const kaggleUser = slotData.user || "";
+        const label = slotNum === 1
+          ? (p.name ? `${p.name} (${p.roll})` : p.roll)
+          : (p.name ? `${p.name} (kaggle ${slotNum}: ${kaggleUser || p.roll})` : `${p.roll} (kaggle ${slotNum}: ${kaggleUser || p.roll})`);
+
+        result.push({
+          usn,
+          roll: p.roll,
+          name: p.name,
+          slot: slotNum,
+          kaggleUser,
+          h200: slotNum === 1 ? p.h200 : null,
+          kaggle: slotData,
+          label,
+        });
+      }
+      if (p.h200 && !p.kaggleSlots.has(1)) {
+        // If slot 1 wasn't defined for Kaggle, the first slot still has h200
+        const first = result.find((r) => r.roll === p.roll);
+        if (first && !first.h200) first.h200 = p.h200;
+      }
+    } else {
+      const label = p.name ? `${p.name} (${p.roll})` : p.roll;
+      result.push({
+        usn,
+        roll: p.roll,
+        name: p.name,
+        slot: 1,
+        kaggleUser: "",
+        h200: p.h200,
+        kaggle: null,
+        label,
+      });
+    }
   }
-  return [...byRoll.values()].sort((x, y) => x.roll.localeCompare(y.roll));
+
+  return result.sort((x, y) => x.roll.localeCompare(y.roll) || x.slot - y.slot);
 }
 
 export function findAccount(accounts, want) {
-  const w = String(want || "").toLowerCase();
-  return accounts.find((a) => a.roll === w || a.name === w || a.h200?.user === w || `nnm23cs${a.roll}` === w);
+  const w = String(want || "").trim().toLowerCase();
+  if (!w) return undefined;
+  if (w.includes(":")) {
+    const [target, slotStr] = w.split(":");
+    const targetSlot = Number(slotStr);
+    return accounts.find(
+      (a) =>
+        a.slot === targetSlot &&
+        (a.usn?.toLowerCase() === target ||
+          a.roll?.toLowerCase() === target ||
+          a.name?.toLowerCase() === target ||
+          a.kaggleUser?.toLowerCase() === target ||
+          a.h200?.user?.toLowerCase() === target ||
+          `nnm23cs${a.roll}`.toLowerCase() === target)
+    );
+  }
+  const byKaggle = accounts.find((a) => a.kaggleUser?.toLowerCase() === w);
+  if (byKaggle) return byKaggle;
+
+  const matches = accounts.filter(
+    (a) =>
+      a.usn?.toLowerCase() === w ||
+      a.roll?.toLowerCase() === w ||
+      a.name?.toLowerCase() === w ||
+      a.h200?.user?.toLowerCase() === w ||
+      `nnm23cs${a.roll}`.toLowerCase() === w
+  );
+  if (matches.length) {
+    return matches.find((a) => a.slot === 1) || matches[0];
+  }
+  return undefined;
 }
 
 export const usable = {
@@ -190,25 +295,57 @@ export function explainKaggleMissing() {
 }
 
 export function stagingFor(account) {
-  return path.resolve(root, "..", "bme_kaggle_staging", "accounts", account.roll);
+  const sub = account.slot && account.slot > 1 ? `${account.roll}_${account.slot}` : account.roll;
+  return path.resolve(root, "..", "bme_kaggle_staging", "accounts", sub);
 }
 
-export function kaggleEnv(account) {
-  const env = { ...process.env, PYTHONUNBUFFERED: "1", KAGGLE_STAGING_DIR: stagingFor(account) };
+export function kaggleEnv(account, extra = {}) {
+  const env = { ...process.env, PYTHONUNBUFFERED: "1", KAGGLE_STAGING_DIR: stagingFor(account), ...extra };
   delete env.KAGGLE_CONFIG_DIR;
-  if (account.kaggle.token) env.KAGGLE_API_TOKEN = account.kaggle.token;
-  if (account.kaggle.user) env.KAGGLE_USERNAME = account.kaggle.user;
-  if (account.kaggle.key) env.KAGGLE_KEY = account.kaggle.key;
+  const isToken = Boolean(account.kaggle?.token || account.kaggle?.key?.startsWith("KGAT_"));
+  const token = account.kaggle?.token || (account.kaggle?.key?.startsWith("KGAT_") ? account.kaggle.key : null);
+  if (isToken) {
+    env.KAGGLE_API_TOKEN = token;
+    delete env.KAGGLE_KEY;
+  } else if (account.kaggle?.key) {
+    env.KAGGLE_KEY = account.kaggle.key;
+    delete env.KAGGLE_API_TOKEN;
+  }
+  if (account.kaggle?.user) env.KAGGLE_USERNAME = account.kaggle.user;
   return env;
+}
+
+export function createRunMetadata({ account, platform, methodId }) {
+  const hostname = os.hostname();
+  const startedAt = new Date().toISOString();
+  let accName = "";
+  if (platform === "kaggle") {
+    accName = `${account?.kaggleUser || account?.kaggle?.user || ""}${account?.slot && account.slot > 1 ? ` (slot ${account.slot})` : ""}`;
+  } else if (platform === "h200") {
+    accName = account?.h200?.user || account?.user || "";
+  } else {
+    accName = os.userInfo().username;
+  }
+  return {
+    startedBy: {
+      usn: account?.usn || (account?.roll ? `NNM23CS${account.roll}` : ""),
+      name: account?.name || os.userInfo().username,
+    },
+    platform,
+    account: accName,
+    host: hostname,
+    startedAt,
+    methodId: methodId || "",
+  };
 }
 
 const PIPELINE = path.join(root, "ml", "scripts", "kaggle_pipeline.py");
 
 /** Run one kaggle_pipeline.py subcommand as this account. capture: return stdout instead of showing it. */
-export function kaggle(account, args, { capture = false } = {}) {
+export function kaggle(account, args, { capture = false, extraEnv = {} } = {}) {
   const r = spawnSync(python, [PIPELINE, "--src", root, ...args], {
     cwd: root,
-    env: kaggleEnv(account),
+    env: kaggleEnv(account, extraEnv),
     encoding: "utf8",
     stdio: capture ? ["ignore", "pipe", "pipe"] : "inherit",
   });

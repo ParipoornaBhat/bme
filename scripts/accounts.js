@@ -1,6 +1,6 @@
 import { spawnSync } from "node:child_process";
 import {
-  datasetOwner, explainKaggleMissing, h200Route, howToAdd, kaggleReady, kaggleUserOf,
+  datasetOwner, explainKaggleMissing, h200Route, howToAdd, kaggleEnv, kaggleReady, kaggleUserOf,
   listAccounts, loadDotEnv, python, requirePython, root, tcpReachable, usable,
 } from "./lib/accounts.js";
 import { c, info, next, ok, section, table, title, warn, bad } from "./lib/ui.js";
@@ -22,10 +22,9 @@ function h200Test(a, route) {
 
 function kaggleTest(a) {
   if (!kaggleReady()) return "tools not installed";
-  const env = { ...process.env, KAGGLE_USERNAME: a.kaggle.user || "", KAGGLE_KEY: a.kaggle.key || "" };
-  if (a.kaggle.token) env.KAGGLE_API_TOKEN = a.kaggle.token;
+  const env = kaggleEnv(a);
   const r = spawnSync(python, [`${root}/ml/scripts/kaggle_pipeline.py`, "--src", root, "whoami"], { encoding: "utf8", env });
-  if (r.status !== 0) return "login failed (check the username and key)";
+  if (r.status !== 0) return "login failed (check the username and key or token)";
   return `login ok as ${(r.stdout || "").trim().split(/\r?\n/).pop()}`;
 }
 
@@ -55,7 +54,7 @@ async function main() {
     section("Test");
     for (const a of accounts) {
       if (usable.h200(a)) ok(`${a.label} H200: ${h200Test(a, route)}`);
-      if (a.kaggle?.incomplete) bad(`${a.label} Kaggle: user or key missing in .env`);
+      if (a.kaggle?.incomplete) bad(`${a.label} Kaggle: user or key/token missing in .env`);
       else if (usable.kaggle(a)) ok(`${a.label} Kaggle: ${kaggleTest(a)}`);
     }
   } else {

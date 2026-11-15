@@ -36,8 +36,14 @@ function kaggleRows() {
     const { run } = kaggleLocalState(a);
     let phase = run ? String(run.phase).toLowerCase() : "-";
     if (run && ["QUEUED", "RUNNING"].includes(run.phase) && kaggleReady()) phase = `${phase} (live: ${kaggleLive(a, run)})`;
-    const dataset = owner && a.roll === owner.roll ? `holds it: ${current || "?"}` : owner ? `shared from ${owner.label}` : "?";
-    return [a.label, run?.import_name || run?.model_arch || "-", phase, dataset];
+    const isOwner = owner && a.roll === owner.roll && (a.slot || 1) === (owner.slot || 1);
+    const dataset = isOwner ? `holds it: ${current || "?"}` : owner ? `shared from ${owner.label}` : "?";
+    const startedBy = run?.startedBy
+      ? (run.startedBy.name ? `${run.startedBy.name} (${run.startedBy.usn || ""})`.trim() : (run.startedBy.usn || a.label))
+      : a.label;
+    const where = run?.platform || "kaggle";
+    const account = run?.account || a.kaggleUser || a.label;
+    return [a.label, run?.import_name || run?.model_arch || "-", phase, dataset, startedBy, where, account];
   });
 }
 
@@ -45,7 +51,20 @@ function localRows() {
   const data = path.join(root, "data");
   if (!fs.existsSync(data)) return [];
   const dirs = fs.readdirSync(data).filter((d) => /^results3d-.*-pc$/.test(d));
-  return dirs.map((d) => [d, fs.existsSync(path.join(data, d, "metrics.json")) ? "finished" : "started, not finished"]);
+  return dirs.map((d) => {
+    const isFin = fs.existsSync(path.join(data, d, "metrics.json"));
+    const statusFile = path.join(data, d, "run_status.json");
+    let meta = null;
+    if (fs.existsSync(statusFile)) {
+      try { meta = JSON.parse(fs.readFileSync(statusFile, "utf8")); } catch { /* ignore */ }
+    }
+    const startedBy = meta?.startedBy
+      ? (meta.startedBy.name ? `${meta.startedBy.name} (${meta.startedBy.usn || ""})`.trim() : (meta.startedBy.usn || "-"))
+      : "-";
+    const where = meta?.platform || "local";
+    const account = meta?.account || "-";
+    return [d, isFin ? "finished" : "started, not finished", startedBy, where, account];
+  });
 }
 
 async function status() {
@@ -55,11 +74,11 @@ async function status() {
   if (!rows) info("No Kaggle account in .env (see pnpm accounts).");
   else {
     if (!kaggleReady()) warn("Kaggle tools not installed here, so live states are not checked (pnpm accounts says how).");
-    table(rows, ["account", "method", "state", "dataset"]);
+    table(rows, ["slot", "method", "state", "dataset", "Started by", "Where", "Account"]);
   }
   section("This PC");
   const loc = localRows();
-  if (loc.length) table(loc, ["folder", "state"]);
+  if (loc.length) table(loc, ["folder", "state", "Started by", "Where", "Account"]);
   else info("No comparison run on this PC yet.");
   section("College H200");
   const h = listAccounts().filter(usable.h200);
@@ -133,7 +152,7 @@ async function get() {
   if (!(await yes("Download now?"))) return;
   const args = ["run", "--resume"];
   const { owner } = datasetOwner();
-  if (owner && owner.roll !== a.roll) args.push("--approval-dir", stagingFor(owner));
+  if (owner && (owner.roll !== a.roll || (owner.slot || 1) !== (a.slot || 1))) args.push("--approval-dir", stagingFor(owner));
   const r = kaggle(a, args);
   if (r.code !== 0) stop("The download did not finish.", "Run pnpm runs:get again; it picks up where it stopped.");
   next("pnpm runs:compare");
@@ -170,9 +189,19 @@ async function compare() {
     if (!fs.existsSync(f)) continue;
     let m;
     try { m = JSON.parse(fs.readFileSync(f, "utf8")); } catch { continue; }
+    const statusFile = path.join(data, d, "run_status.json");
+    let meta = null;
+    if (fs.existsSync(statusFile)) {
+      try { meta = JSON.parse(fs.readFileSync(statusFile, "utf8")); } catch { /* ignore */ }
+    }
+    const startedBy = meta?.startedBy
+      ? (meta.startedBy.name ? `${meta.startedBy.name} (${meta.startedBy.usn || ""})`.trim() : (meta.startedBy.usn || "-"))
+      : (m.startedBy ? (m.startedBy.name ? `${m.startedBy.name} (${m.startedBy.usn || ""})`.trim() : (m.startedBy.usn || "-")) : "-");
+    const where = meta?.platform || m.platform || (d.includes("-pc") ? "local" : (d.includes("h200") ? "h200" : (d.startsWith("results3d_experiments/k-") ? "kaggle" : "-")));
+    const account = meta?.account || m.account || "-";
     const s = m.summary || {};
     rows.push([
-      d, m.model_arch || m.model || "?", m.fold_mode === "fixed_holdout_80_20" ? "80/20" : `${m.folds}`,
+      d, startedBy, where, account, m.model_arch || m.model || "?", m.fold_mode === "fixed_holdout_80_20" ? "80/20" : `${m.folds}`,
       m.n_cases ?? "?", fmtMs(s, "bone_dice"), fmtMs(s, "bme_dice_pos"), fmtMs(s, "lesion_sensitivity_pos"),
       fmtMs(s, "clean_scan_specificity"), fmtMs(s, "fp_per_case"),
     ]);
@@ -181,7 +210,7 @@ async function compare() {
     info("No finished run on this PC yet. Download one with: pnpm runs:get");
     return;
   }
-  table(rows, ["folder", "model", "folds", "scans", "bone Dice", "edema Dice*", "lesion sens*", "clean spec", "FP/case"]);
+  table(rows, ["folder", "Started by", "Where", "Account", "model", "folds", "scans", "bone Dice", "edema Dice*", "lesion sens*", "clean spec", "FP/case"]);
   info("");
   info("* on scans that have edema. Edema Dice over all scans looks better because clean scans score 1.0.");
   info("Compare runs of one platform with each other: the H200, Kaggle and laptop setups differ.");

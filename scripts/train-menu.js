@@ -34,7 +34,7 @@ async function where(m, as) {
     local = {
       label: `${PLATFORM.local.name}: ${describeDevice(d)}`,
       about: d.kind === "cpu" ? "no usable GPU here, so it would be very slow; it asks first" : `${PLATFORM.local.limit}; smaller laptop setup`,
-      run: () => process.exit(runNode("train-local.js", [m.id])),
+      run: () => process.exit(runNode("train-local.js", [m.id, ...(as ? ["--as", as] : [])])),
     };
   }
   const pick = await choose(`Where should "${m.n}. ${m.label}" train?`, [home, local], { prompt: "Where" });
@@ -68,7 +68,7 @@ if (argv[0]) {
       run: () => where(m, as),
     })),
     { group: "Other", label: "More H200 runs", about: "augmentation low, the no-augmentation control, the 2D U-Net", run: () => more(as) },
-    { label: "Train on this PC", about: "the app's quick 2D/3D models, or a method in a laptop setup", run: () => process.exit(runNode("train-local.js")) },
+    { label: "Train on this PC", about: "the app's quick 2D/3D models, or a method in a laptop setup", run: () => process.exit(runNode("train-local.js", as ? ["--as", as] : [])) },
     { label: "The fixed 80/20 split", about: "show which scans train and which validate (method 5); make it once", run: () => process.exit(runNode("split.js")) },
   ];
   const pick = await choose("", items, { prompt: "Which method" });
