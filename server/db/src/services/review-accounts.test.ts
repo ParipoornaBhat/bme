@@ -71,6 +71,13 @@ test("parse with and without role", () => {
   ]);
 });
 
+test("parse mentor role", () => {
+  const parsed = parseReviewAccounts("DrMentor:pass7:mentor");
+  assert.deepEqual(parsed, [
+    { username: "drmentor", displayName: "DrMentor", password: "pass7", role: "mentor" },
+  ]);
+});
+
 test("bad entries refused", () => {
   // Empty or non-string inputs
   assert.deepEqual(parseReviewAccounts(""), []);

@@ -11,6 +11,7 @@ export interface AnnotatorItem {
   isMain?: boolean;
   slices?: { marked: number; total: number } | null;
   identicalTo?: string | null;
+  mentor?: boolean;
 }
 
 export interface ReviewEditInfo {
@@ -43,7 +44,7 @@ interface AnnotatorPickerProps {
   selected: string;
   onChange: (value: string) => void;
   isReview: boolean;
-  userRole?: "radiologist" | "reviewer" | "team";
+  userRole?: "radiologist" | "reviewer" | "team" | "mentor";
   disabled?: boolean;
   caseId?: string;
   annotatedBy?: string | null;
@@ -334,7 +335,8 @@ export function AnnotatorPicker({
     Boolean(selected) &&
     !selected.startsWith("deleted:") &&
     selected !== "_mine" &&
-    selected !== "_review";
+    selected !== "_review" &&
+    selected.toLowerCase() !== "mentor";
 
   // First annotator and also list
   const firstAnnotator = annotatedByAllList.length > 0
@@ -345,7 +347,7 @@ export function AnnotatorPicker({
     ? annotatedByAllList.slice(1)
     : annotators
         .map((a) => a.name)
-        .filter((n) => n && n !== firstAnnotator && n !== "_main");
+        .filter((n) => n && n !== firstAnnotator && n !== "_main" && n.toLowerCase() !== "mentor");
 
   // All reviewers list to display (merging myReview if not yet in reviewsList)
   const displayReviews = useMemo(() => {
@@ -410,7 +412,9 @@ export function AnnotatorPicker({
                   : undefined
               }
             >
-              {mainAnnotator.identicalTo
+              {mainAnnotator.mentor || mainAnnotator.name.toLowerCase() === "mentor"
+                ? "Mentor (online only)"
+                : mainAnnotator.identicalTo
                 ? `${mainAnnotator.identicalTo} (main)`
                 : `${mainAnnotator.name} (first)`}
               {mainAnnotator.slices ? ` ${mainAnnotator.slices.marked}/${mainAnnotator.slices.total}` : ""}
@@ -424,6 +428,7 @@ export function AnnotatorPicker({
           {/* Other annotators */}
           {otherAnnotators.map((a) => {
             const isAmber = a.slices != null && a.slices.marked < a.slices.total;
+            const isMentor = Boolean(a.mentor || a.name.toLowerCase() === "mentor");
             return (
               <option
                 key={a.name}
@@ -432,7 +437,7 @@ export function AnnotatorPicker({
                 className={isAmber ? "text-amber-500" : undefined}
                 style={isAmber ? { color: "#f59e0b" } : undefined}
               >
-                {a.name}
+                {isMentor ? "Mentor (online only)" : a.name}
                 {a.slices ? ` ${a.slices.marked}/${a.slices.total}` : ""}
               </option>
             );
@@ -441,7 +446,7 @@ export function AnnotatorPicker({
           {/* Review mode mine edit */}
           {isReview && review && (
             <option value="_mine">
-              {userRole === "team" ? "Mine (online)" : "My review"}
+              {userRole === "team" ? "Mine (online)" : userRole === "mentor" ? "Mentor (online only)" : "My review"}
             </option>
           )}
 

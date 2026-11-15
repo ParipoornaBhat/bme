@@ -5,7 +5,7 @@ import path from "node:path";
 import zlib from "node:zlib";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { eq, and, isNull, isNotNull, inArray, asc } from "drizzle-orm";
+import { eq, and, isNull, isNotNull, inArray, asc, desc } from "drizzle-orm";
 import { db, caseAnnotation, reviewEdit, reviewEditVersion, caseOwner, ownerForCase, caseReview } from "@bme/db";
 import { isReviewMode } from "~/lib/app-mode";
 import { getReviewUser, safeAnnotator } from "~/lib/review-auth";
@@ -58,7 +58,12 @@ async function reviewGetHandler(
 
   const mainSha = mainRow?.sha256;
   let matchedMain = false;
-  const annotators = personRows.map((item) => {
+  const annotators: {
+    name: string;
+    savedAt: string;
+    isMain: boolean;
+    mentor?: boolean;
+  }[] = personRows.map((item) => {
     let isMain = false;
     if (mainSha && !matchedMain && item.sha256 === mainSha) {
       isMain = true;
@@ -70,6 +75,35 @@ async function reviewGetHandler(
       isMain,
     };
   });
+
+  try {
+    const [mentorEdit] = await db
+      .select({
+        id: reviewEdit.id,
+        updatedAt: reviewEdit.updatedAt,
+        createdAt: reviewEdit.createdAt,
+      })
+      .from(reviewEdit)
+      .where(
+        and(
+          eq(reviewEdit.caseId, caseId),
+          eq(reviewEdit.kind, "mentor"),
+        ),
+      )
+      .orderBy(desc(reviewEdit.updatedAt), desc(reviewEdit.createdAt))
+      .limit(1);
+
+    if (mentorEdit) {
+      annotators.push({
+        name: "Mentor",
+        mentor: true,
+        savedAt: (mentorEdit.updatedAt || mentorEdit.createdAt || new Date()).toISOString(),
+        isMain: false,
+      });
+    }
+  } catch {
+    // ignore
+  }
 
   const deleted = tombstonedRows.map((r) => ({
     name: r.annotator,
@@ -268,6 +302,77 @@ async function reviewPostHandler(
     }
   }
 
+  if ((user.role as string) === "mentor") {
+    const kind = "mentor";
+    const labelsGzB64 = zlib.gzipSync(body).toString("base64");
+    const now = new Date();
+
+    await db.transaction(async (tx) => {
+      const [existing] = await tx
+        .select()
+        .from(reviewEdit)
+        .where(
+          and(
+            eq(reviewEdit.caseId, caseId),
+            eq(reviewEdit.reviewer, safeMe),
+            eq(reviewEdit.status, "open"),
+          ),
+        )
+        .limit(1);
+
+      let editId: string;
+      if (existing) {
+        editId = existing.id;
+        await tx
+          .update(reviewEdit)
+          .set({
+            labelsGzB64,
+            note,
+            baseAnnotator,
+            kind,
+            updatedAt: now,
+          })
+          .where(eq(reviewEdit.id, existing.id));
+      } else {
+        const [inserted] = await tx
+          .insert(reviewEdit)
+          .values({
+            caseId,
+            reviewer: safeMe,
+            baseAnnotator,
+            labelsGzB64,
+            note,
+            status: "open",
+            kind,
+            createdAt: now,
+            updatedAt: now,
+          })
+          .returning({ id: reviewEdit.id });
+        editId = inserted.id;
+      }
+
+      await tx.insert(reviewEditVersion).values({
+        reviewEditId: editId,
+        labelsGzB64,
+        note,
+        savedAt: now,
+      });
+    });
+
+    logEvents([
+      {
+        caseId,
+        annotator: safeMe,
+        actor: safeMe,
+        action: "mentor-save",
+      },
+    ]).catch((err) => {
+      console.error("failed to log review event:", err);
+    });
+
+    return NextResponse.json({ ok: true, online: true });
+  }
+
   const kind = user.role === "team" ? "team" : "review";
   const labelsGzB64 = zlib.gzipSync(body).toString("base64");
   const now = new Date();
@@ -323,7 +428,7 @@ async function reviewPostHandler(
       savedAt: now,
     });
 
-    if (user.role === "radiologist") {
+    if (user.role === "radiologist" || user.role === "reviewer") {
       const base = baseAnnotator || "_main";
       const targets = base === "_main" ? ["_main"] : [base, "_main"];
       await tx
@@ -571,6 +676,7 @@ export async function GET(
       isMain: boolean;
       slices?: { marked: number; total: number } | null;
       identicalTo?: string | null;
+      mentor?: boolean;
     } = {
       name: item.name,
       savedAt: item.savedAt,
@@ -584,6 +690,35 @@ export async function GET(
 
     return entry;
   });
+
+  try {
+    const [mentorEdit] = await db
+      .select({
+        id: reviewEdit.id,
+        updatedAt: reviewEdit.updatedAt,
+        createdAt: reviewEdit.createdAt,
+      })
+      .from(reviewEdit)
+      .where(
+        and(
+          eq(reviewEdit.caseId, caseId),
+          eq(reviewEdit.kind, "mentor"),
+        ),
+      )
+      .orderBy(desc(reviewEdit.updatedAt), desc(reviewEdit.createdAt))
+      .limit(1);
+
+    if (mentorEdit) {
+      annotators.push({
+        name: "Mentor",
+        mentor: true,
+        savedAt: (mentorEdit.updatedAt || mentorEdit.createdAt || new Date()).toISOString(),
+        isMain: false,
+      });
+    }
+  } catch {
+    // Database unreachable or review_edit not present
+  }
 
   let reviews: {
     reviewer: string;

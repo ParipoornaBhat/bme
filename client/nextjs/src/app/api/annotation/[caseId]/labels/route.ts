@@ -5,10 +5,10 @@ import path from "node:path";
 import zlib from "node:zlib";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { eq, and, isNotNull } from "drizzle-orm";
-import { db, caseAnnotation } from "@bme/db";
+import { eq, and, isNotNull, desc } from "drizzle-orm";
+import { db, caseAnnotation, reviewEdit } from "@bme/db";
 import { isReviewMode } from "~/lib/app-mode";
-import { getReviewUser, reviewEdit, safeAnnotator } from "~/lib/review-auth";
+import { getReviewUser, safeAnnotator } from "~/lib/review-auth";
 
 /**
  * The saved annotation for a case, as the raw uint8 labelmap the 3D editor
@@ -31,6 +31,37 @@ async function reviewHandler(
   if (!ID.test(caseId)) return NextResponse.json({ error: "bad case id" }, { status: 400 });
 
   const by = req.nextUrl.searchParams.get("by");
+
+  if (by?.toLowerCase() === "mentor") {
+    const [mentorEdit] = await db
+      .select({ labelsGzB64: reviewEdit.labelsGzB64 })
+      .from(reviewEdit)
+      .where(
+        and(
+          eq(reviewEdit.caseId, caseId),
+          eq(reviewEdit.kind, "mentor"),
+        ),
+      )
+      .orderBy(desc(reviewEdit.updatedAt), desc(reviewEdit.createdAt))
+      .limit(1);
+
+    if (!mentorEdit || !mentorEdit.labelsGzB64) {
+      return NextResponse.json({ exists: false, error: "mentor annotation not found" }, { status: 404 });
+    }
+
+    try {
+      const rawBuf = zlib.gunzipSync(Buffer.from(mentorEdit.labelsGzB64, "base64"));
+      return new NextResponse(new Uint8Array(rawBuf), {
+        headers: {
+          "Content-Type": "application/octet-stream",
+          "Content-Length": String(rawBuf.length),
+          "Cache-Control": "no-store",
+        },
+      });
+    } catch {
+      return NextResponse.json({ error: "failed to decompress labelmap" }, { status: 500 });
+    }
+  }
 
   if (by === "_review" || by === "_mine") {
     const user = await getReviewUser(req);
@@ -129,6 +160,37 @@ export async function GET(
 
   const isDeleted = _req.nextUrl.searchParams.get("deleted") === "1";
   const by = _req.nextUrl.searchParams.get("by");
+
+  if (by?.toLowerCase() === "mentor") {
+    try {
+      const [mentorEdit] = await db
+        .select({ labelsGzB64: reviewEdit.labelsGzB64 })
+        .from(reviewEdit)
+        .where(
+          and(
+            eq(reviewEdit.caseId, caseId),
+            eq(reviewEdit.kind, "mentor"),
+          ),
+        )
+        .orderBy(desc(reviewEdit.updatedAt), desc(reviewEdit.createdAt))
+        .limit(1);
+
+      if (!mentorEdit || !mentorEdit.labelsGzB64) {
+        return NextResponse.json({ exists: false, error: "mentor annotation not found" }, { status: 404 });
+      }
+
+      const rawBuf = zlib.gunzipSync(Buffer.from(mentorEdit.labelsGzB64, "base64"));
+      return new NextResponse(new Uint8Array(rawBuf), {
+        headers: {
+          "Content-Type": "application/octet-stream",
+          "Content-Length": String(rawBuf.length),
+          "Cache-Control": "no-store",
+        },
+      });
+    } catch {
+      return NextResponse.json({ exists: false, error: "mentor annotation not found" }, { status: 404 });
+    }
+  }
 
   if (isDeleted) {
     let annotatorToFind = "_main";

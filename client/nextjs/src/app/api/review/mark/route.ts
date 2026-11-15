@@ -20,6 +20,10 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 
+  if ((user.role as string) === "mentor") {
+    return NextResponse.json({ error: "Forbidden: mentor role cannot mark cases" }, { status: 403 });
+  }
+
   if (user.role === "team") {
     return NextResponse.json({ error: "Forbidden: team role cannot mark cases" }, { status: 403 });
   }

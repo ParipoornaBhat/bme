@@ -760,7 +760,7 @@ async function executeSync(options: AnnotationSyncOptions): Promise<SyncReport> 
             and(
               eq(reviewEdit.kind, "review"),
               eq(reviewEdit.status, "open"),
-              eq(reviewAccount.role, "radiologist"),
+              inArray(reviewAccount.role, ["radiologist", "reviewer"]),
             ),
           );
 

@@ -1,6 +1,6 @@
 import crypto from "node:crypto";
 
-export type ReviewRole = "radiologist" | "reviewer" | "team";
+export type ReviewRole = "radiologist" | "reviewer" | "team" | "mentor";
 
 export interface ReviewAccountConfig {
   username: string;
@@ -92,7 +92,12 @@ export function parseReviewAccounts(
     let role: ReviewRole = "reviewer";
     if (parts.length === 3) {
       const roleStr = parts[2].trim().toLowerCase();
-      if (roleStr === "radiologist" || roleStr === "reviewer" || roleStr === "team") {
+      if (
+        roleStr === "radiologist" ||
+        roleStr === "reviewer" ||
+        roleStr === "team" ||
+        roleStr === "mentor"
+      ) {
         role = roleStr;
       } else {
         // Bad role, refuse entry
