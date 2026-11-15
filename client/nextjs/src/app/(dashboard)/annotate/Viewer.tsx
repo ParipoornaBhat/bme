@@ -485,6 +485,9 @@ export default function Viewer({
   const [pan, setPan] = useState<Record<Plane, { x: number; y: number }>>({
     axial: { x: 0, y: 0 }, coronal: { x: 0, y: 0 }, sagittal: { x: 0, y: 0 },
   });
+  const [tileBoxes, setTileBoxes] = useState<Record<Plane, { w: number; h: number }>>({
+    axial: { w: 0, h: 0 }, coronal: { w: 0, h: 0 }, sagittal: { w: 0, h: 0 },
+  });
   const [panning, setPanning] = useState<Plane | null>(null);
   const [maskInside, setMaskInside] = useState(false);
   const [protectLesion, setProtectLesion] = useState(true);
@@ -1959,6 +1962,32 @@ export default function Viewer({
     raf = requestAnimationFrame(tick);
     return () => cancelAnimationFrame(raf);
   }, [stroking, autoPan, spaceHeldRef]);
+
+  // Measure each plane's available tile box to fit the slice without stretching.
+  useEffect(() => {
+    if (busy || !vol) return;
+    if (typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver((entries) => {
+      for (const entry of entries) {
+        const p = (entry.target as HTMLElement).dataset.plane as Plane | undefined;
+        if (!p) continue;
+        const { width, height } = entry.contentRect;
+        if (width > 0 && height > 0) {
+          setTileBoxes((prev) => {
+            if (prev[p].w === width && prev[p].h === height) return prev;
+            return { ...prev, [p]: { w: width, h: height } };
+          });
+        }
+      }
+    });
+    for (const p of PLANES) {
+      const el = areaRefs.current[p];
+      if (el) observer.observe(el);
+    }
+    return () => {
+      observer.disconnect();
+    };
+  }, [vol, busy]);
 
   // ---- move / resize ---------------------------------------------------
   // Click a painted region to select it, drag inside its box to move it, drag
@@ -4042,6 +4071,13 @@ export default function Viewer({
           const g = planeGeom(p, vol);
           const depth = g.depth;
           const s = sliceOf(p, vol, cursor);
+          const box = tileBoxes[p];
+          const scale = box.w > 0 && box.h > 0 && g.mmW > 0 && g.mmH > 0
+            ? Math.min(box.w / g.mmW, box.h / g.mmH)
+            : 0;
+          const fittedW = Math.floor(g.mmW * scale);
+          const fittedH = Math.floor(g.mmH * scale);
+          const isFitted = scale > 0 && fittedW > 0 && fittedH > 0;
           return (
             <div key={p}
               ref={(el) => { viewRefs.current[p] = el; }}
@@ -4102,6 +4138,7 @@ export default function Viewer({
                 </span>
               </div>
               <div ref={(el) => { areaRefs.current[p] = el; }}
+                data-plane={p}
                 className="flex min-h-0 flex-1 items-center justify-center overflow-hidden"
                 style={{ touchAction: "none" }}
                 // Capture phase, so the canvas below already knows a pinch has
@@ -4148,12 +4185,19 @@ export default function Viewer({
                 } rounded`}
                 style={{
                   imageRendering: "auto",
-                  // The bitmap is drawn at several pixels per voxel; the box
-                  // stays one CSS pixel per voxel, as when it was sized by the bitmap.
-                  width: `${g.w}px`,
-                  // Fill the square tile while keeping true physical proportions.
-                  aspectRatio: `${g.mmW} / ${g.mmH}`,
-                  maxWidth: "100%", maxHeight: "100%",
+                  ...(isFitted
+                    ? {
+                        width: `${fittedW}px`,
+                        height: `${fittedH}px`,
+                      }
+                    : {
+                        // The bitmap is drawn at several pixels per voxel; the box
+                        // stays one CSS pixel per voxel, as when it was sized by the bitmap.
+                        width: `${g.w}px`,
+                        // Fill the square tile while keeping true physical proportions.
+                        aspectRatio: `${g.mmW} / ${g.mmH}`,
+                        maxWidth: "100%", maxHeight: "100%",
+                      }),
                   margin: "0 auto", display: "block",
                   ...(tool === "pencil" && !(spaceHeld && canZoomPan)
                     ? { cursor: pencilCursor(erasing ? "#ffffff" : SEGMENTS.find((x) => x.value === seg)!.color) }
