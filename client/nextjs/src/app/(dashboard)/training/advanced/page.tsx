@@ -299,6 +299,66 @@ export default function AdvancedTrainingPage() {
   }, [cards, selectedTargetId]);
 
   // Handlers
+  const handleSyncAllFreeH200 = () => {
+    const freeTargets = datasetTargets.filter(
+      (t) => t.platform === "h200" && !t.runningJobBlocking
+    );
+
+    if (freeTargets.length === 0) {
+      toast.info("No idle H200 accounts available to sync (all active accounts are currently training).");
+      return;
+    }
+
+    const runBatchSync = async (confirmed = false) => {
+      setSyncBusy(true);
+      try {
+        let started = 0;
+        for (const t of freeTargets) {
+          try {
+            await fetch("/api/training-advanced/dataset", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ targetId: t.targetId, confirmed }),
+            });
+            started++;
+          } catch {}
+        }
+        toast.success(`Started background sync for ${started} idle H200 account(s).`);
+        loadData(true);
+      } catch (err: any) {
+        toast.error(`Batch sync error: ${err.message}`);
+      } finally {
+        setSyncBusy(false);
+      }
+    };
+
+    const isAnyRemote = freeTargets.some((t) => t.isRemoteRoute);
+    if (!isAnyRemote) {
+      toast.info(`Syncing ${freeTargets.length} free H200 account(s) directly via college network...`);
+      runBatchSync(true);
+      return;
+    }
+
+    const totalBytes = freeTargets.reduce((sum, t) => sum + (t.bytesToSync || 0), 0);
+    const sizeStr = totalBytes ? `${(totalBytes / (1024 * 1024)).toFixed(1)} MB` : "estimated data";
+
+    setConfirmModal({
+      open: true,
+      title: `Sync All ${freeTargets.length} Free H200 Accounts`,
+      description: `Target accounts: ${freeTargets.map((t) => t.label).join(", ")}`,
+      warnings: [
+        "H200 connection is via Internet (jump host: pc-server-1).",
+        `Estimated data transfer: ~${sizeStr} across ${freeTargets.length} account(s).`,
+        "This will consume your mobile / internet data.",
+      ],
+      actionLabel: "Confirm & Sync All Free Accounts",
+      onConfirm: async () => {
+        setConfirmModal((prev) => ({ ...prev, open: false }));
+        await runBatchSync(true);
+      },
+    });
+  };
+
   const handleStartSubmit = () => {
     if (!currentSelectedTarget) return;
 
@@ -1170,9 +1230,22 @@ export default function AdvancedTrainingPage() {
 
           <div className="space-y-3 pt-2">
             <div>
-              <label className="text-[10px] font-bold uppercase tracking-wider text-muted-foreground block mb-1">
-                Sync Target
-              </label>
+              <div className="flex items-center justify-between mb-1">
+                <label className="text-[10px] font-bold uppercase tracking-wider text-muted-foreground block">
+                  Sync Target
+                </label>
+                {datasetTargets.some((t) => t.platform === "h200") && (
+                  <button
+                    type="button"
+                    onClick={handleSyncAllFreeH200}
+                    disabled={syncBusy || !datasetTargets.some((t) => t.platform === "h200" && !t.runningJobBlocking)}
+                    className="text-[11px] font-semibold text-primary hover:underline inline-flex items-center gap-1 cursor-pointer disabled:opacity-40"
+                  >
+                    <RefreshCw className="h-3 w-3" />
+                    Sync All Free H200 ({datasetTargets.filter((t) => t.platform === "h200" && !t.runningJobBlocking).length} idle)
+                  </button>
+                )}
+              </div>
               <select
                 value={selectedSyncTarget}
                 onChange={(e) => setSelectedSyncTarget(e.target.value)}
