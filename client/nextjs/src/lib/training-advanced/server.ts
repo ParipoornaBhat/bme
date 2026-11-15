@@ -260,7 +260,8 @@ export async function syncDataset(
   let lastSave = 0;
   const onChunk = (chunk: Buffer) => {
     log += chunk.toString();
-    const lines = log.split(/\r?\n/).filter(Boolean);
+    // Progress lines end with a carriage return, so split on both kinds of break.
+    const lines = log.split(/\r?\n|\r/).map((l) => l.trim()).filter(Boolean);
     task.log = lines.slice(-30);
     task.message = lines.length ? lines[lines.length - 1].slice(0, 200) : task.message;
     if (Date.now() - lastSave > 1000) {
