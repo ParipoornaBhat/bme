@@ -117,13 +117,15 @@ export default function DataSyncPage() {
       .then((j) => {
         if (j?.cards) setCards((prev) => (prev.length > 0 ? prev : j.cards));
       })
-      .catch(() => {});
+      .catch(() => {})
+      .finally(() => setLoading(false));
 
     const accFullP = getJson("/api/training-advanced/accounts")
       .then((j) => {
         if (j?.cards) setCards(j.cards);
       })
-      .catch(() => {});
+      .catch(() => {})
+      .finally(() => setLoading(false));
 
     // 2. Dataset status (local export, H200 targets, Kaggle targets)
     const dataP = getJson("/api/training-advanced/dataset")
@@ -134,14 +136,16 @@ export default function DataSyncPage() {
         setKaggleDatasets(j.kaggleDatasets || []);
         setDefaultDatasetOwner(j.defaultDatasetOwner || "");
       })
-      .catch(() => {});
+      .catch(() => {})
+      .finally(() => setLoading(false));
 
     // 3. Background tasks
     const tasksP = getJson("/api/training-advanced/tasks")
       .then((j) => {
         if (j?.tasks) setTasks(j.tasks);
       })
-      .catch(() => {});
+      .catch(() => {})
+      .finally(() => setLoading(false));
 
     await Promise.allSettled([accQuickP, accFullP, dataP, tasksP]);
     setLoading(false);
