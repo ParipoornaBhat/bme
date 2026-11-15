@@ -416,7 +416,11 @@ export function AnnotatorPicker({
                 ? "Mentor (online only)"
                 : mainAnnotator.identicalTo
                 ? `${mainAnnotator.identicalTo} (main)`
-                : `${mainAnnotator.name} (first)`}
+                : (() => {
+                    const ownerKey = (annotatedByAllList?.[0] ?? "").split("_")[0].toLowerCase();
+                    const isOwner = Boolean(ownerKey) && mainAnnotator.name.split("_")[0].toLowerCase() === ownerKey;
+                    return `${mainAnnotator.name} (${isOwner ? "assigned" : "first"})`;
+                  })()}
               {mainAnnotator.slices ? ` ${mainAnnotator.slices.marked}/${mainAnnotator.slices.total}` : ""}
             </option>
           ) : hasMainAnnotation || annotators.length === 0 ? (
