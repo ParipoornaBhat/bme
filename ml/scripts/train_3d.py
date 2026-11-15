@@ -243,8 +243,10 @@ def sample_origin(
 
     def centred(pts):
         point = pts[int(rng.integers(len(pts)))]
+        # Add spatial jitter (+- patch // 4) so lesions are learned across entire field of view, not just dead center
+        jitter = tuple(int(rng.integers(-max(1, patch[ax] // 4), max(1, patch[ax] // 4) + 1)) for ax in range(3))
         return tuple(
-            int(np.clip(point[ax] - patch[ax] // 2, 0, max(0, shape[ax] - patch[ax])))
+            int(np.clip(point[ax] - patch[ax] // 2 + jitter[ax], 0, max(0, shape[ax] - patch[ax])))
             for ax in range(3)
         )
 
@@ -1596,8 +1598,11 @@ def predict_volume(
         cnet_temperature=cnet_temperature,
     )
     out = np.zeros(shape, dtype=np.uint8)
-    out[avg_bone >= 0.5] = 1
-    out[(avg_bme >= bme_threshold) & (out == 1)] = 2
+    bone_mask = avg_bone >= 0.5
+    # 1-voxel dilation allows true subchondral edema abutting the cortical plate without extra-articular spill
+    bone_gate = ndi.binary_dilation(bone_mask, iterations=1)
+    out[bone_mask] = 1
+    out[(avg_bme >= bme_threshold) & bone_gate] = 2
     if min_bme_voxels > 0:
         out = postprocess_prediction(
             out,
@@ -1711,7 +1716,7 @@ def calibrate_bme_threshold_from_train(
         pos = [pos[int(i)] for i in idxs]
 
     model.eval()
-    candidates = [0.35, 0.40, 0.45, 0.50]
+    candidates = [0.30, 0.35, 0.38, 0.42, 0.46, 0.50]
     dice_by_thr: dict[float, list[float]] = {t: [] for t in candidates}
 
     for c in pos:
@@ -1732,11 +1737,12 @@ def calibrate_bme_threshold_from_train(
             cnet_temperature=cnet_temperature,
         )
         bone_mask = avg_bone >= 0.5
+        bone_gate = ndi.binary_dilation(bone_mask, iterations=1)
 
         for t in candidates:
             out = np.zeros(vol.shape, dtype=np.uint8)
             out[bone_mask] = 1
-            out[(avg_bme >= t) & bone_mask] = 2
+            out[(avg_bme >= t) & bone_gate] = 2
             if min_bme_voxels > 0:
                 out = postprocess_prediction(out, min_bme_voxels=min_bme_voxels, prob_bme=avg_bme)
             dice_by_thr[t].append(dice(lbl, out, 2))

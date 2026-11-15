@@ -17,7 +17,7 @@ from pathlib import Path
 import numpy as np
 import SimpleITK as sitk
 import torch
-from scipy.ndimage import label as cc_label, zoom
+from scipy.ndimage import binary_dilation, label as cc_label, zoom
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from train_3d import (  # noqa: E402
@@ -90,8 +90,10 @@ def ensemble_fold_predictions(
     bme_thr = float(np.mean(bme_thresholds)) if bme_thresholds else 0.50
 
     mask = np.zeros(avg_bone.shape, dtype=np.uint8)
-    mask[avg_bone >= 0.5] = 1
-    mask[(avg_bme >= bme_thr) & (mask == 1)] = 2
+    bone_mask = avg_bone >= 0.5
+    bone_gate = binary_dilation(bone_mask, iterations=1)
+    mask[bone_mask] = 1
+    mask[(avg_bme >= bme_thr) & bone_gate] = 2
     if min_bme_voxels > 0 and n > 0:
         mask = postprocess_prediction(
             mask,
