@@ -846,6 +846,44 @@ async function handleStart(platform, targetId, methodId, extraJson = "{}") {
 }
 
 // ---------- CANCEL COMMAND ---------------------------------------------------
+function handleAccountsQuick() {
+  const env = mergedEnv();
+  const cards = [];
+  for (const acc of listAccounts(env)) {
+    const usn = acc.usn || `NNM23CS${acc.roll}`;
+    const hasPass = Boolean(acc.h200 && (acc.h200.pass || acc.h200.password));
+    cards.push({
+      id: `h200-${acc.roll}`,
+      platform: "h200",
+      label: `H200 - ${usn}${acc.name ? ` (${acc.name})` : ""}`,
+      accountName: acc.h200?.user || `nnm23cs${acc.roll}_stu_cse`,
+      usn,
+      roll: acc.roll,
+      connected: false,
+      connectionDetails: hasPass ? "Checking connection..." : `No H200 password in .env for ${acc.name || usn}`,
+      currentJob: null,
+      checking: hasPass,
+    });
+    for (const [slot, s] of acc.kaggleSlots ?? []) {
+      if (!s.user) continue;
+      cards.push({
+        id: `kaggle-${acc.roll}-${slot}`,
+        platform: "kaggle",
+        label: `Kaggle - ${s.user}`,
+        accountName: s.user,
+        usn,
+        roll: acc.roll,
+        slot,
+        connected: false,
+        connectionDetails: "Checking connection...",
+        currentJob: null,
+        checking: true,
+      });
+    }
+  }
+  return { cards, quick: true };
+}
+
 async function handleCancel(platform, targetId, jobId) {
   if (platform === "h200") {
     const roll = targetId.replace("h200-", "");
@@ -882,7 +920,9 @@ const [action, arg1, arg2, arg3, arg4] = process.argv.slice(2);
 
 try {
   let result = null;
-  if (action === "accounts") {
+  if (action === "accounts-quick") {
+    result = handleAccountsQuick();
+  } else if (action === "accounts") {
     result = await handleAccounts();
   } else if (action === "runs") {
     result = await handleRuns();

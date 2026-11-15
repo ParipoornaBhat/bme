@@ -189,27 +189,34 @@ export default function AdvancedTrainingPage() {
 
   const loadData = useCallback(async (isSilent = false) => {
     if (!isSilent) setRefreshing(true);
-    try {
-      const [accRes, runsRes, dataRes, tasksRes] = await Promise.all([
-        fetch("/api/training-advanced/accounts", { cache: "no-store" }),
-        fetch("/api/training-advanced/runs", { cache: "no-store" }),
-        fetch("/api/training-advanced/dataset", { cache: "no-store" }),
-        fetch("/api/training-advanced/tasks", { cache: "no-store" }),
-      ]);
+    const getJson = (url: string) =>
+      fetch(url, { cache: "no-store" }).then((r) => (r.ok ? r.json() : null));
 
-      if (accRes.ok) {
-        const accJson = await accRes.json();
-        setCards(accJson.cards || []);
-        if (!selectedTargetId && accJson.cards?.length > 0) {
-          setSelectedTargetId(accJson.cards[0].id);
+    // 1. Account list from .env: instant, shown first.
+    const quickP = getJson("/api/training-advanced/accounts?quick=1")
+      .then((j) => {
+        if (j?.cards) setCards((prev) => (prev.length > 0 ? prev : j.cards));
+      })
+      .catch(() => {})
+      .finally(() => setLoading(false));
+
+    // 2. Full account checks (slow): replace the list when they finish.
+    const accP = getJson("/api/training-advanced/accounts")
+      .then((j) => {
+        if (j?.cards) {
+          setCards(j.cards);
+          if (!selectedTargetId && j.cards.length > 0) setSelectedTargetId(j.cards[0].id);
         }
-      }
-      if (runsRes.ok) {
-        const runsJson = await runsRes.json();
-        setRuns(runsJson.runs || []);
-      }
-      if (dataRes.ok) {
-        const dataJson = await dataRes.json();
+      })
+      .catch((err: any) => { if (!isSilent) toast.error(`Account checks failed: ${err?.message ?? err}`); });
+
+    // 3. Runs, datasets and tasks each fill in on their own.
+    const runsP = getJson("/api/training-advanced/runs")
+      .then((j) => { if (j) setRuns(j.runs || []); })
+      .catch(() => {});
+    const dataP = getJson("/api/training-advanced/dataset")
+      .then((dataJson) => {
+        if (!dataJson) return;
         setDatasetTargets(dataJson.targets || []);
         const kds = dataJson.kaggleDatasets || [];
         setKaggleDatasets(kds);
@@ -220,17 +227,14 @@ export default function AdvancedTrainingPage() {
           const defaultRoll = dataJson.defaultDatasetOwner || kds.find((k: any) => k.isDefault)?.roll || kds[0].roll;
           setSelectedDatasetOwner((prev) => prev || defaultRoll);
         }
-      }
-      if (tasksRes.ok) {
-        const tasksJson = await tasksRes.json();
-        setTasks(tasksJson.tasks || []);
-      }
-    } catch (err: any) {
-      if (!isSilent) toast.error(`Failed to load data: ${err.message}`);
-    } finally {
-      setLoading(false);
-      setRefreshing(false);
-    }
+      })
+      .catch(() => {});
+    const tasksP = getJson("/api/training-advanced/tasks")
+      .then((j) => { if (j) setTasks(j.tasks || []); })
+      .catch(() => {});
+
+    await Promise.allSettled([quickP, accP, runsP, dataP, tasksP]);
+    setRefreshing(false);
   }, [selectedTargetId, selectedSyncTarget]);
 
   useEffect(() => {

@@ -75,6 +75,10 @@ function runBridgeCommand(args: string[], timeoutMs = 25000): Promise<any> {
   });
 }
 
+export async function fetchAccountsQuick(): Promise<{ cards: AccountCard[]; quick: boolean }> {
+  return runBridgeCommand(["accounts-quick"], 8000);
+}
+
 export async function fetchAccounts(): Promise<{ cards: AccountCard[]; route: any }> {
   return runBridgeCommand(["accounts"], 30000);
 }
