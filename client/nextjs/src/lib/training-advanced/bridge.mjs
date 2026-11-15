@@ -548,6 +548,31 @@ async function handleRuns() {
 }
 
 // ---------- DATASET STATUS COMMAND -------------------------------------------
+function h200Plan(roll) {
+  const cacheDir = path.join(root, "data", ".cache");
+  const cacheFile = path.join(cacheDir, `h200_plan_${roll}.json`);
+  try {
+    const c = JSON.parse(fs.readFileSync(cacheFile, "utf8"));
+    if (Date.now() - c.at < 5 * 60 * 1000) return c;
+  } catch { /* no cache yet */ }
+  const r = spawnSync(
+    process.execPath,
+    [path.join(root, "scripts", "h200-menu.js"), "push", "--as", roll, "--plan"],
+    { cwd: root, encoding: "utf8", timeout: 90000, windowsHide: true }
+  );
+  const line = (r.stdout || "").split(/\r?\n/).find((l) => l.startsWith("PLAN "));
+  if (!line) {
+    const last = (r.stderr || r.stdout || "").trim().split(/\r?\n/).pop() || "check failed";
+    return { error: last.slice(0, 160) };
+  }
+  const plan = { ...JSON.parse(line.slice(5)), at: Date.now() };
+  try {
+    fs.mkdirSync(cacheDir, { recursive: true });
+    fs.writeFileSync(cacheFile, JSON.stringify(plan));
+  } catch { /* cache is optional */ }
+  return plan;
+}
+
 async function handleDatasetStatus() {
   const env = mergedEnv();
   const all = listAccounts(env);
@@ -585,16 +610,18 @@ async function handleDatasetStatus() {
   for (const acc of all.filter(usable.h200)) {
     const targetId = `h200-${acc.roll}`;
     const blocking = activeRuns.get(targetId) || null;
+    const plan = blocking ? null : h200Plan(acc.roll);
     targets.push({
       targetId,
       platform: "h200",
       label: `H200 - ${acc.usn} (${acc.name || acc.roll})`,
       datasetVersion: "server-synced",
       localExportVersion: localExport.hash,
-      isUpToDate: !blocking, // Push will verify remote md5
+      isUpToDate: !blocking && Boolean(plan && !plan.error && plan.files === 0),
       casesCount: localExport.cases,
-      filesCount: localExport.files,
-      bytesToSync: localExport.bytes,
+      filesCount: plan && !plan.error ? plan.files : null,
+      bytesToSync: plan && !plan.error ? plan.bytes : null,
+      planError: plan && plan.error ? plan.error : undefined,
       isRemoteRoute: route.remote,
       routeLabel: route.label,
       runningJobBlocking: blocking,

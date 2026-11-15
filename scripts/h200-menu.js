@@ -185,6 +185,10 @@ async function push() {
     bytes += size;
   }
   console.log(`Already on the server and unchanged: ${same} file(s).`);
+  if (process.argv.includes("--plan")) {
+    console.log("PLAN " + JSON.stringify({ files: send.length, bytes, same }));
+    return;
+  }
   if (!send.length) {
     console.log("Nothing new to send.");
     return;
