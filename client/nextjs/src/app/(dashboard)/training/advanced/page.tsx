@@ -785,9 +785,16 @@ export default function AdvancedTrainingPage() {
                   {job && job.status !== "idle" ? (
                     <>
                       <div className="flex items-center justify-between">
-                        <span className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">
-                          Job: {job.methodLabel || job.methodId}
-                        </span>
+                        <div className="flex items-center gap-1.5 flex-wrap">
+                          <span className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">
+                            Job: {job.methodLabel || job.methodId}
+                          </span>
+                          {job.isCached && job.cachedAt && (
+                            <span className="inline-flex items-center gap-1 rounded-md bg-muted px-1.5 py-0.5 text-[9px] text-muted-foreground font-mono">
+                              Cached {new Date(job.cachedAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
+                            </span>
+                          )}
+                        </div>
                         <span
                           className={`inline-flex items-center gap-1.5 rounded-full px-2 py-0.5 text-[11px] font-bold ${
                             job.status === "running"
@@ -1271,6 +1278,51 @@ export default function AdvancedTrainingPage() {
                 className="w-full rounded-xl border border-border bg-background px-3 py-2 text-xs font-semibold"
               />
             </div>
+
+            {/* Target Hardware & Sync Status Summary */}
+            {(() => {
+              const targetStatus = datasetTargets.find((t) => t.targetId === currentSelectedTarget?.id);
+              const isSyncActive = tasks.some((t) => t.status === "running" && t.target === currentSelectedTarget?.id);
+              const isDataBehind = currentSelectedTarget?.platform === "h200" && targetStatus && !targetStatus.isUpToDate;
+              const isBlocked = Boolean(currentSelectedTarget?.currentJob && currentSelectedTarget.currentJob.status === "running");
+
+              return (
+                <div className="sm:col-span-2 rounded-xl border border-border/60 bg-muted/20 p-3 text-xs space-y-2">
+                  <div className="flex items-center justify-between font-semibold">
+                    <span className="text-foreground">Execution Summary &amp; Resource Allocation</span>
+                    <span className="font-mono text-[10px] text-muted-foreground uppercase">
+                      {currentSelectedTarget?.platform}
+                    </span>
+                  </div>
+
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-[11px] text-muted-foreground">
+                    <div>
+                      <span className="font-semibold text-foreground">Hardware: </span>
+                      {currentSelectedTarget?.platform === "h200" && "GPU slice 1g.18gb, 4 CPU, 24 GB RAM, 3h 45m job limit"}
+                      {currentSelectedTarget?.platform === "kaggle" && "Tesla T4/P100 (16GB VRAM), 30h/wk quota, 12h session"}
+                      {currentSelectedTarget?.platform === "local" && "This PC (Local hardware)"}
+                    </div>
+
+                    <div>
+                      <span className="font-semibold text-foreground">Dataset: </span>
+                      {targetStatus?.isUpToDate
+                        ? "Up to date with local export"
+                        : targetStatus?.checkedAt
+                        ? `Checked at ${new Date(targetStatus.checkedAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`
+                        : "Requires sync check"}
+                    </div>
+                  </div>
+
+                  {(isDataBehind || isSyncActive || isBlocked) && (
+                    <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 p-2 text-[11px] text-amber-700 dark:text-amber-300 space-y-0.5">
+                      {isBlocked && <p>• A training job is already active on this target.</p>}
+                      {isSyncActive && <p>• A dataset sync is currently running for this target. Wait for it to finish.</p>}
+                      {isDataBehind && <p>• Target data is behind the latest local export. Sync dataset before launching training.</p>}
+                    </div>
+                  )}
+                </div>
+              );
+            })()}
           </div>
 
           {/* Confirmations & Start Button */}
@@ -1279,14 +1331,24 @@ export default function AdvancedTrainingPage() {
               <Info className="h-4 w-4 shrink-0 text-primary" />
               <span>Full metadata (`startedBy`, `platform`, `account`, `host`, `startedAt`) recorded automatically.</span>
             </div>
-            <button
-              onClick={handleStartSubmit}
-              disabled={startBusy || !currentSelectedTarget?.connected || (currentSelectedTarget?.platform === "kaggle" && kaggleDatasets.length === 0)}
-              className="inline-flex items-center justify-center gap-2 rounded-xl bg-primary px-5 py-2.5 text-xs font-bold text-primary-foreground hover:bg-primary/90 transition-all cursor-pointer disabled:opacity-40"
-            >
-              {startBusy ? <Loader2 className="h-4 w-4 animate-spin" /> : <Play className="h-4 w-4" />}
-              Start Run
-            </button>
+            {(() => {
+              const targetStatus = datasetTargets.find((t) => t.targetId === currentSelectedTarget?.id);
+              const isSyncActive = tasks.some((t) => t.status === "running" && t.target === currentSelectedTarget?.id);
+              const isDataBehind = currentSelectedTarget?.platform === "h200" && targetStatus && !targetStatus.isUpToDate;
+              const isBlocked = Boolean(currentSelectedTarget?.currentJob && currentSelectedTarget.currentJob.status === "running");
+              const isKaggleNoDs = currentSelectedTarget?.platform === "kaggle" && kaggleDatasets.length === 0;
+
+              return (
+                <button
+                  onClick={handleStartSubmit}
+                  disabled={startBusy || !currentSelectedTarget?.connected || isKaggleNoDs || isDataBehind || isSyncActive || isBlocked}
+                  className="inline-flex items-center justify-center gap-2 rounded-xl bg-primary px-5 py-2.5 text-xs font-bold text-primary-foreground hover:bg-primary/90 transition-all cursor-pointer disabled:opacity-40"
+                >
+                  {startBusy ? <Loader2 className="h-4 w-4 animate-spin" /> : <Play className="h-4 w-4" />}
+                  Start Run
+                </button>
+              );
+            })()}
           </div>
         </div>
 

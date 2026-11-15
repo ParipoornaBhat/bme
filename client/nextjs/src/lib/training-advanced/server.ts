@@ -116,6 +116,16 @@ export async function fetchDatasetStatus(): Promise<{
   return runBridgeCommand(["dataset-status"], 25000);
 }
 
+export async function planDatasetSync(targetId: string): Promise<{
+  success: boolean;
+  targetId: string;
+  files: number;
+  bytes: number;
+  same: number;
+}> {
+  return runBridgeCommand(["dataset-plan", targetId], 180000);
+}
+
 const SYNC_LOCK_DIR = path.join(root, "data", ".cache");
 
 function syncLockFile(targetId: string) {

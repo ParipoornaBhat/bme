@@ -32,6 +32,7 @@ import {
   Check,
   Layers,
   FileCode,
+  Search,
 } from "lucide-react";
 import { toast } from "sonner";
 
@@ -101,6 +102,7 @@ export default function DataSyncPage() {
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [syncBusyTarget, setSyncBusyTarget] = useState<string | null>(null);
+  const [checkingTarget, setCheckingTarget] = useState<string | null>(null);
   const [copiedHash, setCopiedHash] = useState(false);
 
   // Expanded log view for background tasks
@@ -351,6 +353,29 @@ export default function DataSyncPage() {
     });
   };
 
+  // Check H200 sync plan without copying files
+  const handleH200Check = async (targetId: string) => {
+    setCheckingTarget(targetId);
+    try {
+      const res = await fetch("/api/training-advanced/dataset/plan", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ targetId }),
+      });
+      const j = await res.json();
+      if (res.ok && j.success) {
+        toast.success(`Check complete: ${j.files} file(s) to send (~${fmtBytes(j.bytes)}), ${j.same} already on server.`);
+        loadData(true);
+      } else {
+        toast.error(j.error || "Failed to check H200 sync plan");
+      }
+    } catch (err: any) {
+      toast.error(err.message || "Failed to check sync plan");
+    } finally {
+      setCheckingTarget(null);
+    }
+  };
+
   // Batch Sync All Free H200
   const handleSyncAllFreeH200 = () => {
     const freeTargets = datasetTargets.filter(
@@ -362,19 +387,36 @@ export default function DataSyncPage() {
       return;
     }
 
+    const isAnyRemote = freeTargets.some((t) => t.isRemoteRoute);
+
     const runBatchSync = async (confirmed = false) => {
       setSyncBusyTarget("batch-h200");
       try {
         let started = 0;
-        for (const t of freeTargets) {
-          try {
-            await fetch("/api/training-advanced/dataset", {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({ targetId: t.targetId, confirmed, isFresh: false }),
-            });
-            started++;
-          } catch {}
+        if (!isAnyRemote) {
+          // Direct college network: run accounts in parallel!
+          const results = await Promise.allSettled(
+            freeTargets.map((t) =>
+              fetch("/api/training-advanced/dataset", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ targetId: t.targetId, confirmed, isFresh: false }),
+              }).then((r) => r.ok)
+            )
+          );
+          started = results.filter((r) => r.status === "fulfilled" && r.value).length;
+        } else {
+          // Remote route: run sequentially to avoid saturating jump host
+          for (const t of freeTargets) {
+            try {
+              const res = await fetch("/api/training-advanced/dataset", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ targetId: t.targetId, confirmed, isFresh: false }),
+              });
+              if (res.ok) started++;
+            } catch {}
+          }
         }
         toast.success(`Started background sync for ${started} idle H200 account(s).`);
         loadData(true);
@@ -385,9 +427,8 @@ export default function DataSyncPage() {
       }
     };
 
-    const isAnyRemote = freeTargets.some((t) => t.isRemoteRoute);
     if (!isAnyRemote) {
-      toast.info(`Syncing ${freeTargets.length} free H200 account(s) directly via college network...`);
+      toast.info(`Syncing ${freeTargets.length} free H200 account(s) in parallel via college network...`);
       runBatchSync(true);
       return;
     }
@@ -849,7 +890,21 @@ export default function DataSyncPage() {
                       </td>
 
                       <td className="px-3 py-3 font-mono text-[11px] text-muted-foreground whitespace-nowrap">
-                        {t.bytesToSync ? fmtBytes(t.bytesToSync) : "0 B"}
+                        <div>
+                          <span>
+                            {t.filesCount ?? 0} files ({t.bytesToSync ? fmtBytes(t.bytesToSync) : "0 B"}) to send
+                          </span>
+                          {t.filesSame != null && (
+                            <div className="text-[10px] text-emerald-600 dark:text-emerald-400 font-sans">
+                              {t.filesSame} already on server
+                            </div>
+                          )}
+                          {t.checkedAt && (
+                            <div className="text-[9px] text-muted-foreground font-sans">
+                              Checked {new Date(t.checkedAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
+                            </div>
+                          )}
+                        </div>
                       </td>
 
                       <td className="px-3 py-3 whitespace-nowrap text-muted-foreground text-[11px]">
@@ -875,6 +930,21 @@ export default function DataSyncPage() {
 
                       <td className="px-3.5 py-3 text-right whitespace-nowrap">
                         <div className="flex items-center justify-end gap-1.5">
+                          {/* Check Sync Plan Button */}
+                          <button
+                            onClick={() => handleH200Check(t.targetId)}
+                            disabled={isBlocked || !isConnected || isBusy || Boolean(activeSync) || checkingTarget === t.targetId}
+                            className="inline-flex items-center gap-1 rounded-xl border border-border bg-muted/40 px-2 py-1.5 text-xs font-semibold text-foreground hover:bg-muted transition-all cursor-pointer disabled:opacity-40"
+                            title="Check remote H200: see how many files are missing without copying anything"
+                          >
+                            {checkingTarget === t.targetId ? (
+                              <Loader2 className="h-3 w-3 animate-spin text-primary" />
+                            ) : (
+                              <Search className="h-3 w-3 text-muted-foreground" />
+                            )}
+                            Check
+                          </button>
+
                           {/* Incremental Sync Button */}
                           <button
                             onClick={() => handleH200Sync(t)}
@@ -1382,8 +1452,19 @@ export default function DataSyncPage() {
                     </p>
                   )}
 
-                  {task.log && task.log.length > 0 && (
-                    <div className="pt-1">
+                  <div className="flex items-center gap-3 pt-1">
+                    {(task.status === "failed" || isCancelled) && task.target && (
+                      <button
+                        onClick={() => { void executeSync(task.target, true, false); }}
+                        className="inline-flex items-center gap-1 rounded-lg border border-border bg-card px-2.5 py-1 text-[11px] font-semibold text-foreground hover:bg-accent transition-all cursor-pointer"
+                        title="Resume sync: re-checks and sends only what was missed"
+                      >
+                        <RotateCcw className="h-3 w-3 text-primary" />
+                        Resume Sync
+                      </button>
+                    )}
+
+                    {task.log && task.log.length > 0 && (
                       <button
                         onClick={() => toggleTaskLog(task.id)}
                         className="inline-flex items-center gap-1 text-[11px] font-semibold text-muted-foreground hover:text-foreground cursor-pointer"
@@ -1392,13 +1473,13 @@ export default function DataSyncPage() {
                         {isExpanded ? "Hide execution log" : `View execution log (${task.log.length} lines)`}
                         {isExpanded ? <ChevronUp className="h-3 w-3" /> : <ChevronDown className="h-3 w-3" />}
                       </button>
+                    )}
+                  </div>
 
-                      {isExpanded && (
-                        <pre className="mt-2 max-h-48 overflow-y-auto rounded-xl bg-muted/60 p-3 font-mono text-[10px] leading-relaxed text-muted-foreground whitespace-pre-wrap">
-                          {task.log.join("\n")}
-                        </pre>
-                      )}
-                    </div>
+                  {isExpanded && task.log && task.log.length > 0 && (
+                    <pre className="mt-2 max-h-48 overflow-y-auto rounded-xl bg-muted/60 p-3 font-mono text-[10px] leading-relaxed text-muted-foreground whitespace-pre-wrap">
+                      {task.log.join("\n")}
+                    </pre>
                   )}
                 </div>
               );

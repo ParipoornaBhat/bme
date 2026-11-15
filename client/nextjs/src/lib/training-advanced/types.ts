@@ -66,6 +66,8 @@ export interface CurrentJob {
   pid?: number;
   logTail?: string[];
   progress?: JobProgress | null;
+  isCached?: boolean;
+  cachedAt?: string | null;
 }
 
 export interface AccountCard {
@@ -107,6 +109,8 @@ export interface TargetDatasetStatus {
   bytesToSync?: number;
   casesCount?: number;
   filesCount?: number;
+  filesSame?: number | null;
+  checkedAt?: string | null;
   isRemoteRoute?: boolean;
   routeLabel?: string;
   lastUpdated?: string | null;

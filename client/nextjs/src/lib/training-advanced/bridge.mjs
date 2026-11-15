@@ -17,8 +17,9 @@ const h200LoginMod = await import(pathToFileURL(path.join(root, "scripts", "h200
 const {
   listAccounts, mergedEnv, findAccount, h200Route, tcpReachable,
   kaggleReady, stagingFor, kaggleLocalState, kaggleUserOf, datasetOwner,
-  kaggle, kaggleJson, usable, createRunMetadata, python,
+  kaggle, kaggleJson, kaggleEnv, usable, createRunMetadata, python,
 } = accountsMod;
+const PIPELINE = path.join(root, "ml", "scripts", "kaggle_pipeline.py");
 const { METHODS } = methodsMod;
 const { detectDevice, describeDevice } = deviceMod;
 const { chooseH200 } = h200LoginMod;
@@ -113,6 +114,23 @@ async function runSshCommand(session, cmd, timeoutMs = 15000) {
       resolve({ code: code ?? 1, out, err });
     });
   });
+}
+
+// ---------- CARD JOB CACHE ---------------------------------------------------
+function cacheCardJob(cardId, currentJob) {
+  try {
+    const dir = path.join(root, "data", ".cache");
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, `card_job_${cardId}.json`), JSON.stringify({ currentJob, at: Date.now() }));
+  } catch {}
+}
+
+function readCachedCardJob(cardId) {
+  try {
+    const file = path.join(root, "data", ".cache", `card_job_${cardId}.json`);
+    if (fs.existsSync(file)) return JSON.parse(fs.readFileSync(file, "utf8"));
+  } catch {}
+  return null;
 }
 
 // ---------- ACCOUNTS COMMAND -------------------------------------------------
@@ -238,6 +256,7 @@ async function handleAccounts() {
                   logTail: logLines.slice(-20),
                   progress,
                 };
+                cacheCardJob(id, currentJob);
               }
             }
           } else {
@@ -247,6 +266,17 @@ async function handleAccounts() {
           connDetails = `Connection failed: ${String(err.message || err).slice(0, 120)}`;
         } finally {
           if (session) session.close();
+        }
+      }
+
+      if (!currentJob) {
+        const cached = readCachedCardJob(id);
+        if (cached?.currentJob) {
+          currentJob = {
+            ...cached.currentJob,
+            isCached: true,
+            cachedAt: new Date(cached.at).toISOString(),
+          };
         }
       }
 
@@ -333,6 +363,18 @@ async function handleAccounts() {
           logTail,
           progress,
         };
+        cacheCardJob(id, currentJob);
+      }
+
+      if (!currentJob) {
+        const cached = readCachedCardJob(id);
+        if (cached?.currentJob) {
+          currentJob = {
+            ...cached.currentJob,
+            isCached: true,
+            cachedAt: new Date(cached.at).toISOString(),
+          };
+        }
       }
 
       return {
@@ -385,6 +427,16 @@ async function handleAccounts() {
 
       if (isAlive || (!isFin && meta)) {
         const logFile = path.join(dirPath, "train.log");
+        const heartbeatFile = path.join(dirPath, "heartbeat.json");
+        let lastActivityMs = 0;
+        if (fs.existsSync(heartbeatFile)) {
+          try { lastActivityMs = JSON.parse(fs.readFileSync(heartbeatFile, "utf8")).at || 0; } catch {}
+        } else if (fs.existsSync(logFile)) {
+          try { lastActivityMs = fs.statSync(logFile).mtimeMs; } catch {}
+        }
+        const isStalled = isAlive && lastActivityMs > 0 && (Date.now() - lastActivityMs > 10 * 60 * 1000);
+        const effectiveAlive = isAlive && !isStalled;
+
         let logLines = [];
         if (fs.existsSync(logFile)) {
           logLines = fs.readFileSync(logFile, "utf8").trim().split(/\r?\n/).slice(-25);
@@ -403,8 +455,8 @@ async function handleAccounts() {
           startedBy: meta?.startedBy || { usn: "LOCAL", name: os.userInfo().username },
           startedAt,
           elapsedSeconds,
-          status: isAlive ? "running" : isFin ? "finished" : "stopped",
-          resumePending: !isAlive && !isFin,
+          status: effectiveAlive ? "running" : isFin ? "finished" : "stopped",
+          resumePending: !effectiveAlive && !isFin,
           resumeAutomatic: false,
           pid: pid || undefined,
           logTail: logLines,
@@ -551,9 +603,28 @@ function readCachedH200Plan(roll) {
   const cacheFile = path.join(root, "data", ".cache", `h200_plan_${roll}.json`);
   try {
     const c = JSON.parse(fs.readFileSync(cacheFile, "utf8"));
-    if (!c.error && Date.now() - c.at < 10 * 60 * 1000) return c;
+    if (!c.error) return c;
   } catch {}
   return null;
+}
+
+function writeH200Plan(roll, plan) {
+  const dir = path.join(root, "data", ".cache");
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(path.join(dir, `h200_plan_${roll}.json`), JSON.stringify({ ...plan, at: Date.now() }));
+}
+
+// Asks the server what a sync would send, without copying anything.
+function handleDatasetPlan(targetId) {
+  const roll = targetId.replace("h200-", "");
+  const r = spawnSync(process.execPath, [path.join(root, "scripts", "h200-menu.js"), "push", "--as", roll, "--plan"], {
+    cwd: root, encoding: "utf8", windowsHide: true, timeout: 180000,
+  });
+  const m = /PLAN (\{.*\})/.exec(r.stdout || "");
+  if (!m) throw new Error(`Could not check the H200 for ${roll}: ${(r.stdout || r.stderr || "").trim().split(/\r?\n/).slice(-3).join(" ")}`);
+  const plan = JSON.parse(m[1]);
+  writeH200Plan(roll, plan);
+  return { success: true, targetId, ...plan };
 }
 
 async function handleDatasetStatus() {
@@ -580,7 +651,14 @@ async function handleDatasetStatus() {
     if (fs.existsSync(syncLockDir)) {
       for (const f of fs.readdirSync(syncLockDir)) {
         if (f.startsWith("sync_") && f.endsWith(".json")) {
-          activeSyncTargets.add(f.replace("sync_", "").replace(".json", ""));
+          const lockPath = path.join(syncLockDir, f);
+          let alive = false;
+          try {
+            const lock = JSON.parse(fs.readFileSync(lockPath, "utf8"));
+            try { process.kill(lock.pid, 0); alive = true; } catch (e) { alive = e?.code === "EPERM"; }
+          } catch {}
+          if (alive) activeSyncTargets.add(f.replace("sync_", "").replace(".json", ""));
+          else { try { fs.unlinkSync(lockPath); } catch {} }
         }
       }
     }
@@ -602,6 +680,8 @@ async function handleDatasetStatus() {
       casesCount: localExport.cases,
       filesCount: plan && !plan.error ? plan.files : localExport.files,
       bytesToSync: plan && !plan.error ? plan.bytes : localExport.bytes,
+      filesSame: plan ? plan.same : null,
+      checkedAt: plan ? new Date(plan.at).toISOString() : null,
       isRemoteRoute: route.remote,
       routeLabel: route.label,
       runningJobBlocking: null,
@@ -772,6 +852,9 @@ async function handleDatasetSync(targetId, confirmed = false, isFresh = false) {
 
     const r = await runStreaming(process.execPath, pushArgs);
     if (r.status !== 0) throw new Error(`H200 push failed: ${r.stderr || r.stdout}`);
+    const sent = /Sending (\d+) file/.exec(r.stdout);
+    const same = /unchanged: (\d+) file/.exec(r.stdout);
+    writeH200Plan(roll, { files: 0, bytes: 0, same: Number(sent?.[1] || 0) + Number(same?.[1] || 0) });
     const routeMsg = route.remote ? "over Internet jump route" : "via direct local college network";
     const modeMsg = isFresh ? "Fresh re-upload" : "Incremental sync";
     return { success: true, message: `H200 files pushed (${modeMsg}) for roll ${roll} (${routeMsg}).` };
@@ -952,6 +1035,8 @@ try {
     result = await handleRuns();
   } else if (action === "dataset-status") {
     result = await handleDatasetStatus();
+  } else if (action === "dataset-plan") {
+    result = handleDatasetPlan(arg1);
   } else if (action === "dataset-sync") {
     const confirmed = arg2 === "true" || arg2 === "--yes" || process.argv.includes("--yes");
     const isFresh = arg3 === "fresh" || arg3 === "--fresh" || process.argv.includes("--fresh");
