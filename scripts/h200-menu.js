@@ -80,6 +80,9 @@ const HOLDOUT = "data/splits/holdout_80_20.json";
 
 /** Outside the college network a copy uses mobile or home data: say how much, and ask. */
 async function internetOk(bytes, what) {
+  if (process.argv.includes("--yes") || process.argv.includes("-y") || process.argv.includes("--confirm-internet")) {
+    return true;
+  }
   console.log(`You are outside the college network: this ${what} goes through pc-server-1`);
   console.log(`and uses about ${fmt(bytes)} of your internet data. On college WiFi it would not ask.`);
   return (await ask("Go ahead? [y/N] ")).toLowerCase() === "y";

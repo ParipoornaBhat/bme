@@ -167,6 +167,8 @@ export default function AdvancedTrainingPage() {
   // Sync state
   const [selectedSyncTarget, setSelectedSyncTarget] = useState<string>("");
   const [syncBusy, setSyncBusy] = useState(false);
+  const [kaggleDatasets, setKaggleDatasets] = useState<import("~/lib/training-advanced/types").KaggleDatasetOption[]>([]);
+  const [selectedDatasetOwner, setSelectedDatasetOwner] = useState<string>("");
 
   // Action Confirmation Modal
   const [confirmModal, setConfirmModal] = useState<{
@@ -209,8 +211,13 @@ export default function AdvancedTrainingPage() {
       if (dataRes.ok) {
         const dataJson = await dataRes.json();
         setDatasetTargets(dataJson.targets || []);
+        const kds = dataJson.kaggleDatasets || [];
+        setKaggleDatasets(kds);
         if (!selectedSyncTarget && dataJson.targets?.length > 0) {
           setSelectedSyncTarget(dataJson.targets[0].targetId);
+        }
+        if (kds.length > 0) {
+          setSelectedDatasetOwner((prev) => prev || kds[0].roll);
         }
       }
       if (tasksRes.ok) {
@@ -321,6 +328,7 @@ export default function AdvancedTrainingPage() {
               platform: currentSelectedTarget.platform,
               targetId: currentSelectedTarget.id,
               methodId: currentSelectedMethod.id,
+              datasetOwnerRoll: currentSelectedTarget.platform === "kaggle" ? selectedDatasetOwner : undefined,
               settings: {
                 augLevel,
                 epochs,
@@ -431,44 +439,104 @@ export default function AdvancedTrainingPage() {
       return;
     }
 
-    const warnings: string[] = [];
-    if (target.platform === "kaggle") {
-      warnings.push(`This will build the local de-identified export and upload as zip to Kaggle (${target.bytesToSync ? (target.bytesToSync / (1024 * 1024)).toFixed(1) + " MB" : "full dataset"}).`);
-    } else if (target.platform === "h200") {
-      warnings.push("This copies new/changed annotations and scans to the H200 server folder via SSH.");
+    const executeSync = async (confirmed = false) => {
+      setSyncBusy(true);
+      try {
+        const res = await fetch("/api/training-advanced/dataset", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ targetId: target.targetId, confirmed }),
+        });
+        const json = await res.json();
+        if (res.ok) {
+          if (json.requiresConfirmation) {
+            // Internet route requires confirmation
+            const sizeStr = json.formattedSize || (target.bytesToSync ? `${(target.bytesToSync / (1024 * 1024)).toFixed(1)} MB` : "data");
+            setConfirmModal({
+              open: true,
+              title: target.platform === "h200" ? "Confirm Internet Data Sync to H200" : "Confirm Kaggle Dataset Upload",
+              description: `Target: ${target.label}`,
+              warnings: [
+                target.platform === "h200"
+                  ? "H200 is connected through the Internet via jump host (pc-server-1)."
+                  : "Uploading dataset to Kaggle over your internet connection.",
+                `Data transfer size: ~${sizeStr}. This will consume your mobile / internet data!`,
+                target.platform === "h200" ? "On direct college Wi-Fi / LAN, no internet data is used and no confirmation is needed." : "On metered connections, wait for high-speed Wi-Fi.",
+              ],
+              actionLabel: "Confirm & Proceed",
+              onConfirm: async () => {
+                setConfirmModal((prev) => ({ ...prev, open: false }));
+                await executeSync(true);
+              },
+            });
+            return;
+          }
+          toast.success(json.message || "Dataset sync started in background");
+          loadData(true);
+        } else if (res.status === 409) {
+          toast.error(json.message || "Sync blocked by running training job");
+        } else {
+          toast.error(json.error || "Sync failed");
+        }
+      } catch (err: any) {
+        toast.error(err.message || "Sync request failed");
+      } finally {
+        setSyncBusy(false);
+      }
+    };
+
+    // 1. Direct local network H200:
+    // Instruction: "So ,, if itsgetting connected Direct by local network itself then no need to have this Confirmation ,..."
+    if (target.platform === "h200" && !target.isRemoteRoute) {
+      toast.info("Syncing directly over local college network (no internet data used)...");
+      executeSync(true);
+      return;
     }
 
-    setConfirmModal({
-      open: true,
-      title: "Sync Training Data to Latest",
-      description: `Target: ${target.label} (${target.platform.toUpperCase()})`,
-      warnings,
-      actionLabel: "Sync Data Now",
-      onConfirm: async () => {
-        setSyncBusy(true);
-        try {
-          const res = await fetch("/api/training-advanced/dataset", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ targetId: target.targetId }),
-          });
-          const json = await res.json();
-          if (res.ok) {
-            toast.success(json.message || "Dataset sync started in background");
-            loadData(true);
-          } else if (res.status === 409) {
-            toast.error(json.message || "Sync blocked by running training job");
-          } else {
-            toast.error(json.error || "Sync failed");
-          }
-        } catch (err: any) {
-          toast.error(err.message || "Sync request failed");
-        } finally {
-          setSyncBusy(false);
+    // 2. Internet route H200:
+    if (target.platform === "h200" && target.isRemoteRoute) {
+      const sizeStr = target.bytesToSync ? `${(target.bytesToSync / (1024 * 1024)).toFixed(1)} MB` : "estimated data";
+      setConfirmModal({
+        open: true,
+        title: "Confirm Internet Data Sync to H200",
+        description: `Target: ${target.label}`,
+        warnings: [
+          "H200 is connected through the Internet via jump host (pc-server-1).",
+          `Data sync size: ~${sizeStr}. This will consume your mobile / internet data!`,
+          "On direct college Wi-Fi / LAN, no internet data is used and no confirmation is needed.",
+        ],
+        actionLabel: "Confirm & Sync Over Internet",
+        onConfirm: async () => {
           setConfirmModal((prev) => ({ ...prev, open: false }));
-        }
-      },
-    });
+          await executeSync(true);
+        },
+      });
+      return;
+    }
+
+    // 3. Kaggle target:
+    if (target.platform === "kaggle") {
+      const sizeStr = target.bytesToSync ? `${(target.bytesToSync / (1024 * 1024)).toFixed(1)} MB` : "dataset";
+      setConfirmModal({
+        open: true,
+        title: target.hasUploaded ? "Confirm Kaggle Dataset Update" : "Confirm Kaggle Dataset Upload",
+        description: `Target: ${target.label}`,
+        warnings: [
+          `Uploading will transfer ~${sizeStr} over your internet connection to Kaggle.`,
+          "This will consume your mobile / internet upload data.",
+          "On metered data, consider waiting for high-speed Wi-Fi.",
+        ],
+        actionLabel: target.hasUploaded ? "Confirm & Update Kaggle Dataset" : "Confirm & Upload to Kaggle",
+        onConfirm: async () => {
+          setConfirmModal((prev) => ({ ...prev, open: false }));
+          await executeSync(true);
+        },
+      });
+      return;
+    }
+
+    // Local
+    executeSync(true);
   };
 
   if (loading) {
@@ -979,6 +1047,52 @@ export default function AdvancedTrainingPage() {
               </select>
             </div>
 
+            {/* Dataset selection for Kaggle / Server info for H200 */}
+            {currentSelectedTarget?.platform === "kaggle" && (
+              <div className="sm:col-span-2">
+                <label className="text-xs font-bold uppercase tracking-wider text-muted-foreground block mb-1.5">
+                  3. Kaggle Dataset Source (Account)
+                </label>
+                {kaggleDatasets.length === 0 ? (
+                  <div className="rounded-xl border border-destructive/30 bg-destructive/10 p-3 text-xs text-destructive">
+                    <p className="font-bold">No Uploaded Dataset Found</p>
+                    <p className="text-[11px] mt-0.5">
+                      No Kaggle account has an uploaded, non-empty dataset yet. Upload or sync the dataset in the Dataset Sync box below first before launching training.
+                    </p>
+                  </div>
+                ) : (
+                  <select
+                    value={selectedDatasetOwner}
+                    onChange={(e) => setSelectedDatasetOwner(e.target.value)}
+                    className="w-full rounded-xl border border-border bg-background px-3 py-2 text-xs font-semibold cursor-pointer"
+                  >
+                    {kaggleDatasets.map((kd) => (
+                      <option key={kd.roll} value={kd.roll}>
+                        {kd.label} — {kd.caseCount} scans {kd.uploadedAt ? `(Updated: ${new Date(kd.uploadedAt).toLocaleDateString("en-IN", { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" })})` : ""}
+                      </option>
+                    ))}
+                  </select>
+                )}
+                {kaggleDatasets.length > 0 && (
+                  <p className="mt-1 text-[11px] text-muted-foreground">
+                    Select which teammate&apos;s uploaded private Kaggle dataset will be mounted into this training session.
+                  </p>
+                )}
+              </div>
+            )}
+
+            {currentSelectedTarget?.platform === "h200" && (
+              <div className="sm:col-span-2 rounded-xl border border-border/50 bg-muted/20 px-3.5 py-2.5 text-xs text-muted-foreground flex items-center justify-between">
+                <div>
+                  <span className="font-semibold text-foreground">H200 Dataset Source:</span>
+                  <p className="text-[11px] mt-0.5">Uses server repository copy on this H200 student account.</p>
+                </div>
+                <span className="font-mono text-[11px] bg-background/80 px-2 py-0.5 rounded-md border border-border/60">
+                  ~/bme/data
+                </span>
+              </div>
+            )}
+
             {/* Augmentation Level */}
             <div>
               <label className="text-xs font-bold uppercase tracking-wider text-muted-foreground block mb-1.5">
@@ -1034,7 +1148,7 @@ export default function AdvancedTrainingPage() {
             </div>
             <button
               onClick={handleStartSubmit}
-              disabled={startBusy || !currentSelectedTarget?.connected}
+              disabled={startBusy || !currentSelectedTarget?.connected || (currentSelectedTarget?.platform === "kaggle" && kaggleDatasets.length === 0)}
               className="inline-flex items-center justify-center gap-2 rounded-xl bg-primary px-5 py-2.5 text-xs font-bold text-primary-foreground hover:bg-primary/90 transition-all cursor-pointer disabled:opacity-40"
             >
               {startBusy ? <Loader2 className="h-4 w-4 animate-spin" /> : <Play className="h-4 w-4" />}
@@ -1076,8 +1190,11 @@ export default function AdvancedTrainingPage() {
               const currentT = datasetTargets.find((t) => t.targetId === selectedSyncTarget);
               if (!currentT) return null;
 
+              const isKaggle = currentT.platform === "kaggle";
+              const isH200 = currentT.platform === "h200";
+
               return (
-                <div className="rounded-xl border border-border/70 bg-muted/20 p-3.5 space-y-2 text-xs">
+                <div className="rounded-xl border border-border/70 bg-muted/20 p-3.5 space-y-2.5 text-xs">
                   <div className="flex items-center justify-between">
                     <span className="text-muted-foreground font-semibold">Target Status:</span>
                     <span
@@ -1087,9 +1204,58 @@ export default function AdvancedTrainingPage() {
                           : "bg-amber-500/10 text-amber-600 dark:text-amber-400"
                       }`}
                     >
-                      {currentT.isUpToDate ? "Up to date" : "Behind latest"}
+                      {currentT.isUpToDate ? "Up to date" : currentT.isEmpty ? "Not uploaded yet" : "Update available"}
                     </span>
                   </div>
+
+                  {isH200 && (
+                    <div className="flex items-center justify-between">
+                      <span className="text-muted-foreground font-semibold">Connection Route:</span>
+                      <span
+                        className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-bold ${
+                          currentT.isRemoteRoute
+                            ? "bg-amber-500/10 text-amber-600 dark:text-amber-400"
+                            : "bg-emerald-500/10 text-emerald-600 dark:text-emerald-400"
+                        }`}
+                      >
+                        {currentT.isRemoteRoute ? "Internet Route (pc-server-1)" : "College Network (Direct)"}
+                      </span>
+                    </div>
+                  )}
+
+                  {isH200 && currentT.isRemoteRoute && (
+                    <p className="text-[11px] text-amber-700 dark:text-amber-300">
+                      Connected through pc-server-1. Copies use internet data (~{currentT.bytesToSync ? (currentT.bytesToSync / (1024 * 1024)).toFixed(1) + " MB" : "data"}) and prompt for confirmation.
+                    </p>
+                  )}
+
+                  {isH200 && !currentT.isRemoteRoute && (
+                    <p className="text-[11px] text-emerald-600 dark:text-emerald-400">
+                      Connected directly via local college network. Sync transfers without using internet data (no confirmation needed).
+                    </p>
+                  )}
+
+                  {isKaggle && (
+                    <div className="space-y-1 text-[11px] text-muted-foreground">
+                      <div>
+                        Last Uploaded:{" "}
+                        <span className="font-semibold text-foreground">
+                          {currentT.lastUpdated
+                            ? new Date(currentT.lastUpdated).toLocaleDateString("en-IN", {
+                                day: "numeric",
+                                month: "short",
+                                year: "numeric",
+                                hour: "2-digit",
+                                minute: "2-digit",
+                              })
+                            : "Never (Dataset is empty)"}
+                        </span>
+                      </div>
+                      <div>
+                        Status: <span className="text-foreground">{currentT.reason || "Checked"}</span>
+                      </div>
+                    </div>
+                  )}
 
                   <div className="text-[11px] text-muted-foreground space-y-1">
                     <div>Local Export: <span className="font-mono text-foreground">{currentT.localExportVersion}</span></div>
@@ -1109,11 +1275,27 @@ export default function AdvancedTrainingPage() {
 
                   <button
                     onClick={handleSyncDataset}
-                    disabled={syncBusy || Boolean(currentT.runningJobBlocking)}
+                    disabled={
+                      syncBusy ||
+                      Boolean(currentT.runningJobBlocking) ||
+                      (isKaggle && currentT.isUpToDate)
+                    }
                     className="w-full mt-2 inline-flex items-center justify-center gap-2 rounded-xl bg-primary px-3.5 py-2 text-xs font-bold text-primary-foreground hover:bg-primary/90 transition-all cursor-pointer disabled:opacity-40"
                   >
-                    {syncBusy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <HardDrive className="h-3.5 w-3.5" />}
-                    Sync Target to Latest
+                    {syncBusy ? (
+                      <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                    ) : (
+                      <HardDrive className="h-3.5 w-3.5" />
+                    )}
+                    {isKaggle
+                      ? currentT.isUpToDate
+                        ? "Kaggle Dataset Up to Date"
+                        : currentT.isEmpty
+                        ? "Upload Dataset to Kaggle (First Time)"
+                        : "Update Kaggle Dataset"
+                      : isH200 && currentT.isRemoteRoute
+                      ? "Sync Target Over Internet"
+                      : "Sync Target to Latest"}
                   </button>
                 </div>
               );

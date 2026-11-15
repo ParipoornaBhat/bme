@@ -24,14 +24,17 @@ export async function POST(req: NextRequest) {
 
   try {
     const body = await req.json();
-    const { targetId } = body;
+    const { targetId, confirmed } = body;
     if (!targetId) {
       return NextResponse.json({ error: "Missing targetId" }, { status: 400 });
     }
 
-    const res = await syncDataset(targetId);
+    const res = await syncDataset(targetId, Boolean(confirmed));
     if (res.refused) {
       return NextResponse.json(res, { status: 409 });
+    }
+    if (res.requiresConfirmation) {
+      return NextResponse.json(res, { status: 200 });
     }
     return NextResponse.json(res);
   } catch (err: any) {

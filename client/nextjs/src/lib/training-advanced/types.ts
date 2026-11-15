@@ -84,6 +84,17 @@ export interface AccountCard {
   currentJob: CurrentJob | null;
 }
 
+export interface KaggleDatasetOption {
+  roll: string;
+  slot?: number;
+  user: string;
+  label: string;
+  uploadedAt: string | null;
+  uploadedHash: string | null;
+  caseCount: number;
+  fileCount: number;
+}
+
 export interface TargetDatasetStatus {
   targetId: string;
   platform: PlatformType;
@@ -95,6 +106,12 @@ export interface TargetDatasetStatus {
   bytesToSync?: number;
   casesCount?: number;
   filesCount?: number;
+  isRemoteRoute?: boolean;
+  routeLabel?: string;
+  lastUpdated?: string | null;
+  hasUploaded?: boolean;
+  isEmpty?: boolean;
+  needsUpload?: boolean;
   runningJobBlocking: {
     method: string;
     status: string;

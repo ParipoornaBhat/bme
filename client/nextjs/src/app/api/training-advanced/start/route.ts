@@ -11,7 +11,7 @@ export async function POST(req: NextRequest) {
 
   try {
     const body = await req.json();
-    const { platform, targetId, methodId, settings = {} } = body;
+    const { platform, targetId, methodId, settings = {}, datasetOwnerRoll } = body;
 
     if (!platform || !targetId || !methodId) {
       return NextResponse.json({ error: "Missing required parameters (platform, targetId, methodId)" }, { status: 400 });
@@ -22,6 +22,7 @@ export async function POST(req: NextRequest) {
       targetId,
       methodId,
       settings,
+      datasetOwnerRoll,
     });
 
     return NextResponse.json(res);

@@ -551,6 +551,7 @@ async function handleDatasetStatus() {
   const env = mergedEnv();
   const all = listAccounts(env);
   const { owner } = datasetOwner(env);
+  const route = await h200Route(env);
 
   // 1. Get local export status
   let localExport = { cases: 0, files: 0, bytes: 0, hash: "unknown" };
@@ -593,26 +594,54 @@ async function handleDatasetStatus() {
       casesCount: localExport.cases,
       filesCount: localExport.files,
       bytesToSync: localExport.bytes,
+      isRemoteRoute: route.remote,
+      routeLabel: route.label,
       runningJobBlocking: blocking,
     });
   }
 
-  // Kaggle targets
-  for (const acc of all.filter(usable.kaggle)) {
-    const targetId = `kaggle-${acc.roll}-${acc.slot || 1}`;
+  // Kaggle dataset sync: 1 designated account (owner or first usable)
+  const kaggleSyncAcc = owner || all.find(usable.kaggle);
+  if (kaggleSyncAcc) {
+    const targetId = `kaggle-${kaggleSyncAcc.roll}-${kaggleSyncAcc.slot || 1}`;
     const blocking = activeRuns.get(targetId) || null;
-    const isOwner = owner && acc.roll === owner.roll && (acc.slot || 1) === (owner.slot || 1);
+
+    let hasUploaded = false;
+    let isEmpty = true;
+    let lastUpdated = null;
+    let uploadedHash = null;
+
+    const stagingDir = stagingFor(kaggleSyncAcc);
+    const appFile = path.join(stagingDir, "dataset_approval.json");
+    if (fs.existsSync(appFile)) {
+      try {
+        const appData = JSON.parse(fs.readFileSync(appFile, "utf8"));
+        uploadedHash = appData.uploaded_hash || null;
+        hasUploaded = Boolean(uploadedHash);
+        const cases = appData.case_count || 0;
+        const files = appData.file_count || 0;
+        isEmpty = !hasUploaded || (cases === 0 && files === 0);
+        lastUpdated = appData.uploaded_at || null;
+      } catch {}
+    }
+
+    const isUpToDate = hasUploaded && !isEmpty && !needsUpload;
+
     targets.push({
       targetId,
       platform: "kaggle",
-      label: `Kaggle - ${acc.kaggleUser || acc.label}${isOwner ? " (Dataset Owner)" : " (Shared View)"}`,
-      datasetVersion: needsUpload ? "pending update" : localExport.hash,
+      label: `Kaggle - ${kaggleSyncAcc.kaggleUser || kaggleSyncAcc.label} (Dataset Sync)`,
+      datasetVersion: hasUploaded ? (uploadedHash?.slice(0, 12) || "uploaded") : "not-uploaded",
       localExportVersion: localExport.hash,
-      isUpToDate: !needsUpload,
-      reason: uploadReason,
+      isUpToDate,
+      reason: isEmpty ? "Dataset empty / not uploaded" : needsUpload ? (uploadReason || "Local data changed") : "Up to date",
       casesCount: localExport.cases,
       filesCount: localExport.files,
       bytesToSync: localExport.bytes,
+      lastUpdated,
+      hasUploaded,
+      isEmpty,
+      needsUpload: !isUpToDate,
       runningJobBlocking: blocking,
     });
   }
@@ -632,11 +661,38 @@ async function handleDatasetStatus() {
     runningJobBlocking: localBlocking,
   });
 
-  return { localExport, targets };
+  // Collect available Kaggle datasets for training:
+  // Rule: If an account has not yet uploaded for first time or if its dataset is empty, DON'T show it!
+  const kaggleDatasets = [];
+  for (const acc of all.filter(usable.kaggle)) {
+    const stagingDir = stagingFor(acc);
+    const appFile = path.join(stagingDir, "dataset_approval.json");
+    if (!fs.existsSync(appFile)) continue;
+    try {
+      const appData = JSON.parse(fs.readFileSync(appFile, "utf8"));
+      const uploadedHash = appData.uploaded_hash || null;
+      const cases = appData.case_count || 0;
+      const files = appData.file_count || 0;
+      if (uploadedHash && (cases > 0 || files > 0)) {
+        kaggleDatasets.push({
+          roll: acc.roll,
+          slot: acc.slot || 1,
+          user: acc.kaggleUser || acc.kaggle?.user || acc.roll,
+          label: `${acc.name ? `${acc.name} (${acc.usn || acc.roll})` : acc.roll}`,
+          uploadedAt: appData.uploaded_at || null,
+          uploadedHash,
+          caseCount: cases,
+          fileCount: files,
+        });
+      }
+    } catch {}
+  }
+
+  return { localExport, targets, kaggleDatasets };
 }
 
 // ---------- DATASET SYNC COMMAND ---------------------------------------------
-async function handleDatasetSync(targetId) {
+async function handleDatasetSync(targetId, confirmed = false) {
   const { targets } = await handleDatasetStatus();
   const target = targets.find((t) => t.targetId === targetId);
   if (!target) {
@@ -655,25 +711,136 @@ async function handleDatasetSync(targetId) {
 
   if (target.platform === "kaggle") {
     const { owner } = datasetOwner(mergedEnv());
-    if (!owner) throw new Error("No Kaggle dataset owner configured in .env");
-    // Run export then update-dataset
-    const exp = kaggle(owner, ["export"]);
+    const syncAcc = owner || findAccount(listAccounts(mergedEnv()), targetId.replace("kaggle-", "").split("-")[0]);
+    if (!syncAcc) throw new Error("No Kaggle dataset sync account found in .env");
+
+    // Require explicit confirmation for internet data upload
+    if (!confirmed) {
+      const sizeStr = target.bytesToSync ? `${(target.bytesToSync / (1024 * 1024)).toFixed(1)} MB` : "dataset";
+      return {
+        success: false,
+        requiresConfirmation: true,
+        bytesToSync: target.bytesToSync,
+        formattedSize: sizeStr,
+        message: `Uploading dataset to Kaggle will transfer ~${sizeStr} over your internet connection. Confirmation required.`,
+      };
+    }
+
+    const exp = kaggle(syncAcc, ["export"]);
     if (exp.code !== 0) throw new Error(`De-identified export failed: ${exp.err || exp.out}`);
-    const up = kaggle(owner, ["update-dataset"]);
+    const up = kaggle(syncAcc, ["update-dataset"]);
     if (up.code !== 0) throw new Error(`Kaggle dataset upload failed: ${up.err || up.out}`);
-    return { success: true, message: "Kaggle private dataset synced to latest local export." };
+    return { success: true, message: `Kaggle private dataset synced to latest local export on ${syncAcc.label}.` };
   } else if (target.platform === "h200") {
     const roll = targetId.replace("h200-", "");
-    const r = spawnSync(process.execPath, [path.join(root, "scripts", "h200-menu.js"), "push", "--as", roll], {
+    const route = await h200Route(mergedEnv());
+
+    // Internet route safety check:
+    // If connected through Internet (jump host) and not confirmed, prompt for confirmation with size
+    if (route.remote && !confirmed) {
+      const sizeStr = target.bytesToSync ? `${(target.bytesToSync / (1024 * 1024)).toFixed(1)} MB` : "estimated data";
+      return {
+        success: false,
+        requiresConfirmation: true,
+        isRemoteRoute: true,
+        bytesToSync: target.bytesToSync,
+        formattedSize: sizeStr,
+        message: `H200 is connected through the Internet (jump host: ${route.jump || "pc-server-1"}). Syncing requires ~${sizeStr} using your internet data. Confirmation required.`,
+      };
+    }
+
+    // If local college network (route.remote === false), no confirmation needed!
+    const pushArgs = [path.join(root, "scripts", "h200-menu.js"), "push", "--as", roll];
+    if (confirmed || route.remote) {
+      pushArgs.push("--yes");
+    }
+
+    const r = spawnSync(process.execPath, pushArgs, {
       cwd: root,
       encoding: "utf8",
       stdio: "pipe",
     });
     if (r.status !== 0) throw new Error(`H200 push failed: ${r.stderr || r.stdout}`);
-    return { success: true, message: `H200 files pushed and up-to-date for roll ${roll}.` };
+    const routeMsg = route.remote ? "over Internet jump route" : "via direct local college network";
+    return { success: true, message: `H200 files pushed and up-to-date for roll ${roll} (${routeMsg}).` };
   } else {
     return { success: true, message: "Local data is the primary copy." };
   }
+}
+
+// ---------- START COMMAND ----------------------------------------------------
+async function handleStart(platform, targetId, methodId, extraJson = "{}") {
+  let extra = {};
+  try { extra = JSON.parse(extraJson || "{}"); } catch {}
+
+  const env = mergedEnv();
+  const all = listAccounts(env);
+
+  if (platform === "kaggle") {
+    const roll = targetId.replace("kaggle-", "").split("-")[0];
+    const account = findAccount(all, roll);
+    if (!account) throw new Error(`Kaggle account ${roll} not found in .env`);
+
+    const m = METHODS.find((x) => x.id === methodId);
+    if (!m) throw new Error(`Unknown method: ${methodId}`);
+
+    const meta = createRunMetadata({ account, platform: "kaggle", methodId });
+    const stagingDir = stagingFor(account);
+    fs.mkdirSync(stagingDir, { recursive: true });
+    const statePath = path.join(stagingDir, "run_state.json");
+    const existingState = kaggleLocalState(account).run || {};
+    fs.writeFileSync(statePath, JSON.stringify({ ...existingState, ...meta }, null, 2), "utf8");
+
+    const args = [
+      "run", "--confirm-launch", "--no-wait", "--mode", "full",
+      "--model-arch", m.arch || "unet3d",
+      "--kernel-slug", `bme-${methodId}`,
+      "--import-name", methodId,
+      ...KAGGLE_SETTINGS,
+    ];
+
+    const datasetOwnerRoll = extra.datasetOwnerRoll || "";
+    if (datasetOwnerRoll) {
+      const dsOwner = findAccount(all, datasetOwnerRoll);
+      if (dsOwner && (dsOwner.roll !== account.roll || (dsOwner.slot || 1) !== (account.slot || 1))) {
+        const ownerUser = kaggleUserOf(dsOwner);
+        args.push("--dataset-owner", ownerUser, "--approval-dir", stagingFor(dsOwner));
+      }
+    }
+
+    const r = kaggle(account, args, { extraEnv: { BME_RUN_METADATA: JSON.stringify(meta) } });
+    if (r.code !== 0) throw new Error(`Kaggle start failed: ${r.err || r.out}`);
+    return { success: true, message: `${methodId} launched on Kaggle for ${account.label}` };
+  } else if (platform === "h200") {
+    const roll = targetId.replace("h200-", "");
+    let h200Args = ["aug", extra.augLevel || "med", "--as", roll];
+    if (methodId.startsWith("unet-aug-")) {
+      h200Args = ["aug", methodId.replace("unet-aug-", ""), "--as", roll];
+    } else if (methodId === "unet-holdout") {
+      h200Args = ["holdout", "--as", roll];
+    } else if (methodId === "nnunet-3d") {
+      h200Args = ["best", "3d", "--as", roll];
+    } else if (methodId === "nnunet-2d") {
+      h200Args = ["best", "2d", "--as", roll];
+    }
+    const r = spawnSync(process.execPath, [path.join(root, "scripts", "h200-menu.js"), ...h200Args], {
+      cwd: root,
+      encoding: "utf8",
+      stdio: "pipe",
+    });
+    if (r.status !== 0) throw new Error(`H200 start failed: ${r.stderr || r.stdout}`);
+    return { success: true, message: `H200 job started for ${methodId} on account ${roll}` };
+  } else if (platform === "local") {
+    const r = spawnSync(process.execPath, [path.join(root, "scripts", "train-local.js"), methodId], {
+      cwd: root,
+      encoding: "utf8",
+      stdio: "pipe",
+    });
+    if (r.status !== 0) throw new Error(`Local start failed: ${r.stderr || r.stdout}`);
+    return { success: true, message: `Local training started for ${methodId}` };
+  }
+
+  throw new Error(`Unsupported platform: ${platform}`);
 }
 
 // ---------- CANCEL COMMAND ---------------------------------------------------
@@ -709,7 +876,7 @@ async function handleCancel(platform, targetId, jobId) {
 }
 
 // ---------- CLI DISPATCHER ---------------------------------------------------
-const [action, arg1, arg2, arg3] = process.argv.slice(2);
+const [action, arg1, arg2, arg3, arg4] = process.argv.slice(2);
 
 try {
   let result = null;
@@ -720,7 +887,10 @@ try {
   } else if (action === "dataset-status") {
     result = await handleDatasetStatus();
   } else if (action === "dataset-sync") {
-    result = await handleDatasetSync(arg1);
+    const confirmed = arg2 === "true" || arg2 === "--yes" || process.argv.includes("--yes");
+    result = await handleDatasetSync(arg1, confirmed);
+  } else if (action === "start") {
+    result = await handleStart(arg1, arg2, arg3, arg4);
   } else if (action === "cancel") {
     result = await handleCancel(arg1, arg2, arg3);
   } else {

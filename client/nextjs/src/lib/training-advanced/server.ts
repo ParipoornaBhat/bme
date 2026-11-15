@@ -83,11 +83,27 @@ export async function fetchRuns(): Promise<RunItem[]> {
   return runBridgeCommand(["runs"], 20000);
 }
 
-export async function fetchDatasetStatus(): Promise<{ localExport: any; targets: TargetDatasetStatus[] }> {
+export async function fetchDatasetStatus(): Promise<{
+  localExport: any;
+  targets: TargetDatasetStatus[];
+  kaggleDatasets?: import("./types").KaggleDatasetOption[];
+}> {
   return runBridgeCommand(["dataset-status"], 25000);
 }
 
-export async function syncDataset(targetId: string): Promise<{ success: boolean; refused?: boolean; message: string; taskId?: string }> {
+export async function syncDataset(
+  targetId: string,
+  confirmed = false
+): Promise<{
+  success: boolean;
+  refused?: boolean;
+  requiresConfirmation?: boolean;
+  isRemoteRoute?: boolean;
+  bytesToSync?: number;
+  formattedSize?: string;
+  message: string;
+  taskId?: string;
+}> {
   // First check if target is locked by a running job
   const st = await fetchDatasetStatus();
   const target = st.targets.find((t) => t.targetId === targetId);
@@ -99,6 +115,30 @@ export async function syncDataset(targetId: string): Promise<{ success: boolean;
       success: false,
       refused: true,
       message: `Cannot sync: ${target.runningJobBlocking.method} is currently running on ${target.label}. Updating dataset while training would corrupt the run state.`,
+    };
+  }
+
+  // Pre-check for Internet route on H200 or Kaggle without confirmation:
+  if (target.platform === "h200" && target.isRemoteRoute && !confirmed) {
+    const formattedSize = target.bytesToSync ? `${(target.bytesToSync / (1024 * 1024)).toFixed(1)} MB` : "estimated size";
+    return {
+      success: false,
+      requiresConfirmation: true,
+      isRemoteRoute: true,
+      bytesToSync: target.bytesToSync,
+      formattedSize,
+      message: `H200 is connected through the Internet (jump host: pc-server-1). Syncing requires ~${formattedSize} using your internet data. Confirmation required.`,
+    };
+  }
+
+  if (target.platform === "kaggle" && !confirmed) {
+    const formattedSize = target.bytesToSync ? `${(target.bytesToSync / (1024 * 1024)).toFixed(1)} MB` : "dataset";
+    return {
+      success: false,
+      requiresConfirmation: true,
+      bytesToSync: target.bytesToSync,
+      formattedSize,
+      message: `Uploading dataset to Kaggle requires ~${formattedSize} over your internet connection. Confirmation required.`,
     };
   }
 
@@ -114,8 +154,11 @@ export async function syncDataset(targetId: string): Promise<{ success: boolean;
   };
   saveTask(task);
 
+  const bridgeArgs = ["dataset-sync", targetId];
+  if (confirmed) bridgeArgs.push("true");
+
   // Run in background process
-  const child = spawn(process.execPath, [bridgeScript, "dataset-sync", targetId], {
+  const child = spawn(process.execPath, [bridgeScript, ...bridgeArgs], {
     cwd: root,
     detached: true,
     stdio: ["ignore", "pipe", "pipe"],
@@ -147,6 +190,7 @@ export async function startJob({
   targetId,
   methodId,
   settings,
+  datasetOwnerRoll,
 }: {
   platform: PlatformType;
   targetId: string;
@@ -157,6 +201,7 @@ export async function startJob({
     folds?: number;
     holdout?: boolean;
   };
+  datasetOwnerRoll?: string;
 }): Promise<{ success: boolean; message: string; taskId: string }> {
   const taskId = `start-${Date.now()}`;
   const task: BackgroundTask = {
@@ -170,38 +215,15 @@ export async function startJob({
   };
   saveTask(task);
 
-  let scriptPath = "";
-  let args: string[] = [];
-
-  if (platform === "h200") {
-    const roll = targetId.replace("h200-", "");
-    scriptPath = path.join(root, "scripts", "h200-menu.js");
-    if (methodId.startsWith("unet-aug-")) {
-      const lvl = methodId.replace("unet-aug-", "");
-      args = ["aug", lvl, "--as", roll];
-    } else if (methodId === "unet-holdout") {
-      args = ["holdout", "--as", roll];
-    } else if (methodId === "nnunet-3d") {
-      args = ["best", "3d", "--as", roll];
-    } else if (methodId === "nnunet-2d") {
-      args = ["best", "2d", "--as", roll];
-    } else {
-      args = ["aug", settings.augLevel || "med", "--as", roll];
+  const child = spawn(
+    process.execPath,
+    [bridgeScript, "start", platform, targetId, methodId, JSON.stringify({ ...settings, datasetOwnerRoll })],
+    {
+      cwd: root,
+      detached: true,
+      stdio: ["ignore", "pipe", "pipe"],
     }
-  } else if (platform === "local") {
-    scriptPath = path.join(root, "scripts", "train-local.js");
-    args = [methodId];
-  } else if (platform === "kaggle") {
-    // Handled via kaggle pipeline runner
-    scriptPath = path.join(root, "scripts", "train.js");
-    args = [methodId];
-  }
-
-  const child = spawn(process.execPath, [scriptPath, ...args], {
-    cwd: root,
-    detached: true,
-    stdio: ["ignore", "pipe", "pipe"],
-  });
+  );
 
   let log = "";
   child.stdout?.on("data", (chunk) => { log += chunk; });
@@ -210,7 +232,7 @@ export async function startJob({
   child.on("exit", (code) => {
     task.status = code === 0 ? "completed" : "failed";
     task.endedAt = new Date().toISOString();
-    task.message = code === 0 ? `Run ${methodId} finished successfully.` : `Run ${methodId} stopped with code ${code}`;
+    task.message = code === 0 ? `Run ${methodId} launched successfully.` : `Run ${methodId} failed with exit code ${code}`;
     task.log = log.split(/\r?\n/).slice(-30);
     saveTask(task);
   });
