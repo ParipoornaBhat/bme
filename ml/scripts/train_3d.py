@@ -179,10 +179,10 @@ def normalize(raw: np.ndarray, denoise: bool = True, n4: bool = False) -> np.nda
     return out
 
 
-def pad_volume(vol: np.ndarray, patch=PATCH) -> np.ndarray:
+def pad_volume(vol: np.ndarray, patch=PATCH, constant_values=0) -> np.ndarray:
     pads = [(0, max(0, patch[i] - vol.shape[i])) for i in range(3)]
     if any(b for _, b in pads):
-        return np.pad(vol, pads)
+        return np.pad(vol, pads, constant_values=constant_values)
     return vol
 
 
@@ -369,19 +369,24 @@ AUG_LEVELS = {
 }
 
 
-def augment_level(image: np.ndarray, labels: np.ndarray, rng: np.random.Generator, lv: dict):
+def augment_level(image: np.ndarray, labels: np.ndarray, rng: np.random.Generator, lv: dict, sdf: np.ndarray | None = None):
     """Flips and intensity steps of one AUG_LEVELS preset. Rotation and zoom are
     applied earlier, when the patch is cut (spatial_crop)."""
+    res_sdf = sdf.copy() if sdf is not None else None
     for ax in lv["flip_axes"]:
         if rng.random() < 0.5:
             image = np.flip(image, ax)
             labels = np.flip(labels, ax)
+            if res_sdf is not None:
+                res_sdf = np.flip(res_sdf, ax)
     image = _mri_intensity_augment(
         image, rng,
         apply_noise=(lv["p_noise"] > 0 and rng.random() < lv["p_noise"]),
         p_gamma=lv["p_gamma"], p_contrast=lv["p_contrast"], p_shading=lv["p_shading"],
         p_scale_shift=lv["p_bright"], p_blur=lv["p_blur"], p_lowres=lv["p_lowres"],
     )
+    if sdf is not None:
+        return np.ascontiguousarray(image, dtype=np.float32), np.ascontiguousarray(labels), np.ascontiguousarray(res_sdf)
     return np.ascontiguousarray(image, dtype=np.float32), np.ascontiguousarray(labels)
 
 
@@ -392,7 +397,8 @@ def apply_augmentation(
     do_flip: bool = True,
     do_intensity: bool = True,
     do_noise: bool = True,
-) -> tuple[np.ndarray, np.ndarray]:
+    sdf_patch: np.ndarray | None = None,
+) -> tuple[np.ndarray, np.ndarray] | tuple[np.ndarray, np.ndarray, np.ndarray]:
     """
     Apply 3D medical image augmentations in memory.
     Preserves spatial alignment between img_patch and lbl_patch.
@@ -400,15 +406,18 @@ def apply_augmentation(
       - Flip: left-right horizontal flip along axis 1 (width) with p=0.5. No z-flips.
       - Intensity: gamma, contrast, synthetic coil shading, scale/shift, clipped to [0, 1].
       - Noise: additive Gaussian with sigma=0.01, clipped to [0, 1].
-      - Labels: NEVER modified by intensity scaling or noise.
+      - Labels & SDF: NEVER modified by intensity scaling or noise.
     """
     img = img_patch.copy()
     lbl = lbl_patch.copy()
+    sdf = sdf_patch.copy() if sdf_patch is not None else None
 
     # 1. Left-right horizontal flip (axis 1)
     if do_flip and rng.random() < 0.5:
         img = np.ascontiguousarray(np.flip(img, axis=1))
         lbl = np.ascontiguousarray(np.flip(lbl, axis=1))
+        if sdf is not None:
+            sdf = np.ascontiguousarray(np.flip(sdf, axis=1))
 
     # 2 & 3. MRI intensity transforms & Gaussian noise (image only)
     if do_intensity or do_noise:
@@ -422,15 +431,20 @@ def apply_augmentation(
             apply_noise=do_noise,
         )
 
+    if sdf_patch is not None:
+        return img, lbl, sdf
     return img, lbl
 
 
-def augment(image: np.ndarray, labels: np.ndarray, rng: np.random.Generator):
+def augment(image: np.ndarray, labels: np.ndarray, rng: np.random.Generator, sdf: np.ndarray | None = None):
     """In-plane flips + scanner-invariant MRI intensity augmentation (gamma, contrast, coil shading)."""
+    res_sdf = sdf.copy() if sdf is not None else None
     for ax in (0, 1):
         if rng.random() < 0.5:
             image = np.flip(image, ax)
             labels = np.flip(labels, ax)
+            if res_sdf is not None:
+                res_sdf = np.flip(res_sdf, ax)
     if rng.random() < 0.85:
         image = _mri_intensity_augment(
             image,
@@ -443,6 +457,8 @@ def augment(image: np.ndarray, labels: np.ndarray, rng: np.random.Generator):
         )
     else:
         image = np.clip(image, 0.0, 1.0).astype(np.float32)
+    if sdf is not None:
+        return np.ascontiguousarray(image, dtype=np.float32), np.ascontiguousarray(labels), np.ascontiguousarray(res_sdf)
     return np.ascontiguousarray(image, dtype=np.float32), np.ascontiguousarray(labels)
 
 
@@ -531,7 +547,8 @@ def back_to_shape(mask: np.ndarray, shape) -> np.ndarray:
 
 def spatial_crop(image: np.ndarray, labels: np.ndarray, origin, patch, rng: np.random.Generator,
                  p_rot: float = 0.5, p_scale: float = 0.5, max_deg: float = 30.0,
-                 scale_range: tuple[float, float] = (0.7, 1.4)):
+                 scale_range: tuple[float, float] = (0.7, 1.4),
+                 sdf: np.ndarray | None = None):
     """Cut one patch, rotated and/or zoomed in-plane about its centre.
 
     nnU-Net's defaults (rotation within +-30 deg, scaling 0.7-1.4, each with
@@ -543,7 +560,11 @@ def spatial_crop(image: np.ndarray, labels: np.ndarray, origin, patch, rng: np.r
     rot = rng.random() < p_rot
     scl = rng.random() < p_scale
     if not (rot or scl):
-        return crop(image, origin, patch).astype(np.float32), crop(labels, origin, patch)
+        res_img = crop(image, origin, patch).astype(np.float32)
+        res_lab = crop(labels, origin, patch)
+        if sdf is not None:
+            return res_img, res_lab, crop(sdf, origin, patch)
+        return res_img, res_lab
     theta = np.deg2rad(rng.uniform(-max_deg, max_deg)) if rot else 0.0
     s = rng.uniform(*scale_range) if scl else 1.0
     m2 = np.array([[np.cos(theta), -np.sin(theta)], [np.sin(theta), np.cos(theta)]]) / s
@@ -576,6 +597,12 @@ def spatial_crop(image: np.ndarray, labels: np.ndarray, origin, patch, rng: np.r
     lab = F.grid_sample(t_lab, g, mode="nearest", padding_mode="zeros", align_corners=True)
     img = img.squeeze(1).permute(1, 2, 0).numpy()
     lab = lab.squeeze(1).permute(1, 2, 0).numpy()
+    if sdf is not None:
+        sub_sdf = np.asarray(sdf[lo[0]:hi[0], lo[1]:hi[1], z0:z1], dtype=np.float32)
+        t_sdf = torch.from_numpy(np.ascontiguousarray(sub_sdf)).permute(2, 0, 1).unsqueeze(1)
+        s_out = F.grid_sample(t_sdf, g, mode="bilinear", padding_mode="border", align_corners=True)
+        res_sdf = s_out.squeeze(1).permute(1, 2, 0).numpy().astype(np.int8)
+        return np.clip(img, 0, 1).astype(np.float32), lab.astype(np.uint8), res_sdf
     return np.clip(img, 0, 1).astype(np.float32), lab.astype(np.uint8)
 
 
@@ -662,7 +689,7 @@ def worklist_class(base: Path) -> dict[str, str]:
     return c_cls
 
 
-def load_case(base: Path, case_id: str, n4: bool = False) -> dict | None:
+def load_case(base: Path, case_id: str, n4: bool = False, compute_sdf: bool = False) -> dict | None:
     vol = volume_path(base, case_id)
     ann_dir = None
     for candidate in [
@@ -693,13 +720,17 @@ def load_case(base: Path, case_id: str, n4: bool = False) -> dict | None:
         placed = sanitize_labels(np.asanyarray(lab_img.dataobj))
         norm = normalize(np.asanyarray(img.dataobj), n4=n4)
         spacing = tuple(float(abs(z)) or 1.0 for z in img.header.get_zooms()[:3])
-        return {
+        ret = {
             "id": case_id,
             "image": norm.astype(np.float32),
             "labels": placed,
             "bme_voxels": int((placed == 2).sum()),
             "spacing": spacing,
         }
+        if compute_sdf:
+            has_bme = (placed == 2).any()
+            ret["sdf"] = compute_sdf_3d(placed == 2) if has_bme else np.full(placed.shape, 127, dtype=np.int8)
+        return ret
 
     seg = case_ann / f"{case_id}.seg.nrrd"
     if not seg.exists() or not vol.exists():
@@ -726,13 +757,17 @@ def load_case(base: Path, case_id: str, n4: bool = False) -> dict | None:
     spacing = tuple(float(abs(z)) or 1.0 for z in img.header.get_zooms()[:3])
     for note in notes:
         print(f"  {case_id}  {note}", flush=True)
-    return {
+    ret = {
         "id": case_id,
         "image": norm.astype(np.float32),
         "labels": placed,
         "bme_voxels": int((placed == 2).sum()),
         "spacing": spacing,
     }
+    if compute_sdf:
+        has_bme = (placed == 2).any()
+        ret["sdf"] = compute_sdf_3d(placed == 2) if has_bme else np.full(placed.shape, 127, dtype=np.int8)
+    return ret
 
 
 class UNet3D(nn.Module):
@@ -1016,8 +1051,11 @@ class MedNeXt3D(nn.Module):
 
 
 class AttentionGate3d(nn.Module):
-    def __init__(self, skip_ch, gate_ch, inter):
+    def __init__(self, skip_ch=None, gate_ch=None, inter=None, f_g=None, f_l=None, f_int=None):
         super().__init__()
+        skip_ch = skip_ch if skip_ch is not None else f_l
+        gate_ch = gate_ch if gate_ch is not None else f_g
+        inter = inter if inter is not None else f_int
         self.theta = nn.Conv3d(skip_ch, inter, 1, bias=False)
         self.phi = nn.Conv3d(gate_ch, inter, 1, bias=False)
         self.psi = nn.Sequential(nn.ReLU(inplace=True), nn.Conv3d(inter, 1, 1), nn.Sigmoid())
@@ -1026,6 +1064,9 @@ class AttentionGate3d(nn.Module):
         if gate.shape[-3:] != skip.shape[-3:]:
             gate = nn.functional.interpolate(gate, size=skip.shape[-3:], mode="nearest")
         return skip * self.psi(self.theta(skip) + self.phi(gate))
+
+
+AttentionGate3D = AttentionGate3d
 
 
 class AttentionUNet3D(nn.Module):
@@ -1264,6 +1305,23 @@ def targets(labels: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
     return torch.stack([bone, bme], 0), valid
 
 
+def compute_sdf_3d(mask: np.ndarray, max_dist: float = 10.0) -> np.ndarray:
+    """Computes normalized Signed Distance Field (SDF) for a 3D binary mask.
+    Points inside gt have negative distance: [-1.0, 0.0)
+    Points outside gt have positive distance: (0.0, +1.0]
+    Points on boundary have d ~ 0.
+    Empty masks return all 1.0 (pure penalty).
+    Returns int8 array (-127 to 127) for minimal memory footprint (3.9 MB/case).
+    """
+    if not mask.any():
+        return np.full(mask.shape, 127, dtype=np.int8)
+    pos = ndi.distance_transform_edt(mask)
+    neg = ndi.distance_transform_edt(~mask)
+    sdf = (neg - pos).astype(np.float32)
+    sdf_norm = np.clip(sdf / max(1.0, float(max_dist)), -1.0, 1.0)
+    return (sdf_norm * 127.0).astype(np.int8)
+
+
 def dice_focal(
     logits: torch.Tensor,
     target: torch.Tensor,
@@ -1273,8 +1331,11 @@ def dice_focal(
     tversky_alpha: float = 0.5,
     tversky_beta: float = 0.5,
     label_smoothing: float = 0.0,
+    sdf: torch.Tensor | None = None,
+    boundary_weight: float = 0.0,
+    soft_margin: bool = False,
 ) -> torch.Tensor:
-    """Tversky/Dice + AMP-safe Focal loss. Channel 1 (edema) supports asymmetric Tversky (alpha<beta) to stop FN collapse."""
+    """Tversky/Dice + AMP-safe Focal loss with optional 3D Boundary Loss and distance-based soft margin."""
     prob = torch.sigmoid(logits.float()).clamp(1e-4, 1.0 - 1e-4)
     loss = logits.new_zeros((), dtype=torch.float32)
     denom_v = valid.sum().clamp(min=1.0)
@@ -1282,6 +1343,15 @@ def dice_focal(
     for c in range(2):
         p = prob[c]
         t = target[c].float()
+
+        # Distance-based soft margin smoothing on transitional boundary voxels (BME channel)
+        if c == 1 and soft_margin and sdf is not None:
+            # 1.5 voxels threshold corresponds to 1.5 / 10.0 = 0.15 in normalized distance
+            margin_mask = (sdf.abs() <= 0.15) & (valid > 0.5)
+            # Soften target from 1.0 -> 0.85 (inside margin) and from 0.0 -> 0.15 (outside margin)
+            t = torch.where(margin_mask & (t > 0.5), torch.full_like(t, 0.85), t)
+            t = torch.where(margin_mask & (t <= 0.5), torch.full_like(t, 0.15), t)
+
         pv, tv = p * valid, t * valid
         tp = (pv * tv).sum()
         if c == 1 and (abs(tversky_alpha - 0.5) > 1e-6 or abs(tversky_beta - 0.5) > 1e-6):
@@ -1296,6 +1366,13 @@ def dice_focal(
         focal = ((1.0 - pt).pow(gamma) * bce * valid).sum() / denom_v
         w = 1.0 if c == 0 else bme_weight
         loss = loss + w * (region_loss + focal)
+
+    # 3D Boundary Loss component on BME channel (scales with distance from lesion border)
+    if boundary_weight > 0.0 and sdf is not None:
+        p_bme = prob[1]
+        b_loss = (sdf * p_bme * valid).sum() / denom_v
+        loss = loss + float(boundary_weight) * b_loss
+
     return loss
 
 
@@ -2126,6 +2203,18 @@ def main():
                     help="Tversky FP weight on edema (default: 0.3 for orthogate_mednext, 0.5 otherwise)")
     ap.add_argument("--tversky-beta", type=float, default=None,
                     help="Tversky FN weight on edema (default: 0.7 for orthogate_mednext, 0.5 otherwise)")
+    ap.add_argument("--boundary-loss", dest="boundary_loss", action="store_true", default=None,
+                    help="Enable 3D Boundary Loss with Signed Distance Field (default: True for orthogate_mednext)")
+    ap.add_argument("--no-boundary-loss", dest="boundary_loss", action="store_false",
+                    help="Disable 3D Boundary Loss")
+    ap.add_argument("--boundary-weight", type=float, default=0.25,
+                    help="Maximum weight for 3D Boundary Loss after warmup (default: 0.25)")
+    ap.add_argument("--boundary-warmup", type=int, default=10,
+                    help="Warmup epochs before Boundary Loss reaches full weight (default: 10)")
+    ap.add_argument("--soft-margin", dest="soft_margin", action="store_true", default=True,
+                    help="Enable distance-based target softening on transitional margin voxels (default: True)")
+    ap.add_argument("--no-soft-margin", dest="soft_margin", action="store_false",
+                    help="Disable distance-based soft margin smoothing")
     ap.add_argument("--gaussian-window", dest="gaussian_window", action="store_true", default=True,
                     help="Weight sliding-window predictions with a 3D Gaussian center kernel (default: True)")
     ap.add_argument("--no-gaussian-window", dest="gaussian_window", action="store_false",
@@ -2241,6 +2330,12 @@ def main():
     eff_norm_type = "group" if (args.model_arch == "orthogate_mednext" and args.norm_type == "instance") else args.norm_type
     eff_tversky_alpha = float(args.tversky_alpha) if args.tversky_alpha is not None else (0.3 if args.model_arch == "orthogate_mednext" else 0.5)
     eff_tversky_beta = float(args.tversky_beta) if args.tversky_beta is not None else (0.7 if args.model_arch == "orthogate_mednext" else 0.5)
+    eff_boundary_loss = bool(args.boundary_loss if args.boundary_loss is not None else (args.model_arch == "orthogate_mednext"))
+    if eff_boundary_loss:
+        data_config["boundary_loss"] = True
+        data_config["boundary_weight"] = float(args.boundary_weight)
+        data_config["boundary_warmup"] = int(args.boundary_warmup)
+        data_config["soft_margin"] = bool(args.soft_margin)
     if eff_norm_type != "instance":
         data_config["norm_type"] = eff_norm_type
 
@@ -2298,14 +2393,17 @@ def main():
     t_sampling_total = 0.0
     for n, cid in enumerate(case_ids, start=1):
         print(f"Reading scan {n}/{len(case_ids)}. Cutting patches, then releasing the scan.", flush=True)
-        item = load_case(base, cid, n4=args.n4)
+        item = load_case(base, cid, n4=args.n4, compute_sdf=eff_boundary_loss)
         if not item:
             continue
         if tgt_spacing:
             item["image"], item["labels"] = to_spacing(item["image"], item["labels"], item["spacing"], tgt_spacing)
             item["bme_voxels"] = int((item["labels"] == 2).sum())
+            if eff_boundary_loss:
+                item["sdf"] = compute_sdf_3d(item["labels"] == 2) if item["bme_voxels"] > 0 else np.full(item["labels"].shape, 127, dtype=np.int8)
         image = pad_volume(item["image"], patch)
         labels = pad_volume(item["labels"], patch)
+        sdf_pad = pad_volume(item["sdf"], patch, constant_values=127) if "sdf" in item else None
         case = {
             "id": item["id"],
             "patient_id": patients.get(item["id"], "").strip(),
@@ -2317,18 +2415,26 @@ def main():
             case["image"] = image.astype(np.float16)
             case["labels"] = labels
             case["lesion_pts"] = np.argwhere(labels == 2).astype(np.int32)
+            if sdf_pad is not None:
+                case["sdf"] = sdf_pad
         else:
             t_s0 = time.time()
-            patches, patch_labels = [], []
+            patches, patch_labels, patch_sdfs = [], [], []
             for _ in range(args.patches_per_case):
                 origin = sample_origin(image.shape, labels, rng_load, sampling_mix_dict, patch)
                 patches.append(np.ascontiguousarray(crop(image, origin, patch)))
                 patch_labels.append(np.ascontiguousarray(crop(labels, origin, patch)))
+                if sdf_pad is not None:
+                    patch_sdfs.append(np.ascontiguousarray(crop(sdf_pad, origin, patch)))
             t_sampling_total += (time.time() - t_s0)
             case["patches"] = patches
             case["patch_labels"] = patch_labels
+            if sdf_pad is not None:
+                case["patch_sdfs"] = patch_sdfs
         cases.append(case)
         del item, image, labels
+        if sdf_pad is not None:
+            del sdf_pad
         release()
     t_load_total = max(0.0, (time.time() - t_load_start) - t_sampling_total)
     if len(cases) < 2:
@@ -2663,6 +2769,7 @@ def main():
             random.shuffle(order_cases)
             items = []
             for case in order_cases:
+                case_sdf = case.get("sdf") if eff_boundary_loss else None
                 if args.resample:
                     for _ in range(args.patches_per_case):
                         origin = sample_origin(case["image"].shape, case["labels"], rng_epoch_data,
@@ -2670,34 +2777,51 @@ def main():
                         if aug_level:
                             items.append(spatial_crop(case["image"], case["labels"], origin, patch, rng_epoch_data,
                                                       p_rot=aug_level["p_rot"], p_scale=aug_level["p_zoom"],
-                                                      max_deg=aug_level["max_deg"], scale_range=aug_level["zoom"]))
+                                                      max_deg=aug_level["max_deg"], scale_range=aug_level["zoom"],
+                                                      sdf=case_sdf))
                         elif args.aug_spatial:
-                            items.append(spatial_crop(case["image"], case["labels"], origin, patch, rng_epoch_data, p_rot=args.aug_p_rot, p_scale=args.aug_p_scale))
+                            items.append(spatial_crop(case["image"], case["labels"], origin, patch, rng_epoch_data,
+                                                      p_rot=args.aug_p_rot, p_scale=args.aug_p_scale,
+                                                      sdf=case_sdf))
                         else:
-                            items.append((crop(case["image"], origin, patch).astype(np.float32),
-                                          crop(case["labels"], origin, patch)))
+                            im_c = crop(case["image"], origin, patch).astype(np.float32)
+                            lb_c = crop(case["labels"], origin, patch)
+                            if case_sdf is not None:
+                                sdf_c = crop(case_sdf, origin, patch)
+                                items.append((im_c, lb_c, sdf_c))
+                            else:
+                                items.append((im_c, lb_c))
                 else:
-                    items.extend(zip(case["patches"], case["patch_labels"]))
+                    if case_sdf is not None and "patch_sdfs" in case:
+                        items.extend(zip(case["patches"], case["patch_labels"], case["patch_sdfs"]))
+                    else:
+                        items.extend(zip(case["patches"], case["patch_labels"]))
             random.shuffle(items)
             if has_aug3d:
                 items = [
-                    apply_augmentation(im, lb, rng_epoch_data,
-                                       do_flip=do_flip, do_intensity=do_intensity, do_noise=do_noise)
-                    for im, lb in items
+                    apply_augmentation(it[0], it[1], rng_epoch_data,
+                                       do_flip=do_flip, do_intensity=do_intensity, do_noise=do_noise,
+                                       sdf_patch=(it[2] if len(it) > 2 else None))
+                    for it in items
                 ]
             if args.augment:
-                items = [augment(im, lb, rng_epoch_data) for im, lb in items]
+                items = [augment(it[0], it[1], rng_epoch_data, sdf=(it[2] if len(it) > 2 else None)) for it in items]
             if aug_level:
-                items = [augment_level(im, lb, rng_epoch_data, aug_level) for im, lb in items]
+                items = [augment_level(it[0], it[1], rng_epoch_data, aug_level, sdf=(it[2] if len(it) > 2 else None)) for it in items]
             t_data_total += (time.time() - t_d0)
 
             for i in range(0, len(items), args.batch):
                 chunk = items[i: i + args.batch]
                 t_d0 = time.time()
-                x = torch.from_numpy(np.stack([im for im, _ in chunk])).float().unsqueeze(1).to(device)
+                x = torch.from_numpy(np.stack([it[0] for it in chunk])).float().unsqueeze(1).to(device)
                 if args.channels_last_3d:
                     x = x.to(memory_format=torch.channels_last_3d)
-                lab = torch.from_numpy(np.stack([lb for _, lb in chunk])).to(device)
+                lab = torch.from_numpy(np.stack([it[1] for it in chunk])).to(device)
+                has_sdf_chunk = (len(chunk[0]) > 2 and chunk[0][2] is not None)
+                if has_sdf_chunk:
+                    sdf_chunk = torch.from_numpy(np.stack([it[2].astype(np.float32) / 127.0 for it in chunk])).to(device)
+                else:
+                    sdf_chunk = None
                 t_data_total += (time.time() - t_d0)
 
                 t_tr0 = time.time()
@@ -2720,7 +2844,15 @@ def main():
                 logits_fp32 = logits.float()
                 loss_seg = logits_fp32.new_zeros(())
                 batch_tgts = [targets(lab[b]) for b in range(len(chunk))]
+
+                cur_boundary_weight = 0.0
+                if eff_boundary_loss and epoch >= args.boundary_warmup:
+                    ramp_epochs = max(1, (args.epochs - args.boundary_warmup) // 2)
+                    progress = min(1.0, (epoch - args.boundary_warmup) / float(ramp_epochs))
+                    cur_boundary_weight = float(args.boundary_weight) * progress
+
                 for b, (tgt, valid) in enumerate(batch_tgts):
+                    b_sdf = sdf_chunk[b] if sdf_chunk is not None else None
                     loss_seg = loss_seg + dice_focal(
                         logits_fp32[b],
                         tgt,
@@ -2728,6 +2860,9 @@ def main():
                         bme_weight=args.bme_loss_weight,
                         tversky_alpha=eff_tversky_alpha,
                         tversky_beta=eff_tversky_beta,
+                        sdf=b_sdf,
+                        boundary_weight=cur_boundary_weight,
+                        soft_margin=bool(args.soft_margin),
                     )
                 loss_seg = loss_seg / len(chunk)
 
@@ -3018,6 +3153,9 @@ def main():
                     "gaussian_window": bool(args.gaussian_window),
                     "tversky_alpha": eff_tversky_alpha,
                     "tversky_beta": eff_tversky_beta,
+                    "boundary_loss": eff_boundary_loss,
+                    "boundary_weight": float(args.boundary_weight) if eff_boundary_loss else 0.0,
+                    "soft_margin": bool(args.soft_margin) if eff_boundary_loss else False,
                     "val_tta": bool(args.val_tta),
                     "n4": bool(args.n4),
                 },
@@ -3092,6 +3230,9 @@ def main():
             "norm_type": getattr(model, "norm_type", eff_norm_type),
             "gaussian_window": bool(args.gaussian_window),
             "tversky_beta": eff_tversky_beta,
+            "boundary_loss": eff_boundary_loss,
+            "boundary_weight": float(args.boundary_weight) if eff_boundary_loss else 0.0,
+            "soft_margin": bool(args.soft_margin) if eff_boundary_loss else False,
             "val_tta": bool(args.val_tta),
             "n4": bool(args.n4),
             "base_channels": getattr(model, "base_channels", args.base_channels),
@@ -3191,6 +3332,9 @@ def main():
             "norm_type": getattr(model, "norm_type", eff_norm_type),
             "gaussian_window": bool(args.gaussian_window),
             "tversky_beta": eff_tversky_beta,
+            "boundary_loss": eff_boundary_loss,
+            "boundary_weight": float(args.boundary_weight) if eff_boundary_loss else 0.0,
+            "soft_margin": bool(args.soft_margin) if eff_boundary_loss else False,
             "val_tta": bool(args.val_tta),
             "n4": bool(args.n4),
             "base_channels": getattr(model, "base_channels", args.base_channels),
