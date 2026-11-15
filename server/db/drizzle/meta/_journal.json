@@ -36,6 +36,20 @@
       "when": 1794668071406,
       "tag": "0004_review_site",
       "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "7",
+      "when": 1794708466160,
+      "tag": "0005_supersede_owner_log",
+      "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "7",
+      "when": 1794709696683,
+      "tag": "0006_case_review",
+      "breakpoints": true
     }
   ]
 }

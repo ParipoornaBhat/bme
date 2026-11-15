@@ -14,6 +14,138 @@ if (fs.existsSync(tempDrizzleFile)) {
   }
 }
 
+test("rule 0 (tombstone): no local file returns none", () => {
+  const remoteTombstoned = {
+    sha: "sha-remote",
+    hasBone: false,
+    updatedAtMs: 2000,
+    scanFingerprint: "fp-1",
+    deletedAt: new Date(),
+    deletedReason: "superseded",
+    supersededBy: "DrSmith",
+  };
+
+  assert.equal(
+    decide({
+      caseId: "BME-001",
+      annotator: "alice",
+      local: null,
+      remote: remoteTombstoned,
+      state: null,
+      me: "alice",
+      localScanFingerprint: "fp-1",
+    }),
+    "none"
+  );
+
+  assert.equal(
+    decide({
+      caseId: "BME-001",
+      annotator: "alice",
+      local: null,
+      remote: remoteTombstoned,
+      state: { sha: "sha-some" },
+      me: "alice",
+      localScanFingerprint: "fp-1",
+    }),
+    "none"
+  );
+});
+
+test("rule 0 (tombstone): local file exists and sha equals remote sha or state sha equals local sha returns retire-local", () => {
+  const remoteTombstoned = {
+    sha: "sha-remote",
+    hasBone: true,
+    updatedAtMs: 2000,
+    scanFingerprint: "fp-1",
+    deletedAt: "2026-11-15T00:00:00Z",
+    deletedReason: "superseded",
+    supersededBy: "radiologist1",
+  };
+
+  // 1. local sha equals remote sha (state null)
+  assert.equal(
+    decide({
+      caseId: "BME-001",
+      annotator: "alice",
+      local: { sha: "sha-remote", hasBone: true, mtimeMs: 1000 },
+      remote: remoteTombstoned,
+      state: null,
+      me: "alice",
+      localScanFingerprint: "fp-1",
+    }),
+    "retire-local"
+  );
+
+  // 2. local sha equals remote sha (state has different sha)
+  assert.equal(
+    decide({
+      caseId: "BME-001",
+      annotator: "alice",
+      local: { sha: "sha-remote", hasBone: true, mtimeMs: 1000 },
+      remote: remoteTombstoned,
+      state: { sha: "sha-old" },
+      me: "alice",
+      localScanFingerprint: "fp-1",
+    }),
+    "retire-local"
+  );
+
+  // 3. local sha differs from remote sha, but state sha equals local sha (local unchanged since last sync)
+  assert.equal(
+    decide({
+      caseId: "BME-001",
+      annotator: "alice",
+      local: { sha: "sha-local-synced", hasBone: true, mtimeMs: 1000 },
+      remote: remoteTombstoned, // sha-remote
+      state: { sha: "sha-local-synced" },
+      me: "alice",
+      localScanFingerprint: "fp-1",
+    }),
+    "retire-local"
+  );
+});
+
+test("rule 0 (tombstone): local file exists, differs, and local changed after last sync returns conflict", () => {
+  const remoteTombstoned = {
+    sha: "sha-remote",
+    hasBone: true,
+    updatedAtMs: 2000,
+    scanFingerprint: "fp-1",
+    deletedAt: 1783491805077,
+    deletedReason: "manual",
+    supersededBy: null,
+  };
+
+  // 1. local differs from remote, and local changed after last sync (state.sha != local.sha)
+  assert.equal(
+    decide({
+      caseId: "BME-001",
+      annotator: "alice",
+      local: { sha: "sha-local-modified", hasBone: true, mtimeMs: 3000 },
+      remote: remoteTombstoned,
+      state: { sha: "sha-prev-sync" },
+      me: "alice",
+      localScanFingerprint: "fp-1",
+    }),
+    "conflict"
+  );
+
+  // 2. local differs from remote, and state is null (fresh work without sync state)
+  assert.equal(
+    decide({
+      caseId: "BME-001",
+      annotator: "alice",
+      local: { sha: "sha-local-new", hasBone: true, mtimeMs: 3000 },
+      remote: remoteTombstoned,
+      state: null,
+      me: "alice",
+      localScanFingerprint: "fp-1",
+    }),
+    "conflict"
+  );
+});
+
 test("rule 1: both null returns none", () => {
   const input: DecideInput = {
     caseId: "BME-001",

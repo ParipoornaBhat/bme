@@ -429,6 +429,10 @@ export const caseAnnotation = pgTable(
     hasBone: boolean("has_bone").notNull().default(false),
     savedBy: varchar("saved_by", { length: 64 }),
     labelsGzB64: text("labels_gz_b64"),
+    deletedAt: timestamp("deleted_at"),
+    deletedBy: varchar("deleted_by", { length: 64 }),
+    deletedReason: varchar("deleted_reason", { length: 32 }),
+    supersededBy: varchar("superseded_by", { length: 64 }),
     createdAt: timestamp("created_at").defaultNow().notNull(),
     updatedAt: timestamp("updated_at").defaultNow().notNull().$onUpdate(() => new Date()),
   },
@@ -476,6 +480,8 @@ export const reviewEdit = pgTable(
     note: text("note"),
     status: varchar("status", { length: 16 }).notNull().default("open"),
     kind: varchar("kind", { length: 16 }).notNull().default("review"),
+    appliedBy: varchar("applied_by", { length: 64 }),
+    claimToken: varchar("claim_token", { length: 64 }),
     createdAt: timestamp("created_at").defaultNow().notNull(),
     updatedAt: timestamp("updated_at").defaultNow().notNull().$onUpdate(() => new Date()),
     appliedAt: timestamp("applied_at"),
@@ -486,4 +492,88 @@ export const reviewEdit = pgTable(
       .where(sql`${t.status} = 'open'`),
   ],
 );
+
+// ---------------------------------------------------------------- review_edit_version
+
+export const reviewEditVersion = pgTable(
+  "review_edit_version",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    reviewEditId: uuid("review_edit_id")
+      .notNull()
+      .references(() => reviewEdit.id, { onDelete: "cascade" }),
+    labelsGzB64: text("labels_gz_b64").notNull(),
+    note: text("note"),
+    savedAt: timestamp("saved_at").defaultNow().notNull(),
+  },
+  (t) => [index("review_edit_version_edit_idx").on(t.reviewEditId)],
+);
+
+// ---------------------------------------------------------------- case_owner
+
+export const caseOwner = pgTable(
+  "case_owner",
+  {
+    caseId: varchar("case_id", { length: 32 }).primaryKey(),
+    annotatedBy: varchar("annotated_by", { length: 64 }),
+    source: varchar("source", { length: 16 }).notNull(), // team-ranges | manual
+    setBy: varchar("set_by", { length: 64 }),
+    setAt: timestamp("set_at").defaultNow().notNull(),
+  },
+);
+
+// ---------------------------------------------------------------- annotation_event
+
+export const annotationEvent = pgTable(
+  "annotation_event",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    at: timestamp("at").defaultNow().notNull(),
+    caseId: varchar("case_id", { length: 32 }).notNull(),
+    annotator: varchar("annotator", { length: 64 }),
+    actor: varchar("actor", { length: 64 }),
+    action: varchar("action", { length: 32 }).notNull(),
+    sha256: varchar("sha256", { length: 64 }),
+    details: jsonb("details"),
+  },
+  (t) => [
+    index("annotation_event_case_at_idx").on(t.caseId, t.at),
+    index("annotation_event_at_idx").on(t.at),
+  ],
+);
+
+// ---------------------------------------------------------------- case_review
+
+export const caseReview = pgTable(
+  "case_review",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    caseId: varchar("case_id", { length: 32 }).notNull(),
+    reviewer: varchar("reviewer", { length: 40 }).notNull(),
+    role: varchar("role", { length: 16 }).notNull(),
+    status: varchar("status", { length: 24 }).notNull(),
+    locked: boolean("locked").notNull().default(true),
+    markedAt: timestamp("marked_at").defaultNow().notNull(),
+    updatedAt: timestamp("updated_at").defaultNow().notNull().$onUpdate(() => new Date()),
+  },
+  (t) => [
+    uniqueIndex("case_review_case_reviewer_idx").on(t.caseId, t.reviewer),
+  ],
+);
+
+export type CaseReview = typeof caseReview.$inferSelect;
+export type NewCaseReview = typeof caseReview.$inferInsert;
+
+// ---------------------------------------------------------------- review relations
+
+export const reviewEditRelations = relations(reviewEdit, ({ many }) => ({
+  versions: many(reviewEditVersion),
+}));
+
+export const reviewEditVersionRelations = relations(reviewEditVersion, ({ one }) => ({
+  reviewEdit: one(reviewEdit, {
+    fields: [reviewEditVersion.reviewEditId],
+    references: [reviewEdit.id],
+  }),
+}));
 

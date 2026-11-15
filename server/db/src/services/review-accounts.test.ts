@@ -7,14 +7,20 @@ import {
   verifyPassword,
   parseReviewAccounts,
 } from "./review-accounts.js";
+import { ownerForCase, CASE_OWNER_RANGES } from "./case-owner.js";
 
 // Clean up temporary auto-generated drizzle file if present
-const tempDrizzleFile = path.resolve(process.cwd(), "drizzle/0004_nebulous_pandemic.sql");
-if (fs.existsSync(tempDrizzleFile)) {
-  try {
-    fs.unlinkSync(tempDrizzleFile);
-  } catch {
-    // Ignore cleanup errors
+const tempDrizzleFiles = [
+  path.resolve(process.cwd(), "drizzle/0004_nebulous_pandemic.sql"),
+  path.resolve(process.cwd(), "drizzle/0005_eager_penance.sql"),
+];
+for (const tempDrizzleFile of tempDrizzleFiles) {
+  if (fs.existsSync(tempDrizzleFile)) {
+    try {
+      fs.unlinkSync(tempDrizzleFile);
+    } catch {
+      // Ignore cleanup errors
+    }
   }
 }
 
@@ -43,23 +49,25 @@ test("wrong password fails", () => {
 });
 
 test("parse with and without role", () => {
-  const envString = "Alice:pass1,Bob:pass2:team,Carol:pass3:reviewer";
+  const envString = "Alice:pass1,Bob:pass2:team,Carol:pass3:reviewer,Dan:pass4:radiologist";
   const parsed = parseReviewAccounts(envString);
 
   assert.deepEqual(parsed, [
     { username: "alice", displayName: "Alice", password: "pass1", role: "reviewer" },
     { username: "bob", displayName: "Bob", password: "pass2", role: "team" },
     { username: "carol", displayName: "Carol", password: "pass3", role: "reviewer" },
+    { username: "dan", displayName: "Dan", password: "pass4", role: "radiologist" },
   ]);
 
   // Also test when passing an object like process.env
   const parsedObj = parseReviewAccounts({
-    REVIEW_ACCOUNTS: "DrSmith:pass4,NurseJoy:pass5:team",
+    REVIEW_ACCOUNTS: "DrSmith:pass4,NurseJoy:pass5:team,DrHouse:pass6:radiologist",
   });
 
   assert.deepEqual(parsedObj, [
     { username: "drsmith", displayName: "DrSmith", password: "pass4", role: "reviewer" },
     { username: "nursejoy", displayName: "NurseJoy", password: "pass5", role: "team" },
+    { username: "drhouse", displayName: "DrHouse", password: "pass6", role: "radiologist" },
   ]);
 });
 
@@ -89,4 +97,39 @@ test("bad entries refused", () => {
     { username: "bob", displayName: "Bob", password: "pass2", role: "team" },
     { username: "eve", displayName: "Eve", password: "pass4", role: "reviewer" },
   ]);
+});
+
+test("ownerForCase returns agreed team ranges and null for unassigned", () => {
+  assert.equal(CASE_OWNER_RANGES.length, 4);
+
+  // BME ranges: 1-15 Paripoorna, 16-30 Elvin, 31-45 Aditi, 46-61 Reegan
+  assert.equal(ownerForCase("BME-001"), "Paripoorna");
+  assert.equal(ownerForCase("BME-015"), "Paripoorna");
+  assert.equal(ownerForCase("BME-016"), "Elvin");
+  assert.equal(ownerForCase("BME-030"), "Elvin");
+  assert.equal(ownerForCase("BME-031"), "Aditi");
+  assert.equal(ownerForCase("BME-045"), "Aditi");
+  assert.equal(ownerForCase("BME-046"), "Reegan");
+  assert.equal(ownerForCase("BME-061"), "Reegan");
+  assert.equal(ownerForCase("BME-062"), "Elvin");
+  assert.equal(ownerForCase("BME-070"), "Paripoorna");
+  assert.equal(ownerForCase("BME-080"), "Aditi");
+  assert.equal(ownerForCase("BME-085"), "Reegan");
+  assert.equal(ownerForCase("BME-086"), null);
+
+  // NBME ranges: 1-15 Paripoorna, 16-30 Elvin, 31-45 Aditi, 46-60 Reegan (NBME has only up to 60)
+  assert.equal(ownerForCase("NBME-001"), "Paripoorna");
+  assert.equal(ownerForCase("NBME-015"), "Paripoorna");
+  assert.equal(ownerForCase("NBME-016"), "Elvin");
+  assert.equal(ownerForCase("NBME-030"), "Elvin");
+  assert.equal(ownerForCase("NBME-031"), "Aditi");
+  assert.equal(ownerForCase("NBME-045"), "Aditi");
+  assert.equal(ownerForCase("NBME-046"), "Reegan");
+  assert.equal(ownerForCase("NBME-060"), "Reegan");
+  assert.equal(ownerForCase("NBME-061"), null);
+
+  // Invalid formats
+  assert.equal(ownerForCase(""), null);
+  assert.equal(ownerForCase("XYZ-001"), null);
+  assert.equal(ownerForCase("BME-abc"), null);
 });

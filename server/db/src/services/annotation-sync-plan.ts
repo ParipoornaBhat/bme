@@ -13,7 +13,8 @@ export type SyncAction =
   | "conflict"
   | "skip-scan-mismatch"
   | "skip-no-scan"
-  | "skip-not-owner";
+  | "skip-not-owner"
+  | "retire-local";
 
 export interface SyncLocalInfo {
   sha: string;
@@ -26,6 +27,9 @@ export interface SyncRemoteInfo {
   hasBone: boolean;
   updatedAtMs: number;
   scanFingerprint?: string | null;
+  deletedAt?: Date | string | number | boolean | null;
+  deletedReason?: string | null;
+  supersededBy?: string | null;
 }
 
 export interface SyncStateInfo {
@@ -54,6 +58,20 @@ export type AnnotationSyncStateInfo = SyncStateInfo;
  */
 export function decide(input: DecideInput): SyncAction {
   const { local, remote, state, me, localScanFingerprint, annotator } = input;
+
+  // 0. Tombstone rule (contract: remote row is tombstoned)
+  if (remote && remote.deletedAt) {
+    // no local file -> none. Tombstoned rows are never pulled and never pushed.
+    if (!local) {
+      return "none";
+    }
+    // local file exists and its sha equals the remote sha, or state.sha equals local sha -> retire-local
+    if (local.sha === remote.sha || (state && state.sha === local.sha)) {
+      return "retire-local";
+    }
+    // local file exists, differs, and was changed after the last sync (state.sha != local sha) -> conflict
+    return "conflict";
+  }
 
   // 1. Both null: none.
   if (!local && !remote) {
