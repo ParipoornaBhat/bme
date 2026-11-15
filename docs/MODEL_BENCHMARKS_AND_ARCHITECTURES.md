@@ -226,11 +226,13 @@ This repository evaluates **6 architectures across 3 task pipelines** (`2D Class
 
 ---
 
-## 5. Production Model Deployment (`OrthoGate-MedNeXt3D`, Version #43)
+## 5. Production Model Deployment (`OrthoGate-MedNeXt3D Enhanced`, Version #44)
 
-- **Run Key:** `3d-run_20261114_180505`
+- **Run Key:** `3d-run_20261115_050047`
 - **Status:** `ACTIVE PRODUCTION` on `Kaggle T4 x2` (`145` scans: `85` BME+ / `60` Control, `5` folds × `50` epochs, 144 patients, zero leak)
 - **Model Spec:** `base_channels=16`, `double_conv=True`, `aniso=True`, `norm_type=group`, `patch=128x128x16`, `spacing=0.5,0.5,3.0 mm`
+- **Enhancements:** Subchondral 1-voxel bone dilation gating for articular margin preservation + spatial translation jitter for shift invariance.
+- **Metrics:** Bone Dice `0.849 ± 0.018`, Pos BME Dice `0.492 ± 0.025`, Overall BME Dice `0.606 ± 0.041`, Lesion Sensitivity `63.1% ± 4.6%`, Specificity `76.7% ± 10.9%`, Presence Accuracy `127/145 (87.6%)`.
 - **Loss & Stability:** `Tversky(alpha=0.3, beta=0.7)` + `Focal` + `0.3 * Deep Supervision` + `0.5 * C-Net BCE` + `clip_grad_norm_(1.0)`
 - **Inference & Gating:** `Soft C-Net Ramp`, `Gaussian Patch Stitching`, `3x3x1 Intra-Osseous Closing`, `Confidence Hysteresis (>=25 vox @ peak>=0.65)`, `Flip TTA`, `5-Fold Prob Ensemble`
 - **Production Artifacts:** Active in `data/results3d/` (`fold_0.pt` through `fold_4.pt`, `metrics.json`, `run_status.json`). Seeded into PostgreSQL via `pnpm --filter @bme/db db:seed-benchmarks`.
