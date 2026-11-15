@@ -202,3 +202,4 @@ flowchart TD
    * Replaced the hard binary gatekeeper ($P < \tau \implies 0$) with a calibrated linear ramp function over $[t_{\text{high}}-0.20, t_{\text{high}}]$. This preserved borderline lesions that were previously wiped to zero.
 4. **GroupNorm Over BatchNorm3D:**
    * Completely eliminated the batch-size drift that caused the catastrophic collapse of Version #41.
+
