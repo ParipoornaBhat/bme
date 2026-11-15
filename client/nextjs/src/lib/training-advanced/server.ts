@@ -107,6 +107,42 @@ export async function fetchDatasetStatus(): Promise<{
   return runBridgeCommand(["dataset-status"], 25000);
 }
 
+const SYNC_LOCK_DIR = path.join(root, "data", ".cache");
+
+function syncLockFile(targetId: string) {
+  return path.join(SYNC_LOCK_DIR, `sync_${targetId.replace(/[^a-zA-Z0-9_-]/g, "_")}.json`);
+}
+
+function pidAlive(pid: number) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function readSyncLock(targetId: string): { taskId: string; pid: number; startedAt: string } | null {
+  try {
+    const lock = JSON.parse(fs.readFileSync(syncLockFile(targetId), "utf8"));
+    if (lock.pid && pidAlive(lock.pid)) return lock;
+    fs.rmSync(syncLockFile(targetId), { force: true });
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+function writeSyncLock(targetId: string, taskId: string, pid: number | undefined) {
+  if (!pid) return;
+  fs.mkdirSync(SYNC_LOCK_DIR, { recursive: true });
+  fs.writeFileSync(syncLockFile(targetId), JSON.stringify({ taskId, pid, startedAt: new Date().toISOString() }));
+}
+
+function clearSyncLock(targetId: string) {
+  fs.rmSync(syncLockFile(targetId), { force: true });
+}
+
 export async function syncDataset(
   targetId: string,
   confirmed = false
@@ -158,6 +194,15 @@ export async function syncDataset(
     };
   }
 
+  const running = readSyncLock(targetId);
+  if (running) {
+    return {
+      success: false,
+      refused: true,
+      message: `A sync for ${target.label} is already running (started ${new Date(running.startedAt).toLocaleTimeString()}). Its progress shows in History.`,
+    };
+  }
+
   const taskId = `sync-${Date.now()}`;
   const task: BackgroundTask = {
     id: taskId,
@@ -177,14 +222,28 @@ export async function syncDataset(
   const child = spawn(process.execPath, [bridgeScript, ...bridgeArgs], {
     cwd: root,
     detached: true,
+    windowsHide: true,
     stdio: ["ignore", "pipe", "pipe"],
   });
+  writeSyncLock(targetId, taskId, child.pid);
 
   let log = "";
-  child.stdout?.on("data", (chunk) => { log += chunk; });
-  child.stderr?.on("data", (chunk) => { log += chunk; });
+  let lastSave = 0;
+  const onChunk = (chunk: Buffer) => {
+    log += chunk.toString();
+    const lines = log.split(/\r?\n/).filter(Boolean);
+    task.log = lines.slice(-30);
+    task.message = lines.length ? lines[lines.length - 1].slice(0, 200) : task.message;
+    if (Date.now() - lastSave > 1000) {
+      lastSave = Date.now();
+      saveTask(task);
+    }
+  };
+  child.stdout?.on("data", onChunk);
+  child.stderr?.on("data", onChunk);
 
   child.on("exit", (code) => {
+    clearSyncLock(targetId);
     task.status = code === 0 ? "completed" : "failed";
     task.endedAt = new Date().toISOString();
     task.message = code === 0 ? "Dataset sync completed successfully." : `Dataset sync failed with exit code ${code}`;

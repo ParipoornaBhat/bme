@@ -728,6 +728,20 @@ async function handleDatasetStatus() {
 }
 
 // ---------- DATASET SYNC COMMAND ---------------------------------------------
+// Runs a command and passes each output line to this process's stdout as it
+// comes, so the dashboard can show live progress.
+function runStreaming(cmd, args) {
+  return new Promise((resolve) => {
+    const child = spawn(cmd, args, { cwd: root, windowsHide: true, stdio: ["ignore", "pipe", "pipe"] });
+    let out = "";
+    let err = "";
+    child.stdout.on("data", (chunk) => { const s = chunk.toString(); out += s; process.stdout.write(s); });
+    child.stderr.on("data", (chunk) => { const s = chunk.toString(); err += s; process.stdout.write(s); });
+    child.on("error", (e) => resolve({ status: 1, stdout: out, stderr: String(e.message || e) }));
+    child.on("close", (code) => resolve({ status: code ?? 1, stdout: out, stderr: err }));
+  });
+}
+
 async function handleDatasetSync(targetId, confirmed = false) {
   const { targets } = await handleDatasetStatus();
   const target = targets.find((t) => t.targetId === targetId);
@@ -791,12 +805,7 @@ async function handleDatasetSync(targetId, confirmed = false) {
       pushArgs.push("--yes");
     }
 
-    const r = spawnSync(process.execPath, pushArgs, {
-      windowsHide: true,
-      cwd: root,
-      encoding: "utf8",
-      stdio: "pipe",
-    });
+    const r = await runStreaming(process.execPath, pushArgs);
     if (r.status !== 0) throw new Error(`H200 push failed: ${r.stderr || r.stdout}`);
     const routeMsg = route.remote ? "over Internet jump route" : "via direct local college network";
     return { success: true, message: `H200 files pushed and up-to-date for roll ${roll} (${routeMsg}).` };
