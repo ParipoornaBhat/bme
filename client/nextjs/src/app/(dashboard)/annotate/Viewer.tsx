@@ -1516,6 +1516,21 @@ export default function Viewer({
 
   useEffect(() => { recount(); }, [labels, recount]);
 
+  // Dirty means "differs from what is saved". Undoing back to the saved
+  // labels is clean again, so Save turns off.
+  const cleanLabels = useRef<Uint8Array | null>(null);
+  useEffect(() => {
+    if (!labels) return;
+    if (!dirty) {
+      cleanLabels.current = labels.slice();
+      return;
+    }
+    const base = cleanLabels.current;
+    if (!base || base.length !== labels.length) return;
+    for (let i = 0; i < base.length; i++) if (base[i] !== labels[i]) return;
+    setDirty(false);
+  }, [labels, dirty]);
+
   // ---- live review -----------------------------------------------------
   const permsRef = useRef({ annotate: canAnnotate, zoomPan: canZoomPan, slices: canMoveSlices });
   permsRef.current = { annotate: canAnnotate, zoomPan: canZoomPan, slices: canMoveSlices };
@@ -1997,12 +2012,15 @@ export default function Viewer({
   // Click a painted region to select it, drag inside its box to move it, drag
   // an edge or corner to resize it. Each drag is one undo step. The label
   // volume is edited live, so the other views and the 3D render follow.
+  // Stable on purpose: its identity changes whenever `draw` does, and the
+  // effects that drop a stale selection depend on it. A stable identity stops
+  // a freshly made selection from being cleared right after it is set.
   const dropSelection = useCallback(() => {
     if (!moveSel.current) return;
     moveSel.current = null;
     setMoveTick((n) => n + 1);
-    drawAll();
-  }, [drawAll]);
+    drawAllRef.current();
+  }, []);
 
   const setSelection = useCallback((p: Plane, regions: Region[]) => {
     if (!vol || !labels || regions.length === 0) {
@@ -3448,18 +3466,7 @@ export default function Viewer({
             {!isReview && (
               <button
                 type="button"
-                onClick={async () => {
-                  const report = await triggerSync();
-                  if (report?.ok) {
-                    toast.success(
-                      report.changedCases?.length
-                        ? `Synced: updated ${report.changedCases.length} case(s)`
-                        : "Annotations in sync with cloud database"
-                    );
-                  } else {
-                    toast.error("Could not sync with cloud database");
-                  }
-                }}
+                onClick={() => { void triggerSync(); }}
                 disabled={isSyncing || busy || switching}
                 title={syncStatus ? `Cloud Database Sync (${syncStatus})` : "Sync annotations with cloud database"}
                 className={`p-1.5 rounded border transition cursor-pointer flex items-center gap-1 ${
@@ -3877,6 +3884,27 @@ export default function Viewer({
               userRole={isMentor ? "mentor" : (reviewUser?.role === "team" ? "team" : ((reviewUser?.role as string) === "radiologist" ? "radiologist" : "reviewer"))}
               disabled={busy}
             />
+            {!isReview && (
+              <button
+                type="button"
+                onClick={() => { void triggerSync(); }}
+                disabled={isSyncing || busy || switching}
+                title={syncStatus ? `Cloud Database Sync (${syncStatus})` : "Sync annotations with cloud database"}
+                className={`p-1.5 rounded border transition cursor-pointer flex items-center gap-1 ${
+                  teamNotice
+                    ? "border-sky-500/50 bg-sky-500/15 text-sky-400"
+                    : "border-border bg-background text-muted-foreground hover:text-foreground"
+                } disabled:opacity-50`}
+              >
+                {isSyncing ? (
+                  <Loader2 className="h-3.5 w-3.5 animate-spin text-sky-400" />
+                ) : (
+                  <Cloud className="h-3.5 w-3.5" />
+                )}
+                {teamNotice && <span className="h-1.5 w-1.5 rounded-full bg-sky-400 animate-pulse" />}
+              </button>
+            )}
+
 
             {isReview && reviewUser?.role !== "team" && !isMentor && (
               <ReviewMarkButton
