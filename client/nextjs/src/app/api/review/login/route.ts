@@ -99,6 +99,7 @@ export async function POST(req: NextRequest) {
 
     return res;
   } catch (err: unknown) {
+    console.error("review login: database step failed:", err instanceof Error ? err.message : String(err));
     return NextResponse.json(
       { error: "Login failed" },
       { status: 500 },
