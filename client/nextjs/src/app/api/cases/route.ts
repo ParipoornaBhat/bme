@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import fs from "node:fs";
 import path from "node:path";
-import { eq, and, isNull } from "drizzle-orm";
+import { eq, and, isNull, isNotNull } from "drizzle-orm";
 import { db, caseAnnotation, caseOwner, ownerForCase, caseReview } from "@bme/db";
 import { isReviewMode } from "~/lib/app-mode";
 import { reviewScan } from "~/lib/review-auth";
@@ -49,8 +49,9 @@ function compareCaseIds(a: CaseOrId, b: CaseOrId): number {
 
 async function reviewHandler() {
   const scans = await db.select().from(reviewScan);
+  // Only the columns the list needs; the annotation itself is large.
   const mainAnnotations = await db
-    .select()
+    .select({ caseId: caseAnnotation.caseId, updatedAt: caseAnnotation.updatedAt, createdAt: caseAnnotation.createdAt })
     .from(caseAnnotation)
     .where(
       and(
@@ -60,6 +61,25 @@ async function reviewHandler() {
     );
 
   const mainMap = new Map(mainAnnotations.map((m) => [m.caseId, m]));
+
+  // A radiologist's save replaces the team annotation: the old one is marked
+  // superseded and hers is the current one. The case is still annotated.
+  const supersededMap = new Map<string, Date | null>();
+  try {
+    const superseded = await db
+      .select({ caseId: caseAnnotation.caseId, deletedAt: caseAnnotation.deletedAt })
+      .from(caseAnnotation)
+      .where(
+        and(
+          eq(caseAnnotation.annotator, "_main"),
+          isNotNull(caseAnnotation.deletedAt),
+          eq(caseAnnotation.deletedReason, "superseded"),
+        ),
+      );
+    for (const r of superseded) supersededMap.set(r.caseId, r.deletedAt);
+  } catch {
+    /* older database without these columns */
+  }
 
   let ownerMap = new Map<string, string | null>();
   try {
@@ -100,8 +120,12 @@ async function reviewHandler() {
     const id = s.caseId;
     const isBme = id.startsWith("BME-");
     const main = mainMap.get(id);
-    const annotated = Boolean(main);
-    const savedAt = main ? (main.updatedAt || main.createdAt || new Date()).toISOString() : null;
+    const annotated = Boolean(main) || supersededMap.has(id);
+    const savedAt = main
+      ? (main.updatedAt || main.createdAt || new Date()).toISOString()
+      : supersededMap.has(id)
+      ? (supersededMap.get(id) || new Date()).toISOString()
+      : null;
 
     let owner: string | null = null;
     if (ownerMap.has(id)) {
