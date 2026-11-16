@@ -2,6 +2,7 @@
 
 import { Maximize2, X } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 
 const NL = String.fromCharCode(10);
 
@@ -149,8 +150,9 @@ export function LogModal({ target, onClose }: { target: LogTarget | null; onClos
 
   if (!target) return null;
   const prompt = fetched?.file ? `${(target.prompt || "h200:~/bme$").split("$")[0]}$ tail -f ${fetched.file}` : target.prompt;
-  return (
-    <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/70 p-3 sm:p-6" onClick={onClose}>
+  // Portaled to the body: the dashboard's sidebar and top bar would otherwise cover it.
+  return createPortal(
+    <div className="fixed inset-0 z-[1000] flex items-center justify-center bg-black/70 p-3 sm:p-6" onClick={onClose}>
       <div
         className="flex h-[88vh] w-full max-w-6xl flex-col overflow-hidden rounded-xl border border-zinc-700 bg-black shadow-2xl"
         onClick={(e) => e.stopPropagation()}
@@ -192,6 +194,7 @@ export function LogModal({ target, onClose }: { target: LogTarget | null; onClos
           )}
         </div>
       </div>
-    </div>
+    </div>,
+    document.body,
   );
 }

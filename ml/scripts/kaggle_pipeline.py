@@ -1345,6 +1345,31 @@ def compute_source_fingerprint(src_dir: Path) -> str:
     return hashlib.sha256("\n".join(entries).encode("utf-8")).hexdigest()
 
 
+def run_streamed_process(cmd: list[str], cwd: Path, description: str) -> str:
+    print(f"\n>>> [RUNNING] {description}...", flush=True)
+    p = subprocess.Popen(
+        cmd,
+        cwd=str(cwd),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        bufsize=1,
+    )
+    collected = []
+    if p.stdout:
+        try:
+            for line in iter(p.stdout.readline, ""):
+                print(line, end="", flush=True)
+                collected.append(line)
+        finally:
+            p.stdout.close()
+    p.wait()
+    full_output = "".join(collected)
+    if p.returncode != 0:
+        raise RuntimeError(f"[ERROR] {description} failed (exit code {p.returncode}):\n{full_output}")
+    return full_output
+
+
 def run_export_with_fingerprint(
     src_dir: Path,
     export_dir: Path,
@@ -1425,7 +1450,7 @@ def run_export_with_fingerprint(
         need_full_export = True
 
     if need_full_export:
-        print("[EXPORT] 1/4: Exporting de-identified dataset (export_for_colab.py)...")
+        print("[EXPORT] 1/4: Exporting de-identified dataset (export_for_colab.py)...", flush=True)
         cmd_export = [
             sys.executable,
             str(export_script),
@@ -1434,9 +1459,7 @@ def run_export_with_fingerprint(
             "--dst", str(export_dir),
             "--mapping-file", str(mapping_file),
         ]
-        p_exp = subprocess.run(cmd_export, capture_output=True, text=True, cwd=str(src_dir))
-        if p_exp.returncode != 0:
-            raise RuntimeError(f"[ERROR] export_for_colab.py failed (exit code {p_exp.returncode}):\n{p_exp.stderr or p_exp.stdout}")
+        run_streamed_process(cmd_export, src_dir, "export_for_colab.py")
 
     # Ensure root worklist exists for check_deid_folder.py
     data_wl = export_dir / "data" / "worklist.csv"
@@ -1445,7 +1468,7 @@ def run_export_with_fingerprint(
         shutil.copy2(data_wl, root_wl)
 
     # 2. Verify
-    print("[EXPORT] 2/4: Verifying dataset integrity (--verify)...")
+    print("[EXPORT] 2/4: Verifying dataset integrity (--verify)...", flush=True)
     cmd_ver = [
         sys.executable,
         str(export_script),
@@ -1454,12 +1477,12 @@ def run_export_with_fingerprint(
         "--dst", str(export_dir),
         "--mapping-file", str(mapping_file),
     ]
-    p_ver = subprocess.run(cmd_ver, capture_output=True, text=True, cwd=str(src_dir))
-    if p_ver.returncode != 0 or "Overall Verification: FULL PASS" not in p_ver.stdout:
-        raise RuntimeError(f"[ERROR] export_for_colab.py --verify failed:\n{p_ver.stderr or p_ver.stdout}")
+    p_ver_out = run_streamed_process(cmd_ver, src_dir, "export_for_colab.py --verify")
+    if "Overall Verification: FULL PASS" not in p_ver_out:
+        raise RuntimeError(f"[ERROR] export_for_colab.py --verify failed:\n{p_ver_out}")
 
     # 3. Compare training inputs
-    print("[EXPORT] 3/4: Comparing training inputs against source (--compare-training-inputs)...")
+    print("[EXPORT] 3/4: Comparing training inputs against source (--compare-training-inputs)...", flush=True)
     cmd_cmp = [
         sys.executable,
         str(export_script),
@@ -1468,20 +1491,18 @@ def run_export_with_fingerprint(
         "--dst", str(export_dir),
         "--mapping-file", str(mapping_file),
     ]
-    p_cmp = subprocess.run(cmd_cmp, capture_output=True, text=True, cwd=str(src_dir))
-    if p_cmp.returncode != 0 or "Compare Training Inputs: FULL PASS" not in p_cmp.stdout:
-        raise RuntimeError(f"[ERROR] export_for_colab.py --compare-training-inputs failed:\n{p_cmp.stderr or p_cmp.stdout}")
+    p_cmp_out = run_streamed_process(cmd_cmp, src_dir, "export_for_colab.py --compare-training-inputs")
+    if "Compare Training Inputs: FULL PASS" not in p_cmp_out:
+        raise RuntimeError(f"[ERROR] export_for_colab.py --compare-training-inputs failed:\n{p_cmp_out}")
 
     # 4. Check de-id folder
-    print("[EXPORT] 4/4: Auditing de-identification and privacy guards (check_deid_folder.py)...")
+    print("[EXPORT] 4/4: Auditing de-identification and privacy guards (check_deid_folder.py)...", flush=True)
     cmd_deid = [
         sys.executable,
         str(deid_script),
         str(export_dir),
     ]
-    p_deid = subprocess.run(cmd_deid, capture_output=True, text=True, cwd=str(src_dir))
-    if p_deid.returncode != 0:
-        raise RuntimeError(f"[ERROR] check_deid_folder.py failed (exit code {p_deid.returncode}):\n{p_deid.stderr or p_deid.stdout}")
+    run_streamed_process(cmd_deid, src_dir, "check_deid_folder.py")
 
     fingerprint_file.write_text(json.dumps({
         "fingerprint": curr_fp,

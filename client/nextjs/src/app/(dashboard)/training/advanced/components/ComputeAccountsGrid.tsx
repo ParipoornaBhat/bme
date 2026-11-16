@@ -192,18 +192,56 @@ export function ComputeAccountsGrid({
                       </span>
                     </div>
                     <div>
-                      <span className="text-[10px] uppercase font-semibold text-muted-foreground block">Started At</span>
-                      <span className="font-medium text-foreground">
-                        {job.startedAt ? new Date(job.startedAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : "-"}
+                      <span className="text-[10px] uppercase font-semibold text-muted-foreground block">Original Start</span>
+                      <span className="font-medium text-foreground" title={job.startedAt || undefined}>
+                        {job.startedAt ? new Date(job.startedAt).toLocaleString([], { dateStyle: "short", timeStyle: "short" }) : "-"}
                       </span>
                     </div>
                     <div>
-                      <span className="text-[10px] uppercase font-semibold text-muted-foreground block">Elapsed Time</span>
+                      <span className="text-[10px] uppercase font-semibold text-muted-foreground block">
+                        {job.partStartedAt && job.partStartedAt !== job.startedAt ? "Resumed Part At" : "Elapsed Time"}
+                      </span>
                       <span className="font-medium text-foreground">
-                        {fmtDuration(job.elapsedSeconds)}
+                        {job.partStartedAt && job.partStartedAt !== job.startedAt
+                          ? new Date(job.partStartedAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })
+                          : fmtDuration(job.elapsedSeconds)}
                       </span>
                     </div>
                   </div>
+
+                  {/* Intermediate Results & Checkpoints */}
+                  {(job.intermediateResults || (job.partLog && job.partLog.length > 0)) && (
+                    <div className="rounded-xl border border-primary/20 bg-primary/5 p-2.5 text-xs space-y-1.5">
+                      <div className="flex items-center justify-between">
+                        <span className="font-semibold text-primary text-[11px] uppercase tracking-wider">
+                          Intermediate Checkpoints & Results
+                        </span>
+                        {job.intermediateResults?.foldsDone !== undefined && (
+                          <span className="font-mono text-[10px] bg-primary/10 text-primary px-1.5 py-0.5 rounded">
+                            {job.intermediateResults.foldsDone}/5 Folds Done
+                          </span>
+                        )}
+                      </div>
+                      {job.intermediateResults?.summaryText && (
+                        <p className="text-[11px] font-medium text-foreground">
+                          {job.intermediateResults.summaryText}
+                        </p>
+                      )}
+                      {job.partLog && job.partLog.length > 0 && (
+                        <div className="mt-1 space-y-1 pt-1 border-t border-primary/10 text-[10px] text-muted-foreground font-mono">
+                          {job.partLog.map((p) => (
+                            <div key={p.part} className="flex items-center justify-between">
+                              <span>Part {p.part} {p.slurmJobId ? `(Job ${p.slurmJobId})` : ""}</span>
+                              <span>
+                                {new Date(p.startedAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
+                                {p.endedAt ? ` → ${new Date(p.endedAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}` : ""}
+                              </span>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  )}
 
                   {/* Progress Bar & ETA */}
                   {job.progress && (

@@ -57,6 +57,25 @@ export interface CurrentJob {
   iteration?: string;
   startedBy?: StartedBy;
   startedAt?: string | null;
+  partStartedAt?: string | null;
+  partCount?: number;
+  partLog?: Array<{
+    part: number;
+    startedAt: string;
+    endedAt?: string | null;
+    slurmJobId?: string;
+    logFile?: string;
+    results?: string;
+  }>;
+  intermediateResults?: {
+    foldsDone?: number;
+    totalFolds?: number;
+    currentFold?: number;
+    currentEpoch?: number;
+    trainLoss?: string | number | null;
+    pseudoDice?: string | number | null;
+    summaryText?: string;
+  };
   elapsedSeconds?: number | null;
   status: "idle" | "queued" | "running" | "stopped" | "finished" | "incomplete" | "failed";
   partsDone?: number;

@@ -309,6 +309,22 @@ async function submit(sbatch, what, logPrefix, extra = "", flags = "") {
   };
 
   if (outFolder) {
+    // A resume is a new part of the same run: keep the first start, and record this part's own start.
+    let prev = {};
+    try {
+      const localFile = path.join(root, "data", outFolder, "run_status.json");
+      if (fs.existsSync(localFile)) prev = JSON.parse(fs.readFileSync(localFile, "utf8"));
+    } catch { /* first part */ }
+    try {
+      const pr = await ssh(`cat ${REMOTE}/data/${outFolder}/run_status.json 2>/dev/null; true`);
+      const remotePrev = JSON.parse(pr.out.trim() || "{}");
+      if (remotePrev.startedAt && (!prev.startedAt || new Date(remotePrev.startedAt) < new Date(prev.startedAt))) prev = remotePrev;
+    } catch { /* none on the server yet */ }
+    const now = meta.startedAt;
+    meta.startedAt = prev.startedAt || now;
+    meta.partStartedAt = now;
+    meta.parts = (prev.parts || 0) + 1;
+    meta.partLog = [...(prev.partLog || []), { part: meta.parts, startedAt: now, methodId: meta.methodId }].slice(-50);
     try {
       const localDir = path.join(root, "data", outFolder);
       fs.mkdirSync(localDir, { recursive: true });
@@ -323,6 +339,23 @@ async function submit(sbatch, what, logPrefix, extra = "", flags = "") {
   process.stdout.write(r.out || "");
   if (r.code !== 0) fail("sbatch refused the job.", r.code);
   const id = (r.out.match(/(\d+)/) || [])[1];
+
+  if (outFolder && id) {
+    try {
+      meta.slurmJobId = id;
+      meta.logFile = `${logPrefix}_${id}.out`;
+      if (meta.partLog && meta.partLog.length > 0) {
+        meta.partLog[meta.partLog.length - 1].slurmJobId = id;
+        meta.partLog[meta.partLog.length - 1].logFile = `${logPrefix}_${id}.out`;
+      }
+      const localDir = path.join(root, "data", outFolder);
+      fs.writeFileSync(path.join(localDir, "run_status.json"), JSON.stringify(meta, null, 2), "utf8");
+      await ssh(`cat << 'EOF' > ${REMOTE}/data/${outFolder}/run_status.json\n${JSON.stringify(meta, null, 2)}\nEOF`);
+    } catch {
+      /* ignore */
+    }
+  }
+
   console.log("");
   console.log(`Log on the server: ~/bme/logs/${logPrefix}_${id ?? "<jobid>"}.out`);
   console.log("Follow it here with: pnpm h200 log");

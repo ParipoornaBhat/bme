@@ -480,6 +480,8 @@ def run_export(src_dir: Path, dst_dir: Path, manifest: list[dict], mapping_file:
                 "class": case_cls,
             })
             exported_count += 1
+            if (idx + 1) % 5 == 0 or idx == 0 or (idx + 1) == len(manifest):
+                print(f"  [Progress] Exported {exported_count} cases ({idx + 1}/{len(manifest)} processed)...", flush=True)
         except Exception as e:
             cls_name = type(e).__name__
             failure_counts[cls_name] = failure_counts.get(cls_name, 0) + 1

@@ -292,6 +292,10 @@ async function handleAccounts() {
               let methodLabel = "";
               let slurmJobId = "";
               let startedAt = null;
+              let partStartedAt = null;
+              let partCount = 0;
+              let partLog = [];
+              let intermediateResults = null;
               let elapsedSeconds = null;
 
               if (activeJobLine) {
@@ -331,16 +335,38 @@ async function handleAccounts() {
                   if (meta.account) metaAccount = meta.account;
                   if (meta.host) metaHost = meta.host;
                   if (meta.startedAt) startedAt = meta.startedAt;
+                  if (meta.partStartedAt) partStartedAt = meta.partStartedAt;
+                  if (meta.parts) partCount = meta.parts;
+                  if (Array.isArray(meta.partLog)) partLog = meta.partLog;
                 } catch {}
               }
 
               let partNo = Math.max(1, partsDone);
+              if (run) {
+                try {
+                  const remStatus = await runSshCommand(session, `cat $HOME/bme/data/${run.folder}/run_status.json 2>/dev/null; true`, 5000);
+                  const rMeta = JSON.parse((remStatus.out || "").trim() || "{}");
+                  if (rMeta.startedAt && (!startedAt || new Date(rMeta.startedAt) < new Date(startedAt))) startedAt = rMeta.startedAt;
+                  if (rMeta.partStartedAt && !partStartedAt) partStartedAt = rMeta.partStartedAt;
+                  if (rMeta.parts && !partCount) partCount = rMeta.parts;
+                  if (Array.isArray(rMeta.partLog) && rMeta.partLog.length > partLog.length) partLog = rMeta.partLog;
+                } catch {}
+              }
               if (run && slurmJobId) {
                 const nn = run.methodId.startsWith("nnunet")
                   ? `cd $HOME/bme/data/nnunet/results/Dataset501_BMEKnee/nnUNetTrainer_BME100${run.methodId.endsWith("-noaug") ? "NoDA" : ""}__nnUNetResEncUNetMPlans__${run.methodId.includes("2d") ? "2d" : "3d_fullres"} 2>/dev/null && ` +
                     `for f in 0 1 2 3 4; do if [ -f fold_$f/checkpoint_final.pth ]; then echo "FOLD $f 100"; else echo "FOLD $f $(cat fold_$f/training_log_*.txt 2>/dev/null | grep -c 'Epoch time')"; fi; done; ` +
                     `cat fold_*/training_log_*.txt 2>/dev/null | grep -E 'Epoch [0-9]+|train_loss|Pseudo dice|Epoch time' | tail -n 8; `
                   : "";
+                const firstLine = await runSshCommand(
+                  session,
+                  `sacct -u $USER -X -n -P -S 2026-11-01 --format=JobName,Start 2>/dev/null | awk -F'|' -v n='${(jname || "").replace(/'/g, "")}' '$1==n && $2!="Unknown" && $2!="" {print $2}' | sort | head -1; true`,
+                  10000
+                );
+                const slurmFirst = (firstLine.out || "").trim().split(/\r?\n/).pop() || "";
+                if (slurmFirst && (!startedAt || new Date(slurmFirst.replace(" ", "T")) < new Date(startedAt))) {
+                  startedAt = new Date(slurmFirst.replace(" ", "T") + "Z").toISOString();
+                }
                 const own = await runSshCommand(
                   session,
                   `echo "PRIOR $(find $HOME/bme/logs -regex ".*/${run.log}_[0-9]+\\.out" -size +600c ! -name "${run.log}_${slurmJobId}.out" 2>/dev/null | wc -l)"; ` +
@@ -376,6 +402,21 @@ async function handleAccounts() {
                     }
                     const nnLines = nnPart.trim().split(/\r?\n/).filter((l) => l && !l.startsWith("FOLD ")).map((l) => l.slice(0, 240));
                     if (nnLines.length) ownLog = nnLines;
+                  }
+                  const logCombined = [...(ownLog || []), ...(logLines || [])].join("\n");
+                  const lastLoss = [...logCombined.matchAll(/train_loss:\s*([\d.]+)/gi)].pop()?.[1] || null;
+                  const lastDice = [...logCombined.matchAll(/Pseudo dice:\s*([\d.]+)/gi)].pop()?.[1] || null;
+                  const foldsDoneCount = folds.filter((m) => Number(m[2]) >= 100).length;
+                  if (foldsDoneCount > 0 || lastDice || lastLoss) {
+                    intermediateResults = {
+                      foldsDone: foldsDoneCount,
+                      totalFolds: 5,
+                      currentFold: nnProgress ? nnProgress.currentFold : undefined,
+                      currentEpoch: nnProgress ? nnProgress.currentEpoch : undefined,
+                      trainLoss: lastLoss ? Number(lastLoss) : null,
+                      pseudoDice: lastDice ? Number(lastDice) : null,
+                      summaryText: `Folds finished: ${foldsDoneCount}/5${lastDice ? ` | Latest Pseudo dice: ${lastDice}` : ""}${lastLoss ? ` | Loss: ${lastLoss}` : ""}`,
+                    };
                   }
                 }
               }
@@ -415,6 +456,10 @@ async function handleAccounts() {
                 currentJob = {
                   methodId,
                   methodLabel: methodLabel || methodId,
+                  partStartedAt,
+                  partCount,
+                  partLog,
+                  intermediateResults,
                   iteration: resumePending
                     ? `Part ${partsDone} ended, not finished. Press Continue for part ${partsDone + 1}.`
                     : jobStatus === "queued"
@@ -996,8 +1041,9 @@ async function handleDatasetStatus() {
 // Runs a command and passes each output line to this process's stdout as it
 // comes, so the dashboard can show live progress.
 function runStreaming(cmd, args, { env = process.env } = {}) {
+  const merged = { ...env, PYTHONUNBUFFERED: "1" };
   return new Promise((resolve) => {
-    const child = spawn(cmd, args, { cwd: root, env, windowsHide: true, stdio: ["ignore", "pipe", "pipe"] });
+    const child = spawn(cmd, args, { cwd: root, env: merged, windowsHide: true, stdio: ["ignore", "pipe", "pipe"] });
     let out = "";
     let err = "";
     child.stdout.on("data", (chunk) => { const s = chunk.toString(); out += s; process.stdout.write(s); });
