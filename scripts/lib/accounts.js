@@ -316,6 +316,23 @@ export function kaggleEnv(account, extra = {}) {
   return env;
 }
 
+let operatorName = null;
+/**
+ * The person at this PC, who pressed Start. Not the owner of the H200 or Kaggle
+ * account the run uses. BME_OPERATOR in .env wins, then the git user name.
+ */
+export function operator() {
+  if (operatorName !== null) return operatorName;
+  let name = (process.env.BME_OPERATOR || "").trim();
+  if (!name) {
+    try {
+      name = (spawnSync("git", ["config", "user.name"], { cwd: root, encoding: "utf8", windowsHide: true }).stdout || "").trim();
+    } catch { /* no git */ }
+  }
+  operatorName = name || os.userInfo().username;
+  return operatorName;
+}
+
 export function createRunMetadata({ account, platform, methodId }) {
   const hostname = os.hostname();
   const startedAt = new Date().toISOString();
@@ -328,10 +345,8 @@ export function createRunMetadata({ account, platform, methodId }) {
     accName = os.userInfo().username;
   }
   return {
-    startedBy: {
-      usn: account?.usn || (account?.roll ? `NNM23CS${account.roll}` : ""),
-      name: account?.name || os.userInfo().username,
-    },
+    startedBy: { usn: "", name: operator() },
+    accountOwner: account?.name || "",
     platform,
     account: accName,
     host: hostname,

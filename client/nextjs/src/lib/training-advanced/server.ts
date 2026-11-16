@@ -121,6 +121,10 @@ export async function fetchAccounts(): Promise<{ cards: AccountCard[]; route: an
   return runBridgeCommand(["accounts"], 60000);
 }
 
+export async function fetchJobLog(targetId: string, lines: number): Promise<{ file?: string; lines: string[]; err?: string[] }> {
+  return runBridgeCommand(["log", targetId, String(lines)], 40000);
+}
+
 export async function fetchRuns(): Promise<RunItem[]> {
   return runBridgeCommand(["runs"], 20000);
 }
@@ -402,7 +406,7 @@ export async function startJob({
   targetId: string;
   methodId: string;
   settings: {
-    augLevel?: "low" | "med" | "max";
+    augLevel?: "none" | "low" | "med" | "max";
     epochs?: number;
     folds?: number;
     holdout?: boolean;
@@ -493,20 +497,14 @@ export async function resumeJob({
   if (platform === "h200") {
     const roll = targetId.replace("h200-", "");
     scriptPath = path.join(root, "scripts", "h200-menu.js");
-    if (methodId?.includes("holdout")) {
-      args = ["holdout", "--as", roll];
-    } else if (methodId?.startsWith("selftest-")) {
-      args = ["selftest", methodId.replace("selftest-", ""), "--as", roll];
-    } else if (methodId === "unet-noaug") {
-      args = ["resume3dplain", "--as", roll];
-    } else if (methodId?.includes("aug")) {
-      const lvl = methodId.includes("max") ? "max" : methodId.includes("low") ? "low" : "med";
-      args = ["aug", lvl, "--as", roll];
-    } else if (methodId?.includes("nnunet")) {
-      args = ["best", methodId.includes("2d") ? "2d" : "3d", "--as", roll];
-    } else {
-      args = ["resume3d", "--as", roll];
-    }
+    const m = methodId || "";
+    if (m.startsWith("selftest-")) args = ["selftest", m.replace("selftest-", "")];
+    else if (m.startsWith("nnunet-")) args = ["best", m.includes("2d") ? "2d" : "3d", ...(m.endsWith("-noaug") ? ["noaug"] : [])];
+    else if (m.startsWith("unet-holdout")) args = ["holdout", m.replace("unet-holdout", "").replace("-", "") || "med"];
+    else if (m === "unet-noaug") args = ["plain"];
+    else if (m.startsWith("unet-aug-")) args = ["aug", m.replace("unet-aug-", "")];
+    else args = ["resume3d"];
+    args.push("--as", roll);
   } else if (platform === "local") {
     scriptPath = path.join(root, "scripts", "train-local.js");
     args = [methodId || "unet-aug-med"];

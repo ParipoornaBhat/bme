@@ -2,19 +2,17 @@
 
 import {
   CheckCircle2,
-  ChevronDown,
-  ChevronUp,
   Cloud,
   Cpu,
   Loader2,
   RotateCcw,
   Server,
   Square,
-  Terminal,
   XCircle,
 } from "lucide-react";
 import { useState } from "react";
 import type { AccountCard } from "~/lib/training-advanced/types";
+import { LogModal, TerminalBox, type LogTarget } from "./TerminalView";
 
 export interface ComputeAccountsGridProps {
   cards: AccountCard[];
@@ -33,20 +31,26 @@ export function ComputeAccountsGrid({
   onCancel,
   fmtDuration,
 }: ComputeAccountsGridProps) {
-  const [expandedLogs, setExpandedLogs] = useState<Record<string, boolean>>({});
-
-  const toggleLog = (cardId: string) => {
-    setExpandedLogs((prev) => ({ ...prev, [cardId]: !prev[cardId] }));
-  };
+  const [openLog, setOpenLog] = useState<LogTarget | null>(null);
 
   return (
-    <div className="grid grid-cols-1 gap-4 lg:grid-cols-2 xl:grid-cols-3">
+    <>
+    <LogModal target={openLog} onClose={() => setOpenLog(null)} />
+    <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4">
       {cards.map((card) => {
         const job = card.currentJob;
         const isH200 = card.platform === "h200";
         const isKaggle = card.platform === "kaggle";
         const isLocal = card.platform === "local";
-        const isExpanded = Boolean(expandedLogs[card.id]);
+        const shell = `${card.accountName}@${card.platform}:~/bme$`;
+        const logTarget: LogTarget = {
+          title: `${card.label} - ${job?.methodLabel || "log"}`,
+          prompt: shell,
+          platform: card.platform,
+          targetId: card.id,
+          lines: job?.logTail || [],
+          live: job?.status === "running",
+        };
 
         return (
           <div
@@ -99,14 +103,15 @@ export function ComputeAccountsGrid({
                     No Python env
                   </span>
                 )}
-                {!card.connected && !card.checking && (
+                {!card.checking && (
                   <button
                     type="button"
                     onClick={onRetryConnection}
                     disabled={refreshing}
+                    title="Re-read this account's connection and job status from the H200 / Kaggle"
                     className="mt-1.5 block w-full rounded border border-border px-2 py-0.5 text-[11px] text-muted-foreground hover:text-foreground disabled:opacity-50 cursor-pointer"
                   >
-                    {refreshing ? "Checking..." : "Retry"}
+                    {refreshing ? "Checking..." : card.connected ? "Refresh status" : "Retry"}
                   </button>
                 )}
               </div>
@@ -126,11 +131,6 @@ export function ComputeAccountsGrid({
                       <span className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">
                         Job: {job.methodLabel || job.methodId}
                       </span>
-                      {job.iteration && (
-                        <span className="inline-flex items-center rounded-md bg-primary/10 px-1.5 py-0.5 text-[10px] font-semibold text-primary">
-                          {job.iteration}
-                        </span>
-                      )}
                       {job.isCached && job.cachedAt && (
                         <span className="inline-flex items-center gap-1 rounded-md bg-muted px-1.5 py-0.5 text-[9px] text-muted-foreground font-mono">
                           Cached {new Date(job.cachedAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
@@ -149,16 +149,30 @@ export function ComputeAccountsGrid({
                       }`}
                     >
                       {job.status === "running" && <span className="h-1.5 w-1.5 rounded-full bg-emerald-500 animate-pulse" />}
-                      {job.status === "stopped" ? "Stopped at 4h limit" : job.status}
+                      {job.status === "stopped" ? "Part ended" : job.status}
                     </span>
                   </div>
+
+                  {job.iteration && (
+                    <p className="rounded-md bg-primary/10 px-2 py-1 text-[11px] font-semibold text-primary">{job.iteration}</p>
+                  )}
+
+                  {isH200 && (() => {
+                    const auto = (card.autoRuns || []).find((r) => r.methodId === job.methodId);
+                    if (!auto) return null;
+                    return (
+                      <p className="text-[10px] text-muted-foreground">
+                        Auto-continue: {auto.state === "active" ? `tracked, ${auto.continues} part(s) continued so far` : `${auto.state}${auto.note ? ` (${auto.note})` : ""}`}
+                      </p>
+                    );
+                  })()}
 
                   {/* Explicit Notice on H200 resume */}
                   {isH200 && (
                     <div className="rounded-xl border border-amber-500/30 bg-amber-500/5 p-2.5 text-[11px] text-amber-700 dark:text-amber-300">
                       <p className="font-semibold">Notice on Resume:</p>
                       <p className="mt-0.5">
-                        Each H200 job is one part of at most 3 h 45 m. The next part does <strong>not</strong> start by itself: press Continue below. It carries on from the last saved checkpoint.
+                        Each H200 job is one part of at most 3 h 45 m, then it saves and stops. Press Continue for the next part, or leave it to auto-continue (<span className="font-mono">pnpm h200:auto on</span>). It carries on from the last saved checkpoint.
                       </p>
                     </div>
                   )}
@@ -216,25 +230,15 @@ export function ComputeAccountsGrid({
                     </div>
                   )}
 
-                  {/* Log Tail Box */}
+                  {/* Terminal: the last lines; click for the full log */}
                   {job.logTail && job.logTail.length > 0 && (
-                    <div className="space-y-1 pt-1">
-                      <button
-                        type="button"
-                        onClick={() => toggleLog(card.id)}
-                        className="flex w-full items-center justify-between text-[11px] font-semibold text-muted-foreground hover:text-foreground cursor-pointer"
-                      >
-                        <span className="inline-flex items-center gap-1">
-                          <Terminal className="h-3 w-3" /> Live Log Tail
-                        </span>
-                        {isExpanded ? <ChevronUp className="h-3 w-3" /> : <ChevronDown className="h-3 w-3" />}
-                      </button>
-                      {isExpanded && (
-                        <pre className="max-h-48 overflow-y-auto rounded-xl bg-muted/60 p-2.5 font-mono text-[10px] leading-relaxed text-muted-foreground">
-                          {job.logTail.join("\n")}
-                        </pre>
-                      )}
-                    </div>
+                    <TerminalBox
+                      title={`${shell.split("$")[0]} - job ${job.slurmJobId || ""}`}
+                      prompt={`${shell} tail -f logs/job.out`}
+                      lines={job.logTail}
+                      live={job.status === "running"}
+                      onOpen={() => setOpenLog(logTarget)}
+                    />
                   )}
 
                   {/* Action buttons on card: Resume / Cancel */}
@@ -249,7 +253,16 @@ export function ComputeAccountsGrid({
                         {isKaggle ? "Continue (--continue-previous)" : "Continue next part"}
                       </button>
                     )}
-                    {job.status === "running" && (
+                    {isH200 && (
+                      <button
+                        type="button"
+                        onClick={() => setOpenLog(logTarget)}
+                        className="inline-flex flex-1 items-center justify-center gap-1.5 rounded-xl border border-border px-3 py-2 text-xs font-bold text-foreground hover:bg-accent transition-all cursor-pointer"
+                      >
+                        Full log
+                      </button>
+                    )}
+                    {(job.status === "running" || job.status === "queued") && (
                       <button
                         type="button"
                         onClick={() => onCancel(card)}
@@ -274,5 +287,6 @@ export function ComputeAccountsGrid({
         );
       })}
     </div>
+    </>
   );
 }

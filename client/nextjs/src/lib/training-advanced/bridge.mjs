@@ -17,7 +17,7 @@ const h200LoginMod = await import(pathToFileURL(path.join(root, "scripts", "h200
 const {
   listAccounts, mergedEnv, findAccount, h200Route, tcpReachable,
   kaggleReady, stagingFor, kaggleLocalState, kaggleUserOf, datasetOwner,
-  kaggle, kaggleJson, kaggleEnv, usable, createRunMetadata, python,
+  kaggle, kaggleJson, kaggleEnv, usable, createRunMetadata, python, operator,
 } = accountsMod;
 const PIPELINE = path.join(root, "ml", "scripts", "kaggle_pipeline.py");
 const { METHODS } = methodsMod;
@@ -26,6 +26,28 @@ const { chooseH200 } = h200LoginMod;
 
 function parseLogProgress(logText, defaultFolds = 5, defaultEpochs = 40, startedAt = null) {
   if (!logText) return null;
+  // The 3D U-Net prints its own counters: "] 23/85  fold 2/5  epoch 6/17" and
+  // "134.1s/epoch | ETA: 141m 11s". They are exact, so they win.
+  const own = [...logText.matchAll(/\]\s*(\d+)\/(\d+)\s+fold\s+(\d+)\/(\d+)\s+epoch\s+(\d+)\/(\d+)/g)].pop();
+  if (own) {
+    const [done, total, fold, folds, ep] = own.slice(1).map(Number);
+    const sec = Number(([...logText.matchAll(/([\d.]+)s\/epoch/g)].pop() || [])[1] || 0);
+    const eta = [...logText.matchAll(/ETA:\s*(?:(\d+)h\s*)?(\d+)m\s*(\d+)s/g)].pop();
+    const etaSeconds = eta
+      ? Number(eta[1] || 0) * 3600 + Number(eta[2]) * 60 + Number(eta[3])
+      : sec > 0 ? Math.round((total - done) * sec) : null;
+    return {
+      doneEpochs: done,
+      totalEpochs: total,
+      doneFolds: fold - 1,
+      totalFolds: folds,
+      currentFold: fold - 1,
+      currentEpoch: ep,
+      percent: total > 0 ? Math.min(100, Math.round((done / total) * 100)) : 0,
+      secPerEpoch: sec > 0 ? Math.round(sec) : undefined,
+      etaSeconds,
+    };
+  }
   const foldMatches = [...logText.matchAll(/fold\s*(\d+)[:\s]/gi)];
   const epochMatches = [...logText.matchAll(/epoch\s*(\d+)(?:\/(\d+))?/gi)];
   const epochTimeMatches = [...logText.matchAll(/epoch\s*time:\s*([\d.]+)\s*s/gi)];
@@ -78,13 +100,37 @@ function parseLogProgress(logText, defaultFolds = 5, defaultEpochs = 40, started
   };
 }
 
+// Runs started from this PC that `pnpm h200:auto` keeps going part after part.
+const AUTO_FILE = path.join(root, "data", "advanced_training", "auto_runs.json");
+function readAutoRuns() {
+  try { return JSON.parse(fs.readFileSync(AUTO_FILE, "utf8")); } catch { return []; }
+}
+function writeAutoRuns(list) {
+  fs.mkdirSync(path.dirname(AUTO_FILE), { recursive: true });
+  fs.writeFileSync(AUTO_FILE, JSON.stringify(list, null, 2), "utf8");
+}
+function trackRun(target, methodId) {
+  const list = readAutoRuns().filter((r) => !(r.target === target && r.methodId === methodId));
+  const old = readAutoRuns().find((r) => r.target === target && r.methodId === methodId);
+  list.push({ target, methodId, startedBy: operator(), startedAt: old?.startedAt || new Date().toISOString(), continues: old?.continues || 0, state: "active" });
+  writeAutoRuns(list);
+}
+function untrackTarget(target) {
+  writeAutoRuns(readAutoRuns().filter((r) => r.target !== target));
+}
+
 const H200_RUNS = [
   { folder: "results-nnunet-3d_fullres", methodId: "nnunet-3d", job: "bme_nnunet", log: "nnunet", label: "nnU-Net ResEnc M, 3D" },
   { folder: "results-nnunet-2d", methodId: "nnunet-2d", job: "bme_nnunet", log: "nnunet", label: "nnU-Net ResEnc M, 2D" },
   { folder: "results3d-aug-low", methodId: "unet-aug-low", job: "bme_aug_low", log: "aug_low", label: "3D U-Net, augmentation low" },
   { folder: "results3d-aug-med", methodId: "unet-aug-med", job: "bme_aug_med", log: "aug_med", label: "3D U-Net, augmentation med" },
   { folder: "results3d-aug-max", methodId: "unet-aug-max", job: "bme_aug_max", log: "aug_max", label: "3D U-Net, augmentation max" },
-  { folder: "results3d-holdout", methodId: "unet-holdout", job: "bme_holdout", log: "holdout", label: "3D U-Net, fixed 80/20 split" },
+  { folder: "results-nnunet-3d_fullres-noaug", methodId: "nnunet-3d-noaug", job: "bme_nnunet_noaug", log: "nnunet_noaug", label: "nnU-Net ResEnc M, 3D, no augmentation" },
+  { folder: "results-nnunet-2d-noaug", methodId: "nnunet-2d-noaug", job: "bme_nnunet_noaug", log: "nnunet_noaug", label: "nnU-Net ResEnc M, 2D, no augmentation" },
+  { folder: "results3d-holdout-none", methodId: "unet-holdout-none", job: "bme_holdout_none", log: "holdout_none", label: "3D U-Net, fixed 80/20 split, no augmentation" },
+  { folder: "results3d-holdout-low", methodId: "unet-holdout-low", job: "bme_holdout_low", log: "holdout_low", label: "3D U-Net, fixed 80/20 split, augmentation low" },
+  { folder: "results3d-holdout-max", methodId: "unet-holdout-max", job: "bme_holdout_max", log: "holdout_max", label: "3D U-Net, fixed 80/20 split, augmentation max" },
+  { folder: "results3d-holdout", methodId: "unet-holdout", job: "bme_holdout", log: "holdout", label: "3D U-Net, fixed 80/20 split, augmentation med" },
   { folder: "results3d-h200-plain", methodId: "unet-noaug", job: "bme_unet3d_plain", log: "unet3dplain", label: "3D U-Net, no augmentation" },
   { folder: "results3d-selftest-aug", methodId: "selftest-aug", job: "bme_selftest_aug", log: "selftest_aug", label: "Self-test, augmentation max" },
   { folder: "results3d-selftest-plain", methodId: "selftest-plain", job: "bme_selftest_plain", log: "selftest_plain", label: "Self-test, no augmentation" },
@@ -176,6 +222,7 @@ async function handleAccounts() {
       let connected = false;
       let envReady = null;
       let nnunetReady = null;
+      const runStates = {};
       let connDetails = isDirectH200
         ? "Direct college network route"
         : `Outside college, via jump host ${route.jump}`;
@@ -202,7 +249,7 @@ async function handleAccounts() {
               `echo "===LAST==="; sacct -u $USER -S now-3days -X -n -P --format=JobID,JobName,State,Elapsed 2>/dev/null | tail -1; ` +
               `e=$(ls -t $HOME/bme/logs/*.err 2>/dev/null | head -1); [ -n "$e" ] && tail -n 1 "$e"; ` +
               `echo "===PARTS==="; ` +
-              `for p in ${[...new Set(H200_RUNS.map((r) => r.log))].join(" ")}; do echo "$p|$(find $HOME/bme/logs -name "\${p}_*.out" -size +600c 2>/dev/null | wc -l)"; done; ` +
+              `for p in ${[...new Set(H200_RUNS.map((r) => r.log))].join(" ")}; do echo "$p|$(find $HOME/bme/logs -regex ".*/\${p}_[0-9]+\\.out" -size +600c 2>/dev/null | wc -l)"; done; ` +
               `echo "===LOG==="; ` +
               `f=$(ls -t $HOME/bme/logs/*.out 2>/dev/null | head -1); [ -n "$f" ] && { echo "FILE:$f"; tail -n 25 "$f"; }; true`,
               12000
@@ -229,6 +276,7 @@ async function handleAccounts() {
                 const [f, st] = line.split("|");
                 folderState[f] = st;
               }
+              for (const r of H200_RUNS) if (folderState[r.folder]) runStates[r.methodId] = folderState[r.folder];
               let run = null;
 
               const activeJobLine = squeuePart.trim().split(/\r?\n/).filter(Boolean)[0];
@@ -277,6 +325,9 @@ async function handleAccounts() {
                 try {
                   const meta = JSON.parse(fs.readFileSync(statusFile, "utf8"));
                   if (meta.startedBy) metaStartedBy = meta.startedBy;
+                  // Runs started from this PC before the operator was recorded
+                  // carry the account owner's name; the person here started them.
+                  if (!meta.accountOwner && meta.host === os.hostname()) metaStartedBy = { usn: "", name: operator() };
                   if (meta.account) metaAccount = meta.account;
                   if (meta.host) metaHost = meta.host;
                   if (meta.startedAt) startedAt = meta.startedAt;
@@ -286,13 +337,13 @@ async function handleAccounts() {
               let partNo = Math.max(1, partsDone);
               if (run && slurmJobId) {
                 const nn = run.methodId.startsWith("nnunet")
-                  ? `cd $HOME/bme/data/nnunet/results/Dataset501_BMEKnee/nnUNetTrainer_BME100__nnUNetResEncUNetMPlans__${run.methodId === "nnunet-2d" ? "2d" : "3d_fullres"} 2>/dev/null && ` +
+                  ? `cd $HOME/bme/data/nnunet/results/Dataset501_BMEKnee/nnUNetTrainer_BME100${run.methodId.endsWith("-noaug") ? "NoDA" : ""}__nnUNetResEncUNetMPlans__${run.methodId.includes("2d") ? "2d" : "3d_fullres"} 2>/dev/null && ` +
                     `for f in 0 1 2 3 4; do if [ -f fold_$f/checkpoint_final.pth ]; then echo "FOLD $f 100"; else echo "FOLD $f $(cat fold_$f/training_log_*.txt 2>/dev/null | grep -c 'Epoch time')"; fi; done; ` +
                     `cat fold_*/training_log_*.txt 2>/dev/null | grep -E 'Epoch [0-9]+|train_loss|Pseudo dice|Epoch time' | tail -n 8; `
                   : "";
                 const own = await runSshCommand(
                   session,
-                  `echo "PRIOR $(find $HOME/bme/logs -name "${run.log}_*.out" -size +600c ! -name "${run.log}_${slurmJobId}.out" 2>/dev/null | wc -l)"; ` +
+                  `echo "PRIOR $(find $HOME/bme/logs -regex ".*/${run.log}_[0-9]+\\.out" -size +600c ! -name "${run.log}_${slurmJobId}.out" 2>/dev/null | wc -l)"; ` +
                   `echo "===OWN==="; tail -n 20 $HOME/bme/logs/${run.log}_${slurmJobId}.out 2>/dev/null; ` +
                   `echo "===NN==="; ${nn}true`,
                   10000
@@ -317,12 +368,27 @@ async function handleAccounts() {
                       percent: Math.round((done / 500) * 100),
                       etaSeconds: null,
                     };
+                    const nnTimes = [...nnPart.matchAll(/Epoch time: ([\d.]+) s/g)].map((m) => Number(m[1]));
+                    if (nnTimes.length) {
+                      const per = nnTimes.reduce((a, b) => a + b, 0) / nnTimes.length;
+                      nnProgress.secPerEpoch = Math.round(per);
+                      nnProgress.etaSeconds = Math.round((500 - done) * per);
+                    }
                     const nnLines = nnPart.trim().split(/\r?\n/).filter((l) => l && !l.startsWith("FOLD ")).map((l) => l.slice(0, 240));
                     if (nnLines.length) ownLog = nnLines;
                   }
                 }
               }
               const progress = jobStatus === "queued" ? null : nnProgress || parseLogProgress((ownLog || logLines).join("\n"), 5, 40, startedAt);
+
+              // One job is one part of at most 3 h 45 m. Say how many more are needed.
+              let partsNote = "";
+              if (jobStatus === "running" && progress?.etaSeconds && elapsedSeconds != null) {
+                const leftInPart = Math.max(0, 13500 - elapsedSeconds);
+                partsNote = progress.etaSeconds <= leftInPart
+                  ? " It should finish inside this part."
+                  : ` This part stops at 3 h 45 m with a checkpoint; about ${Math.ceil((progress.etaSeconds - leftInPart) / 13500)} more part(s) after it.`;
+              }
 
               // The newest job ended in failure: say so instead of offering "Continue".
               const lastFailed = !activeJobLine && /FAILED|OUT_OF_MEMORY|NODE_FAIL/.test(lastState) && lastName.startsWith("bme_");
@@ -353,7 +419,7 @@ async function handleAccounts() {
                     ? `Part ${partsDone} ended, not finished. Press Continue for part ${partsDone + 1}.`
                     : jobStatus === "queued"
                     ? `Part ${partNo} is waiting in the H200 queue (${queueReason || "no free GPU slot"}). Nothing has run yet.`
-                    : `Part ${partNo} running`,
+                    : `Part ${partNo} running.${partsNote}`,
                   partsDone,
                   startedBy: metaStartedBy,
                   startedAt,
@@ -392,6 +458,8 @@ async function handleAccounts() {
       }
 
       return {
+        runStates,
+        autoRuns: readAutoRuns().filter((r) => r.target === id),
         id,
         envReady,
         nnunetReady,
@@ -1033,12 +1101,14 @@ async function handleStart(platform, targetId, methodId, extraJson = "{}") {
     const existingState = kaggleLocalState(account).run || {};
     fs.writeFileSync(statePath, JSON.stringify({ ...existingState, ...meta }, null, 2), "utf8");
 
+    const lvl = ["none", "low", "med", "max"].includes(extra.augLevel) ? extra.augLevel : "med";
+    const runName = lvl === "med" ? methodId : `${methodId}-${lvl}`;
     const args = [
       "run", "--confirm-launch", "--no-wait", "--mode", "full",
       "--model-arch", m.arch || "unet3d",
-      "--kernel-slug", `bme-${methodId}`,
-      "--import-name", methodId,
-      ...KAGGLE_SETTINGS,
+      "--kernel-slug", `bme-${runName}`,
+      "--import-name", runName,
+      ...KAGGLE_SETTINGS.map((x) => (x === 'AUG_LEVEL="med"' ? (lvl === "none" ? "AUG_LEVEL=None" : `AUG_LEVEL="${lvl}"`) : x)),
     ];
 
     const datasetOwnerRoll = extra.datasetOwnerRoll || "";
@@ -1055,20 +1125,14 @@ async function handleStart(platform, targetId, methodId, extraJson = "{}") {
     return { success: true, message: `${methodId} launched on Kaggle for ${account.label}` };
   } else if (platform === "h200") {
     const roll = targetId.replace("h200-", "");
-    let h200Args = ["aug", extra.augLevel || "med", "--as", roll];
-    if (methodId.startsWith("selftest-")) {
-      h200Args = ["selftest", methodId.replace("selftest-", ""), "--as", roll];
-    } else if (methodId === "unet-noaug") {
-      h200Args = ["train3dplain", "--as", roll];
-    } else if (methodId.startsWith("unet-aug-")) {
-      h200Args = ["aug", methodId.replace("unet-aug-", ""), "--as", roll];
-    } else if (methodId === "unet-holdout") {
-      h200Args = ["holdout", "--as", roll];
-    } else if (methodId === "nnunet-3d") {
-      h200Args = ["best", "3d", "--as", roll];
-    } else if (methodId === "nnunet-2d") {
-      h200Args = ["best", "2d", "--as", roll];
-    }
+    // Every one of these continues by itself when the run was already started.
+    let h200Args = ["aug", ["low", "med", "max"].includes(extra.augLevel) ? extra.augLevel : "med"];
+    if (methodId.startsWith("selftest-")) h200Args = ["selftest", methodId.replace("selftest-", "")];
+    else if (methodId.startsWith("nnunet-")) h200Args = ["best", methodId.includes("2d") ? "2d" : "3d", ...(methodId.endsWith("-noaug") ? ["noaug"] : [])];
+    else if (methodId.startsWith("unet-holdout")) h200Args = ["holdout", methodId.replace("unet-holdout", "").replace("-", "") || "med"];
+    else if (methodId === "unet-noaug") h200Args = ["plain"];
+    else if (methodId.startsWith("unet-aug-")) h200Args = ["aug", methodId.replace("unet-aug-", "")];
+    h200Args.push("--as", roll);
     const r = await runStreaming(process.execPath, [path.join(root, "scripts", "h200-menu.js"), ...h200Args], {
       env: { ...process.env, BME_NO_PROMPT: "1" },
     });
@@ -1076,6 +1140,7 @@ async function handleStart(platform, targetId, methodId, extraJson = "{}") {
       const tail = (r.stderr || r.stdout || "").trim().split(/\r?\n/).slice(-3).join(" | ");
       throw new Error(`H200 did not start the run: ${tail || "no answer from the H200"}`);
     }
+    trackRun(targetId, methodId);
     return { success: true, message: `H200 job submitted for ${methodId} on account ${roll}` };
   } else if (platform === "local") {
     const r = spawnSync(process.execPath, [path.join(root, "scripts", "train-local.js"), methodId], {
@@ -1146,9 +1211,14 @@ async function handleCancel(platform, targetId, jobId) {
   if (platform === "h200") {
     const roll = targetId.replace("h200-", "");
     const session = await chooseH200(root, roll);
+    if (!/^\d+$/.test(String(jobId || ""))) {
+      return { success: false, message: "No job id given; nothing was cancelled." };
+    }
     try {
-      const scancelCmd = jobId ? `scancel ${jobId}` : `scancel -u $USER`;
+      const scancelCmd = `scancel ${jobId}`;
       const res = await runSshCommand(session, scancelCmd);
+      // A run the user cancelled is not continued automatically.
+      if (res.code === 0) untrackTarget(targetId);
       return { success: res.code === 0, message: `Cancelled H200 job: ${scancelCmd}` };
     } finally {
       session.close();
@@ -1171,6 +1241,44 @@ async function handleCancel(platform, targetId, jobId) {
     };
   }
   throw new Error(`Unsupported platform: ${platform}`);
+}
+
+// ---------- FULL LOG ---------------------------------------------------------
+/** The log of the job on one H200 account: the running job's, else the newest. */
+async function handleLog(targetId, linesArg) {
+  const n = Math.min(2000, Math.max(20, Number(linesArg) || 400));
+  const roll = String(targetId || "").replace("h200-", "");
+  const session = await chooseH200(root, roll);
+  try {
+    const r = await runSshCommand(
+      session,
+      `j=$(squeue -u $USER -h -o %i | head -1); f=""; ` +
+      `[ -n "$j" ] && f=$(ls $HOME/bme/logs/*_$j.out 2>/dev/null | head -1); ` +
+      `[ -z "$f" ] && f=$(ls -t $HOME/bme/logs/*.out 2>/dev/null | head -1); ` +
+      `echo "FILE:$f"; [ -n "$f" ] && tail -n ${n} "$f"; ` +
+      `echo "===TRAIN==="; case "$f" in *nnunet*) t=$(ls -t $HOME/bme/data/nnunet/results/Dataset501_BMEKnee/*/fold_*/training_log_*.txt 2>/dev/null | head -1); ` +
+      `[ -n "$t" ] && { echo "FILE:$t"; tail -n ${n} "$t"; } ;; esac; ` +
+      `echo "===ERR==="; [ -n "$f" ] && tail -n 40 "\${f%.out}.err" 2>/dev/null; true`,
+      20000,
+    );
+    if (r.code !== 0) throw new Error("Could not reach the H200 account to read its log.");
+    const [outPart, rest = ""] = r.out.split("===TRAIN===");
+    const [trainPart, errPart = ""] = rest.split("===ERR===");
+    const clean = (t) => t.split(/\r?\n|\r/).map((l) => l.trimEnd()).filter(Boolean);
+    const out = clean(outPart);
+    const train = clean(trainPart);
+    const file = ((train[0] || out[0] || "").match(/^FILE:(.*)$/) || [])[1] || "";
+    const body = [...out.slice(1), ...(train.length > 1 ? ["", `# ${train[0].replace("FILE:", "")}`, ...train.slice(1)] : [])];
+    return {
+      targetId,
+      platform: "h200",
+      file: ((out[0] || "").match(/^FILE:(.*)$/) || [])[1] || file,
+      lines: body.length ? body : ["No log on this account yet."],
+      err: clean(errPart).filter((l) => !/^\s*$/.test(l)),
+    };
+  } finally {
+    session.close();
+  }
 }
 
 // ---------- CLI DISPATCHER ---------------------------------------------------
@@ -1203,6 +1311,8 @@ try {
     result = await handleDatasetSync(arg1, confirmed, isFresh);
   } else if (action === "start") {
     result = await handleStart(arg1, arg2, arg3, arg4);
+  } else if (action === "log") {
+    result = await handleLog(arg1, arg2);
   } else if (action === "cancel") {
     result = await handleCancel(arg1, arg2, arg3);
   } else {

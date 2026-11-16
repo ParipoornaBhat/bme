@@ -25,6 +25,9 @@
 set -euo pipefail
 CONFIG="${1:-3d_fullres}"
 case "$CONFIG" in 2d|3d_fullres) ;; *) echo "config must be 2d or 3d_fullres"; exit 1 ;; esac
+# Second argument "noaug" trains the same model with nnU-Net's augmentation off.
+AUG="${2:-default}"
+case "$AUG" in default|noaug) ;; *) echo "second argument must be noaug or nothing"; exit 1 ;; esac
 unset -f python python3 2>/dev/null || true
 ENV="$HOME/bme/env/bin"
 cd "$HOME/bme"
@@ -38,6 +41,8 @@ export nnUNet_compile=f
 DS=501
 PLANS=nnUNetResEncUNetMPlans
 TRAINER=nnUNetTrainer_BME100
+SUFFIX=""
+if [ "$AUG" = noaug ]; then TRAINER=nnUNetTrainer_BME100NoDA; SUFFIX="-noaug"; fi
 RUN="$nnUNet_results/Dataset501_BMEKnee/${TRAINER}__${PLANS}__${CONFIG}"
 STOP_AT=$(( $(date +%s) + 225 * 60 ))
 
@@ -77,4 +82,4 @@ for FOLD in 0 1 2 3 4; do
 done
 
 echo "== all folds finished, scoring"
-"$ENV/python3" ml/scripts/nnunet_prep.py metrics . --config "$CONFIG" --out "results-nnunet-$CONFIG"
+"$ENV/python3" ml/scripts/nnunet_prep.py metrics . --config "$CONFIG" --trainer "$TRAINER" --out "results-nnunet-$CONFIG$SUFFIX"

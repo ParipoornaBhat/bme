@@ -71,7 +71,19 @@ export interface CurrentJob {
   cachedAt?: string | null;
 }
 
+export interface AutoRun {
+  target: string;
+  methodId: string;
+  startedBy?: string;
+  startedAt?: string;
+  continues: number;
+  state: "active" | "finished" | "failed" | "limit";
+  note?: string;
+}
+
 export interface AccountCard {
+  runStates?: Record<string, "finished" | "stopped">;
+  autoRuns?: AutoRun[];
   id: string;
   envReady?: boolean | null;
   nnunetReady?: boolean | null;

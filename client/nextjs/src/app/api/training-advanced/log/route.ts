@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import fs from "node:fs";
 import path from "node:path";
 import { isReviewMode } from "~/lib/app-mode";
-import { root } from "~/lib/training-advanced/server";
+import { fetchJobLog, root } from "~/lib/training-advanced/server";
 
 export const dynamic = "force-dynamic";
 
@@ -20,6 +20,9 @@ export async function GET(req: NextRequest) {
   try {
     let lines: string[] = [];
 
+    if (platform === "h200") {
+      return NextResponse.json(await fetchJobLog(targetId, linesCount));
+    }
     if (platform === "local") {
       const dataDir = path.join(root, "data");
       // Find matching folder or default train.log

@@ -1,11 +1,11 @@
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { ask, chooseH200 } from "./h200-login.js";
-import { findAccount, listAccounts } from "./lib/accounts.js";
+import { findAccount, listAccounts, operator, python } from "./lib/accounts.js";
 
 /**
  * pnpm h200                     menu
@@ -40,6 +40,12 @@ const RESULTS = [
   "results3d-h200-plain",
   "results-nnunet-3d_fullres",
   "results-nnunet-2d",
+  "results-nnunet-3d_fullres-noaug",
+  "results-nnunet-2d-noaug",
+  "results3d-holdout",
+  "results3d-holdout-none",
+  "results3d-holdout-low",
+  "results3d-holdout-max",
   "results3d-h200",
   "results2dseg3d",
 ];
@@ -267,6 +273,12 @@ async function submit(sbatch, what, logPrefix, extra = "", flags = "") {
   } else if (logPrefix.startsWith("selftest_")) {
     outFolder = `results3d-selftest-${logPrefix.slice(9)}`;
     methodId = `selftest-${logPrefix.slice(9)}`;
+  } else if (logPrefix.startsWith("holdout_")) {
+    outFolder = `results3d-holdout-${logPrefix.slice(8)}`;
+    methodId = `unet-holdout-${logPrefix.slice(8)}`;
+  } else if (logPrefix === "nnunet_noaug") {
+    outFolder = extra.includes("2d") ? "results-nnunet-2d-noaug" : "results-nnunet-3d_fullres-noaug";
+    methodId = extra.includes("2d") ? "nnunet-2d-noaug" : "nnunet-3d-noaug";
   } else if (logPrefix === "holdout") {
     outFolder = "results3d-holdout";
     methodId = "unet-holdout";
@@ -287,10 +299,8 @@ async function submit(sbatch, what, logPrefix, extra = "", flags = "") {
   const allAccounts = listAccounts();
   const account = findAccount(allAccounts, asRoll || session.roll) || null;
   const meta = {
-    startedBy: {
-      usn: account?.usn || `NNM23CS${session.roll}`,
-      name: account?.name || "",
-    },
+    startedBy: { usn: "", name: operator() },
+    accountOwner: account?.name || "",
     platform: "h200",
     account: session.user,
     host: os.hostname(),
@@ -415,18 +425,34 @@ async function selftest(args) {
  * One round of the 3D U-Net (augmentation med) on the fixed 80/20 split in
  * data/splits/holdout_80_20.json -> data/results3d-holdout. Continues if started.
  */
-async function holdout() {
+async function holdout(args = []) {
+  const level = ["none", "low", "med", "max"].includes(args[0]) ? args[0] : "med";
   if (!fs.existsSync(path.join(root, HOLDOUT))) {
-    console.log("There is no fixed 80/20 split yet. Make it here first; it shows which scans go where:");
-    console.log("  pnpm train:split");
-    return;
+    if (process.env.BME_NO_PROMPT !== "1") {
+      console.log("There is no fixed 80/20 split yet. Make it here first; it shows which scans go where:");
+      console.log("  pnpm train:split");
+      return;
+    }
+    // From the dashboard: make it now. It is patient-grouped with a fixed seed,
+    // so the same scans always give the same split, and it never changes after.
+    console.log("There is no fixed 80/20 split yet. Making it now (patient-grouped, fixed seed).");
+    const made = spawnSync(python, [path.join(root, "ml", "scripts", "holdout_split.py"), root, "--create"], {
+      cwd: root,
+      encoding: "utf8",
+      windowsHide: true,
+    });
+    for (const line of (made.stdout || "").split(/\r?\n/)) if (line && !line.startsWith("  ")) console.log(line);
+    if (made.status !== 0 || !fs.existsSync(path.join(root, HOLDOUT))) {
+      fail(`Could not make the split: ${(made.stderr || "").trim().split(/\r?\n/).pop() || "no output"}`);
+    }
   }
   const split = JSON.parse(fs.readFileSync(path.join(root, HOLDOUT), "utf8"));
   console.log(`Fixed split from ${split.created}: ${split.train.length} training scans, ${split.val.length} validation scans.`);
   console.log("See the lists with: pnpm train:split");
-  const out = "results3d-holdout";
+  const tag = level === "med" ? "" : `_${level}`;
+  const out = `results3d-holdout${level === "med" ? "" : `-${level}`}`;
   const state = await ssh(
-    `cd ${REMOTE}/data 2>/dev/null && { [ -f ${out}/metrics.json ] && echo DONE; [ -n "$(ls -A ${out} 2>/dev/null)" ] && echo STARTED; }; true`,
+    `cd ${REMOTE}/data 2>/dev/null && { [ -f ${out}/metrics.json ] && echo DONE; ls ${out}/*.pt ${out}/checkpoints ${out}/fold_* >/dev/null 2>&1 && echo STARTED; }; true`,
   );
   if (state.code !== 0) fail(session.unreachable, state.code);
   if (state.out.includes("DONE")) {
@@ -434,26 +460,46 @@ async function holdout() {
     return;
   }
   const resume = state.out.includes("STARTED");
-  console.log(`${resume ? "Continuing" : "Starting"} the holdout run -> data/${out} (one job, under 4 h).`);
+  console.log(`${resume ? "Continuing" : "Starting"} the holdout run, augmentation ${level} -> data/${out} (one job, under 4 h).`);
   if (!(await okWithOtherJobs())) return;
   await submit(
-    "train_3d_aug.sbatch",
-    "bme_holdout",
-    "holdout",
-    `med --holdout ${HOLDOUT} --out ${out}${resume ? " --resume" : ""}`,
-    `--job-name=bme_holdout --output=$HOME/bme/logs/holdout_%j.out --error=$HOME/bme/logs/holdout_%j.err`,
+    level === "none" ? "train_3d_plain.sbatch" : "train_3d_aug.sbatch",
+    `bme_holdout${tag}`,
+    `holdout${tag}`,
+    `${level === "none" ? "" : `${level} `}--holdout ${HOLDOUT} --out ${out}${resume ? " --resume" : ""}`,
+    `--job-name=bme_holdout${tag} --output=$HOME/bme/logs/holdout${tag}_%j.out --error=$HOME/bme/logs/holdout${tag}_%j.err`,
   );
 }
 
-const NN_RUN = (config) =>
-  `${REMOTE}/data/nnunet/results/Dataset501_BMEKnee/nnUNetTrainer_BME100__nnUNetResEncUNetMPlans__${config}`;
+/**
+ * The 3D U-Net with no augmentation (the control) -> data/results3d-h200-plain.
+ * Continues by itself when that folder already holds checkpoints.
+ */
+async function plain() {
+  const out = "results3d-h200-plain";
+  const state = await ssh(
+    `cd ${REMOTE}/data 2>/dev/null && { [ -f ${out}/metrics.json ] && echo DONE; ls ${out}/*.pt ${out}/checkpoints ${out}/fold_* >/dev/null 2>&1 && echo STARTED; }; true`,
+  );
+  if (state.code !== 0) fail(session.unreachable, state.code);
+  if (state.out.includes("DONE")) {
+    console.log(`${out} is already finished on this account. Download it with: pnpm runs:get`);
+    return;
+  }
+  const resume = state.out.includes("STARTED");
+  console.log(`${resume ? "Continuing" : "Starting"} the no-augmentation run -> data/${out} (one job, under 4 h).`);
+  if (!(await okWithOtherJobs())) return;
+  await submit("train_3d_plain.sbatch", "bme_unet3d_plain", "unet3dplain", resume ? "--resume" : "");
+}
+
+const NN_RUN = (config, noaug = false) =>
+  `${REMOTE}/data/nnunet/results/Dataset501_BMEKnee/nnUNetTrainer_BME100${noaug ? "NoDA" : ""}__nnUNetResEncUNetMPlans__${config}`;
 const NN_EPOCHS = 100;
 const JOB_SECONDS = 3.75 * 3600;
 
 /** Progress and a time estimate for one nnU-Net configuration, from its own logs on the server. */
-async function nnunetProgress(config) {
+async function nnunetProgress(config, noaug = false) {
   const r = await ssh(
-    `cd ${NN_RUN(config)} 2>/dev/null || { echo NONE; exit 0; }; ` +
+    `cd ${NN_RUN(config, noaug)} 2>/dev/null || { echo NONE; exit 0; }; ` +
       `for f in 0 1 2 3 4; do ` +
       `if [ -f fold_$f/checkpoint_final.pth ]; then echo "FOLD $f final"; ` +
       `else echo "FOLD $f $(cat fold_$f/training_log_*.txt 2>/dev/null | grep -c 'Epoch time')"; fi; done; ` +
@@ -484,8 +530,9 @@ async function best(args) {
     config = ["2d", "3d_fullres"][Number(await ask("Which part? [1-2] ")) - 1];
     if (!config) return;
   }
-  const p = await nnunetProgress(config);
-  console.log(`\nnnU-Net ${config}: 5 folds x ${NN_EPOCHS} epochs. Epochs done per fold: ${p.done.join(", ")}.`);
+  const noaug = args[1] === "noaug";
+  const p = await nnunetProgress(config, noaug);
+  console.log(`\nnnU-Net ${config}${noaug ? ", no augmentation" : ""}: 5 folds x ${NN_EPOCHS} epochs. Epochs done per fold: ${p.done.join(", ")}.`);
   if (!p.left) {
     console.log("All folds are finished. This job only scores them (a few minutes).");
   } else if (p.perEpoch) {
@@ -501,6 +548,16 @@ async function best(args) {
   console.log("Each job stops itself at 3 h 45. Choose this again to continue from the last checkpoint.");
   if (process.env.BME_NO_PROMPT !== "1" && (await ask(`${p.left === 5 * NN_EPOCHS ? "Start" : "Continue"}? [y/N] `)).toLowerCase() !== "y") return;
   if (!(await okWithOtherJobs())) return;
+  if (noaug) {
+    await submit(
+      "nnunet.sbatch",
+      "bme_nnunet_noaug",
+      "nnunet_noaug",
+      `${config} noaug`,
+      `--job-name=bme_nnunet_noaug --output=$HOME/bme/logs/nnunet_noaug_%j.out --error=$HOME/bme/logs/nnunet_noaug_%j.err`,
+    );
+    return;
+  }
   await submit("nnunet.sbatch", "bme_nnunet", "nnunet", config);
 }
 
@@ -684,7 +741,8 @@ const OPS = [
   { key: "push", label: "Push data", about: "Send code and every annotated 3D case. Only new or changed files go.", fn: push },
   { key: "best", label: "Best model: nnU-Net (start or continue)", about: "nnU-Net ResEnc M, bone + edema, 2D or 3D part. Shows progress and the time left, then submits one 4 h job.", fn: best },
   { key: "selftest", label: "Self-test (2 minutes): aug or plain", about: "A tiny run that checks start, stop with a checkpoint, and continue.", fn: selftest },
-  { key: "holdout", label: "Holdout: one round on the fixed 80/20 split", about: "3D U-Net, augmentation med, trained once on 80% and checked on the fixed 20% -> data/results3d-holdout.", fn: holdout },
+  { key: "holdout", label: "Holdout: one round on the fixed 80/20 split", about: "3D U-Net trained once on 80% and checked on the fixed 20%. Add none, low, med or max for the augmentation (default med).", fn: holdout },
+  { key: "plain", label: "3D U-Net, no augmentation (start or continue)", about: "The control run -> data/results3d-h200-plain. Continues if already started.", fn: plain },
   { key: "aug", label: "Augmentation levels: low / med / max", about: "Same 3D U-Net at one augmentation level -> data/results3d-aug-<level>. Continues if already started.", fn: aug },
   { key: "train3d", label: "Train 3D (long, ~3.5 h)", about: `Push, then sbatch ml/slurm/train_3d.sbatch -> ${R3D}. Live rotation/zoom, 1 mm grid.`, fn: () => submit("train_3d.sbatch", "bme_unet3d", "unet3d") },
   { key: "resume3d", label: "Resume 3D", about: "Continue a 3D run that maintenance or the 4 h limit stopped, from its last saved epoch.", fn: () => submit("train_3d.sbatch", "bme_unet3d", "unet3d", "--resume") },

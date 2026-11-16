@@ -120,9 +120,9 @@ def cmd_splits(base: Path):
     print(f"wrote {out}: " + ", ".join(f"fold {i} val {len(s['val'])}" for i, s in enumerate(splits)))
 
 
-def cmd_metrics(base: Path, config: str, out_name: str):
+def cmd_metrics(base: Path, config: str, out_name: str, trainer: str = TRAINER):
     raw = base / "data" / "nnunet" / "raw" / DATASET
-    run = base / "data" / "nnunet" / "results" / DATASET / f"{TRAINER}__{PLANS}__{config}"
+    run = base / "data" / "nnunet" / "results" / DATASET / f"{trainer}__{PLANS}__{config}"
     rows = []
     for fold in range(5):
         vdir = run / f"fold_{fold}" / "validation"
@@ -173,7 +173,7 @@ def cmd_metrics(base: Path, config: str, out_name: str):
         "per_fold": rows,
         "trained_at": datetime.now(timezone.utc).isoformat(),
         "note": (
-            f"nnU-Net v2 ResEnc M, {config}, {TRAINER}, train_3d.py's folds. "
+            f"nnU-Net v2 ResEnc M, {config}, {trainer}, train_3d.py's folds. "
             "Scored with train_3d.py's functions; mean +- std across folds."
         ),
     }
@@ -192,6 +192,7 @@ def main():
     ap.add_argument("base", type=Path)
     ap.add_argument("--config", default="3d_fullres")
     ap.add_argument("--out", default="")
+    ap.add_argument("--trainer", default=TRAINER)
     a = ap.parse_args()
     base = a.base.resolve()
     if a.cmd == "convert":
@@ -199,7 +200,7 @@ def main():
     elif a.cmd == "splits":
         cmd_splits(base)
     else:
-        cmd_metrics(base, a.config, a.out or f"results-nnunet-{a.config}")
+        cmd_metrics(base, a.config, a.out or f"results-nnunet-{a.config}", a.trainer)
 
 
 if __name__ == "__main__":

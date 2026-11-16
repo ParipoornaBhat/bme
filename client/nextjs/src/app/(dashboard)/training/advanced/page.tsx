@@ -170,7 +170,7 @@ export default function AdvancedTrainingPage() {
   const [selectedMethodId, setSelectedMethodId] = useState<string>(METHODS[0].id);
   const [selectedTargetId, setSelectedTargetId] = useState<string>("");
   const [selectedDatasetOwner, setSelectedDatasetOwner] = useState<string>("");
-  const [augLevel, setAugLevel] = useState<"low" | "med" | "max">("med");
+  const [augLevel, setAugLevel] = useState<"none" | "low" | "med" | "max">("med");
   const [splitMode, setSplitMode] = useState<"5folds" | "holdout">("5folds");
   const [epochs, setEpochs] = useState<number>(50);
 

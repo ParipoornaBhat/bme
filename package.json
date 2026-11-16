@@ -88,6 +88,7 @@
     "copy:model:remote": "node scripts/h200-menu.js get2d",
     "copy:model3d:remote": "node scripts/h200-menu.js get3d",
     "h200": "node scripts/h200-menu.js",
+    "h200:auto": "node scripts/h200-auto.js",
     "migrate:generate": "pnpm --filter @bme/db db:generate --name",
     "migrate:deploy": "pnpm --filter @bme/db db:migrate",
     "clean": "node scripts/clean.js",

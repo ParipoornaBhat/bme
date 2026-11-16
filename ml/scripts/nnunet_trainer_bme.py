@@ -15,3 +15,23 @@ class nnUNetTrainer_BME100(nnUNetTrainer_100epochs):
     def initialize(self):
         self.save_every = 5
         super().initialize()
+
+
+# The no-augmentation variant is optional: if this nnU-Net has no NoDA trainer,
+# the main trainer above must still load.
+try:
+    from nnunetv2.training.nnUNetTrainer.variants.data_augmentation.nnUNetTrainerNoDA import nnUNetTrainerNoDA
+except ImportError:
+    nnUNetTrainerNoDA = None
+
+if nnUNetTrainerNoDA is not None:
+    class nnUNetTrainer_BME100NoDA(nnUNetTrainerNoDA):
+        """The same 100 epochs and 5-epoch checkpoints with nnU-Net's augmentation off."""
+
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self.num_epochs = 100
+
+        def initialize(self):
+            self.save_every = 5
+            super().initialize()

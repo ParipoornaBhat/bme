@@ -11,7 +11,10 @@ export async function POST(req: NextRequest) {
 
   try {
     const body = await req.json();
-    const { platform, targetId, methodId, settings = {}, datasetOwnerRoll } = body;
+    // The page sends its choices as `extra`; `settings` is the older name.
+    const { platform, targetId, methodId } = body;
+    const settings = { ...(body.settings || {}), ...(body.extra || {}) };
+    const datasetOwnerRoll = body.datasetOwnerRoll || settings.datasetOwnerRoll;
 
     if (!platform || !targetId || !methodId) {
       return NextResponse.json({ error: "Missing required parameters (platform, targetId, methodId)" }, { status: 400 });

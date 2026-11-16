@@ -11,10 +11,16 @@ export async function POST(req: NextRequest) {
 
   try {
     const body = await req.json();
-    const { platform, targetId, jobId } = body;
+    // The page sends the Slurm job id as slurmJobId; accept jobId too.
+    const { platform, targetId } = body;
+    const jobId = String(body.slurmJobId || body.jobId || "").trim();
 
     if (!platform || !targetId) {
       return NextResponse.json({ error: "Missing required parameters (platform, targetId)" }, { status: 400 });
+    }
+    // Without a job id the H200 would cancel every job on the account. Refuse.
+    if (platform === "h200" && !/^\d+$/.test(jobId)) {
+      return NextResponse.json({ error: "No job id for this run, so nothing was cancelled. Refresh the status and try again." }, { status: 400 });
     }
 
     const res = await cancelJob(platform, targetId, jobId);

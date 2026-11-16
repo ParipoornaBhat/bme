@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 import { Info, Loader2, Play } from "lucide-react";
 import type {
   AccountCard,
@@ -9,6 +9,49 @@ import type {
   MethodSpec,
   TargetDatasetStatus,
 } from "~/lib/training-advanced/types";
+import { LogModal, TerminalBox, type LogTarget } from "./TerminalView";
+
+type Aug = "builtin" | "none" | "low" | "med" | "max";
+type Where = "h200" | "kaggle";
+
+// The model is one choice, the augmentation another, the validation split a third.
+const MODELS: { key: string; label: string; where: Where; augs: Aug[]; holdout?: boolean }[] = [
+  { key: "nnunet-3d", label: "nnU-Net ResEnc M, 3D", where: "h200", augs: ["builtin", "none"] },
+  { key: "nnunet-2d", label: "nnU-Net ResEnc M, 2D", where: "h200", augs: ["builtin", "none"] },
+  { key: "unet3d", label: "3D U-Net", where: "h200", augs: ["none", "low", "med", "max"], holdout: true },
+  { key: "k-unet3d", label: "3D U-Net (Kaggle settings)", where: "kaggle", augs: ["none", "low", "med", "max"] },
+  { key: "k-mednext", label: "MedNeXt", where: "kaggle", augs: ["none", "low", "med", "max"] },
+  { key: "k-orthogate", label: "OrthoGate-MedNeXt", where: "kaggle", augs: ["none", "low", "med", "max"] },
+  { key: "k-cnet-dual", label: "C-Net dual U-Net", where: "kaggle", augs: ["none", "low", "med", "max"] },
+  { key: "selftest", label: "Self-test (2 minutes, checks start / stop / continue)", where: "h200", augs: ["none", "max"] },
+];
+
+const AUG_LABEL: Record<Aug, string> = {
+  builtin: "nnU-Net's own augmentation",
+  none: "None",
+  low: "Low (mild gamma, +-15 deg, 10% of patches)",
+  med: "Medium (nnU-Net strength, +-30 deg, 20% of patches)",
+  max: "Max (same + noise, 30-50% of patches)",
+};
+
+function parseMethod(mid: string, kaggleAug: Aug): { model: string; aug: Aug; holdout: boolean } {
+  if (mid.startsWith("nnunet-")) return { model: mid.includes("2d") ? "nnunet-2d" : "nnunet-3d", aug: mid.endsWith("-noaug") ? "none" : "builtin", holdout: false };
+  if (mid.startsWith("unet-holdout")) return { model: "unet3d", aug: (mid.replace("unet-holdout", "").replace("-", "") || "med") as Aug, holdout: true };
+  if (mid === "unet-noaug") return { model: "unet3d", aug: "none", holdout: false };
+  if (mid.startsWith("unet-aug-")) return { model: "unet3d", aug: mid.replace("unet-aug-", "") as Aug, holdout: false };
+  if (mid.startsWith("selftest-")) return { model: "selftest", aug: mid === "selftest-plain" ? "none" : "max", holdout: false };
+  return { model: mid, aug: kaggleAug, holdout: false };
+}
+
+function methodIdFor(model: string, aug: Aug, holdout: boolean): string {
+  if (model.startsWith("nnunet-")) return aug === "none" ? `${model}-noaug` : model;
+  if (model === "selftest") return aug === "none" ? "selftest-plain" : "selftest-aug";
+  if (model === "unet3d") {
+    if (holdout) return aug === "med" ? "unet-holdout" : `unet-holdout-${aug}`;
+    return aug === "none" ? "unet-noaug" : `unet-aug-${aug}`;
+  }
+  return model;
+}
 
 export interface StartTrainingFormProps {
   methods: MethodSpec[];
@@ -19,14 +62,14 @@ export interface StartTrainingFormProps {
   selectedMethodId: string;
   selectedTargetId: string;
   selectedDatasetOwner: string;
-  augLevel: "low" | "med" | "max";
+  augLevel: "none" | "low" | "med" | "max";
   splitMode: "5folds" | "holdout";
   epochs: number;
   startBusy: boolean;
   onMethodChange: (methodId: string) => void;
   onTargetChange: (targetId: string) => void;
   onDatasetOwnerChange: (ownerRoll: string) => void;
-  onAugLevelChange: (level: "low" | "med" | "max") => void;
+  onAugLevelChange: (level: "none" | "low" | "med" | "max") => void;
   onSplitModeChange: (mode: "5folds" | "holdout") => void;
   onEpochsChange: (epochs: number) => void;
   onSubmit: () => void;
@@ -53,12 +96,16 @@ export function StartTrainingForm({
   onEpochsChange,
   onSubmit,
 }: StartTrainingFormProps) {
-  const currentSelectedMethod = methods.find((m) => m.id === selectedMethodId) || methods[0];
+  const [openLog, setOpenLog] = useState<LogTarget | null>(null);
+  const mid = selectedMethodId;
+  const sel = parseMethod(mid, augLevel);
+  const model = MODELS.find((m) => m.key === sel.model) || MODELS[0];
+  const currentSelectedMethod = methods.find((m) => m.id === mid);
   const currentSelectedTarget = cards.find((c) => c.id === selectedTargetId) || cards[0];
 
-  // Only targets this method can run on.
+  // Only targets this model can run on.
   const validCards = cards.filter(
-    (c) => c.platform === currentSelectedMethod?.where || (c.platform === "local" && currentSelectedMethod?.localSupported),
+    (c) => c.platform === model.where || (c.platform === "local" && model.key === "unet3d" && !sel.holdout && sel.aug !== "none"),
   );
   useEffect(() => {
     if (validCards.length > 0 && !validCards.some((c) => c.id === selectedTargetId)) {
@@ -66,34 +113,32 @@ export function StartTrainingForm({
     }
   }, [selectedMethodId, selectedTargetId, validCards.length]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const mid = currentSelectedMethod?.id || "";
-  const methodRuns = mid.startsWith("selftest")
-    ? "12 cases, 2 folds, at most 1.5 minutes of training per job. Press Continue next part once to check resume."
-    : mid.startsWith("nnunet")
-    ? "5 folds x 100 epochs with nnU-Net's own augmentation. Each job stops at 3 h 45 m; Resume continues it."
-    : mid === "unet-holdout"
-    ? "one round on the fixed 80/20 split, augmentation med."
-    : mid === "unet-noaug"
-    ? "patient-level cross-validation with no augmentation (the control)."
-    : mid.startsWith("unet-aug-")
-    ? `patient-level cross-validation, augmentation ${mid.replace("unet-aug-", "")}.`
-    : "the Kaggle settings for this architecture, augmentation med.";
+  const pickModel = (key: string) => {
+    const next = MODELS.find((m) => m.key === key) || MODELS[0];
+    const aug: Aug = next.augs.includes(sel.aug) ? sel.aug : next.augs.includes("med") ? "med" : next.augs[0];
+    if (next.where === "kaggle" && aug !== "builtin") onAugLevelChange(aug);
+    onMethodChange(methodIdFor(next.key, aug, Boolean(next.holdout) && sel.holdout));
+  };
+  const pickAug = (aug: Aug) => {
+    if (model.where === "kaggle" && aug !== "builtin") onAugLevelChange(aug);
+    onMethodChange(methodIdFor(model.key, aug, sel.holdout));
+  };
 
-  const isH200Unet = mid.startsWith("unet-aug-") || mid === "unet-noaug";
-  const augEditable = isH200Unet;
-  const augValue = mid === "unet-noaug"
-    ? "none"
-    : mid.startsWith("unet-aug-")
-    ? mid.replace("unet-aug-", "")
-    : mid.startsWith("nnunet")
-    ? "builtin"
-    : "med";
-  const splitEditable = mid === "unet-aug-med" || mid === "unet-holdout";
-  const epochsText = mid.startsWith("selftest")
+  const augText = sel.aug === "builtin" ? "nnU-Net's own augmentation" : sel.aug === "none" ? "no augmentation" : `augmentation ${sel.aug}`;
+  const methodRuns = model.key === "selftest"
+    ? `12 cases, 2 folds, at most 1.5 minutes of training per job, ${augText}. Press Continue next part once to check resume.`
+    : model.key.startsWith("nnunet")
+    ? `5 folds x 100 epochs, ${augText}. Each job stops at 3 h 45 m; Continue carries on.`
+    : model.key === "unet3d"
+    ? sel.holdout
+      ? `one round on the fixed 80/20 split, ${augText}. The split is made automatically the first time and never changes.`
+      : `patient-level 5-fold cross-validation, ${augText}.`
+    : `the Kaggle settings for this architecture, ${augText}.`;
+  const epochsText = model.key === "selftest"
     ? "As many as fit in 1.5 minutes"
-    : mid.startsWith("nnunet")
+    : model.key.startsWith("nnunet")
     ? "100 per fold (fixed by nnU-Net ResEnc M)"
-    : currentSelectedMethod?.where === "h200"
+    : model.where === "h200"
     ? "Up to 400 per fold, limited by time: each part trains about 3.3 h, then saves and stops"
     : "Fixed by the Kaggle settings for this architecture";
   const needsNnunet = mid.startsWith("nnunet");
@@ -119,6 +164,7 @@ export function StartTrainingForm({
 
   return (
     <div className="space-y-4 rounded-2xl border border-border bg-card p-6 shadow-sm">
+      <LogModal target={openLog} onClose={() => setOpenLog(null)} />
       <div className="flex items-center gap-2">
         <Play className="h-5 w-5 text-primary" />
         <h2 className="text-lg font-bold tracking-tight">Start a Run</h2>
@@ -131,22 +177,22 @@ export function StartTrainingForm({
         {/* Pick Method */}
         <div className="sm:col-span-2">
           <label className="text-xs font-bold uppercase tracking-wider text-muted-foreground block mb-1.5">
-            1. Select Method
+            1. Select Model
           </label>
           <select
-            value={selectedMethodId}
-            onChange={(e) => onMethodChange(e.target.value)}
+            value={model.key}
+            onChange={(e) => pickModel(e.target.value)}
             className="w-full rounded-xl border border-border bg-background px-3 py-2 text-xs font-semibold cursor-pointer"
           >
-            {methods.map((m) => (
-              <option key={m.id} value={m.id}>
-                {m.n}. {m.label} ({m.where.toUpperCase()})
+            {MODELS.map((m) => (
+              <option key={m.key} value={m.key}>
+                {m.label} ({m.where.toUpperCase()})
               </option>
             ))}
           </select>
-          <p className="mt-1 text-[11px] text-muted-foreground">
-            Tests: {currentSelectedMethod?.tests}
-          </p>
+          {currentSelectedMethod?.tests && (
+            <p className="mt-1 text-[11px] text-muted-foreground">Tests: {currentSelectedMethod.tests}</p>
+          )}
         </div>
 
         {/* Pick Target */}
@@ -213,32 +259,29 @@ export function StartTrainingForm({
           </div>
         )}
 
-        {/* Augmentation level: picks the matching 3D U-Net run */}
+        {/* Augmentation: the user's choice for every model */}
         <div>
           <label className="text-xs font-bold uppercase tracking-wider text-muted-foreground block mb-1.5">
-            Augmentation Level
+            Augmentation
           </label>
           <select
-            value={augValue}
-            disabled={!augEditable}
-            onChange={(e) => onMethodChange(e.target.value === "none" ? "unet-noaug" : `unet-aug-${e.target.value}`)}
-            className="w-full rounded-xl border border-border bg-background px-3 py-2 text-xs font-semibold cursor-pointer disabled:opacity-60 disabled:cursor-not-allowed"
+            value={sel.aug}
+            onChange={(e) => pickAug(e.target.value as Aug)}
+            className="w-full rounded-xl border border-border bg-background px-3 py-2 text-xs font-semibold cursor-pointer"
           >
-            {!augEditable && mid.startsWith("nnunet") && <option value="builtin">nnU-Net built-in (fixed)</option>}
-            <option value="none">None (control run)</option>
-            <option value="low">Low (mild gamma, +-15 deg, 10% patches)</option>
-            <option value="med">Medium (nnU-Net strength, +-30 deg, 20% patches)</option>
-            <option value="max">Max (same + noise, 30-50% patches)</option>
+            {model.augs.map((a) => (
+              <option key={a} value={a}>
+                {AUG_LABEL[a]}
+              </option>
+            ))}
           </select>
-          {!augEditable && (
-            <p className="mt-1 text-[10px] text-muted-foreground">
-              {mid.startsWith("nnunet")
-                ? "nnU-Net applies its own augmentation."
-                : mid === "unet-holdout"
-                ? "The holdout run is defined at medium."
-                : "Kaggle runs use the fixed medium level."}
-            </p>
-          )}
+          <p className="mt-1 text-[10px] text-muted-foreground">
+            {model.key.startsWith("nnunet")
+              ? "nnU-Net has one built-in augmentation, so the choice is on or off. Each choice trains into its own folder."
+              : model.key === "selftest"
+              ? "The self-test checks the path with augmentation off or at max."
+              : "Augmentation is applied live during training. Each level trains into its own folder, so runs can be compared."}
+          </p>
         </div>
 
         {/* Validation split */}
@@ -247,17 +290,17 @@ export function StartTrainingForm({
             Validation Split
           </label>
           <select
-            value={mid === "unet-holdout" ? "holdout" : "5folds"}
-            disabled={!splitEditable}
-            onChange={(e) => onMethodChange(e.target.value === "holdout" ? "unet-holdout" : "unet-aug-med")}
+            value={sel.holdout ? "holdout" : "5folds"}
+            disabled={!model.holdout}
+            onChange={(e) => onMethodChange(methodIdFor(model.key, sel.aug, e.target.value === "holdout"))}
             className="w-full rounded-xl border border-border bg-background px-3 py-2 text-xs font-semibold cursor-pointer disabled:opacity-60 disabled:cursor-not-allowed"
           >
             <option value="5folds">5-Fold Patient Cross-Validation</option>
             <option value="holdout">Fixed 80/20 Holdout Split</option>
           </select>
-          {!splitEditable && (
+          {!model.holdout && (
             <p className="mt-1 text-[10px] text-muted-foreground">
-              The fixed 80/20 split exists only for the 3D U-Net at medium augmentation.
+              The fixed 80/20 split is wired for the 3D U-Net on the H200 only.
             </p>
           )}
         </div>
@@ -338,9 +381,20 @@ export function StartTrainingForm({
                 </span>
                 <span className="text-muted-foreground">{new Date(l.startedAt).toLocaleTimeString()}</span>
               </div>
-              <pre className="max-h-40 overflow-auto rounded-lg bg-black/80 p-2 text-[10px] leading-relaxed text-green-300 font-mono whitespace-pre-wrap">
-                {(l.log && l.log.length ? l.log.slice(-12) : [l.message || ""]).join(String.fromCharCode(10))}
-              </pre>
+              <TerminalBox
+                title={`${l.type} - ${l.target}`}
+                prompt={`this-pc:bme$ pnpm h200 ${l.type === "setup" ? "setup" : "start"} --as ${l.target.replace("h200-", "")}`}
+                lines={l.log && l.log.length ? l.log.slice(-40) : [l.message || ""]}
+                live={l.status === "running"}
+                onOpen={() =>
+                  setOpenLog({
+                    title: `${l.type} - ${cards.find((c) => c.id === l.target)?.label || l.target}`,
+                    prompt: "this-pc:bme$",
+                    lines: l.log && l.log.length ? l.log : [l.message || ""],
+                    live: l.status === "running",
+                  })
+                }
+              />
             </div>
           ))}
         </div>
@@ -376,7 +430,7 @@ export function StartTrainingForm({
       <div className="pt-3 border-t border-border/50 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
         <div className="text-[11px] text-muted-foreground flex items-center gap-1.5">
           <Info className="h-4 w-4 shrink-0 text-primary" />
-          <span>Full metadata (`startedBy`, `platform`, `account`, `host`, `startedAt`) recorded automatically.</span>
+          <span>Recorded with each run: who started it (the person at this PC), the account used, this PC's name and the time.</span>
         </div>
 
         <button
