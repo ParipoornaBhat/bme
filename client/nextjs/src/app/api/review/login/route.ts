@@ -99,9 +99,27 @@ export async function POST(req: NextRequest) {
 
     return res;
   } catch (err: unknown) {
-    console.error("review login: database step failed:", err instanceof Error ? err.message : String(err));
+    const msg = err instanceof Error ? err.message : String(err);
+    const cause = (err as { cause?: { message?: string } })?.cause?.message || "";
+    const text = `${msg} ${cause}`.toLowerCase();
+    const reason = text.includes("database_url is not defined")
+      ? "no-database-url"
+      : text.includes("ssl")
+      ? "ssl"
+      : text.includes("password authentication") || text.includes("tenant or user")
+      ? "db-credentials"
+      : text.includes("enotfound") || text.includes("eai_again")
+      ? "db-host-not-found"
+      : text.includes("timeout") || text.includes("etimedout") || text.includes("econnrefused")
+      ? "db-unreachable"
+      : text.includes("does not exist")
+      ? "missing-table"
+      : text.includes("invalid url") || text.includes("invalid connection")
+      ? "bad-url-format"
+      : "other";
+    console.error("review login: database step failed:", msg, cause);
     return NextResponse.json(
-      { error: "Login failed" },
+      { error: "Login failed", reason },
       { status: 500 },
     );
   }
