@@ -22,6 +22,7 @@ import { toast } from "sonner";
 import { ComputeAccountsGrid } from "./components/ComputeAccountsGrid";
 import { StartTrainingForm } from "./components/StartTrainingForm";
 import { RunHistoryTable } from "./components/RunHistoryTable";
+import { useTrainingData } from "./TrainingDataProvider";
 
 const METHODS: MethodSpec[] = [
   {
@@ -131,11 +132,7 @@ const fmtDate = (isoStr: string | null | undefined): string => {
 export default function AdvancedTrainingPage() {
   const inReview = isReviewMode();
 
-  const [cards, setCards] = useState<AccountCard[]>([]);
-  const [runs, setRuns] = useState<RunItem[]>([]);
-  const [datasetTargets, setDatasetTargets] = useState<TargetDatasetStatus[]>([]);
-  const [kaggleDatasets, setKaggleDatasets] = useState<KaggleDatasetOption[]>([]);
-  const [tasks, setTasks] = useState<BackgroundTask[]>([]);
+  const { cards, runs, datasetTargets, kaggleDatasets, tasks, refreshing, refresh } = useTrainingData();
 
   // Selection states for Start form
   const [selectedMethodId, setSelectedMethodId] = useState<string>(METHODS[0].id);
@@ -146,62 +143,20 @@ export default function AdvancedTrainingPage() {
   const [epochs, setEpochs] = useState<number>(50);
 
   // Loading states
-  const [loading, setLoading] = useState(true);
-  const [refreshing, setRefreshing] = useState(false);
   const [startBusy, setStartBusy] = useState(false);
 
-  const loadData = useCallback(async (isSilent = false) => {
-    if (inReview) {
-      setLoading(false);
-      return;
-    }
-    if (!isSilent) setRefreshing(true);
-
-    const getJson = (url: string) =>
-      fetch(url, { cache: "no-store" }).then((r) => (r.ok ? r.json() : null));
-
-    try {
-      const [accData, runData, dsData, taskData] = await Promise.all([
-        getJson("/api/training-advanced/accounts?quick=true"),
-        getJson("/api/training-advanced/runs"),
-        getJson("/api/training-advanced/dataset"),
-        getJson("/api/training-advanced/tasks"),
-      ]);
-
-      if (accData) {
-        if (accData.cards) {
-          setCards(accData.cards);
-          if (!selectedTargetId && accData.cards.length > 0) {
-            setSelectedTargetId(accData.cards[0].id);
-          }
-        }
-        if (accData.kaggleDatasets) {
-          setKaggleDatasets(accData.kaggleDatasets);
-          if (accData.kaggleDatasets.length > 0 && !selectedDatasetOwner) {
-            const def = accData.kaggleDatasets.find((d: any) => d.isDefault) || accData.kaggleDatasets[0];
-            setSelectedDatasetOwner(def.roll);
-          }
-        }
-      }
-
-      if (runData?.runs) setRuns(runData.runs);
-      if (dsData?.targets) setDatasetTargets(dsData.targets);
-      if (taskData?.tasks) setTasks(taskData.tasks);
-    } catch {
-      toast.error("Failed to refresh training data");
-    } finally {
-      setLoading(false);
-      setRefreshing(false);
-    }
-  }, [inReview, selectedTargetId, selectedDatasetOwner]);
+  const loadData = useCallback((_silent?: boolean) => refresh(), [refresh]);
 
   useEffect(() => {
-    loadData();
-    const timer = setInterval(() => {
-      loadData(true);
-    }, 5000);
-    return () => clearInterval(timer);
-  }, [loadData]);
+    if (!selectedTargetId && cards.length > 0) setSelectedTargetId(cards[0].id);
+  }, [cards, selectedTargetId]);
+
+  useEffect(() => {
+    if (!selectedDatasetOwner && kaggleDatasets.length > 0) {
+      const def = kaggleDatasets.find((d) => d.isDefault) || kaggleDatasets[0];
+      setSelectedDatasetOwner(def.roll);
+    }
+  }, [kaggleDatasets, selectedDatasetOwner]);
 
   // Launch a new training run
   const handleStartSubmit = async () => {
@@ -319,16 +274,6 @@ export default function AdvancedTrainingPage() {
     );
   }
 
-  if (loading) {
-    return (
-      <div className="flex h-[70vh] flex-col items-center justify-center space-y-4">
-        <Loader2 className="h-8 w-8 animate-spin text-primary" />
-        <p className="text-sm font-medium text-muted-foreground">
-          Connecting to College H200 cluster and Kaggle accounts...
-        </p>
-      </div>
-    );
-  }
 
   return (
     <div className="space-y-8 pb-12">

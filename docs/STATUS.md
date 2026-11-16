@@ -70,7 +70,7 @@ Phases are defined in [PRD.md](PRD.md) §8.
 
 **Continue here: see [docs/handoff/HANDOFF.md](handoff/HANDOFF.md)** for the Advanced Training page plan (sync check button, fast sync, run progress that survives failures, start form).
 
-- **2026-11-16:** Training page. Remote H200 upload works through the jump alias `pc1` (`H200_JUMP=pc1` in `.env`; the code default `pc-server-1` refuses the owner's key). Account 124 is up to date on the H200. Kaggle upload from the dashboard was crashing on two undefined names in `bridge.mjs`; fixed on disk, not committed, and the upload itself is still untested. Upload tests must stay under 5 MB per file and 50 MB in total.
+- **2026-11-16:** Training page. Remote H200 upload works through the jump alias `pc1` (`H200_JUMP=pc1` in `.env`; the code default `pc-server-1` refuses the owner's key). Account 124 is up to date on the H200. Kaggle upload from the dashboard was crashing on two undefined names in `bridge.mjs`; fixed on disk, not committed, and the upload itself is still untested. Upload tests must stay under 5 MB per file and 50 MB in total. H200 ssh calls now use Git's OpenSSH (`C:/Program Files/Git/usr/bin/ssh.exe`, override with `BME_SSH_BIN`): Windows' `ssh.exe` streamed a sync at about 1.3 MB/s on gigabit LAN, Git's about 25 MB/s. Both training pages share one data context (`training/advanced/TrainingDataProvider.tsx`) that loads each source on its own.
 
 In order. Each step's output is the next step's input.
 

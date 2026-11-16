@@ -81,7 +81,7 @@ function parseLogProgress(logText, defaultFolds = 5, defaultEpochs = 40, started
 async function runSshCommand(session, cmd, timeoutMs = 15000) {
   return new Promise((resolve) => {
     const child = spawn(
-      "ssh",
+      session.sshBin || "ssh",
       [
         ...session.sshOpts,
         "-o", "ConnectTimeout=5",

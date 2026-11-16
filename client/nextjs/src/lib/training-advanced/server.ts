@@ -101,7 +101,7 @@ export async function fetchAccountsQuick(): Promise<{ cards: AccountCard[]; quic
 }
 
 export async function fetchAccounts(): Promise<{ cards: AccountCard[]; route: any }> {
-  return runBridgeCommand(["accounts"], 30000);
+  return runBridgeCommand(["accounts"], 60000);
 }
 
 export async function fetchRuns(): Promise<RunItem[]> {

@@ -65,7 +65,7 @@ function run(cmd, args, { stdin, capture, interactive } = {}) {
 function ssh(command, opts = {}) {
   const tty = opts.interactive ? ["-t"] : [];
   return run(
-    "ssh",
+    session.sshBin || "ssh",
     [...tty, ...session.sshOpts, "-o", "ConnectTimeout=30", "-o", "StrictHostKeyChecking=accept-new", session.target, command],
     { capture: !opts.stdin && !opts.interactive, ...opts },
   );
@@ -572,7 +572,7 @@ async function download(remoteRel, localRel, label) {
   }
   fs.mkdirSync(dest, { recursive: true });
   const remote = spawn(
-    "ssh",
+    session.sshBin || "ssh",
     [...session.sshOpts, "-o", "ConnectTimeout=30", session.target, `cd ${REMOTE}/${remoteRel} && tar -cf - ${names.join(" ")}`],
     { windowsHide: true, cwd: root, env: session.env, stdio: ["ignore", "pipe", "inherit"] },
   );

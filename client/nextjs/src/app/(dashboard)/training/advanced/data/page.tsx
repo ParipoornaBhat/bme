@@ -21,6 +21,7 @@ import { DatasetOverviewCard, fmtBytes, type LocalExportData } from "../componen
 import { H200DatasetTable } from "../components/H200DatasetTable";
 import { KaggleDatasetCard } from "../components/KaggleDatasetCard";
 import { SyncTasksHistory } from "../components/SyncTasksHistory";
+import { useTrainingData } from "../TrainingDataProvider";
 
 const fmtDate = (isoStr: string | null | undefined): string => {
   if (!isoStr) return "-";
@@ -41,16 +42,16 @@ const fmtDate = (isoStr: string | null | undefined): string => {
 export default function DataSyncPage() {
   const inReview = isReviewMode();
 
-  // Core data states
-  const [cards, setCards] = useState<AccountCard[]>([]);
-  const [datasetTargets, setDatasetTargets] = useState<TargetDatasetStatus[]>([]);
-  const [kaggleDatasets, setKaggleDatasets] = useState<KaggleDatasetOption[]>([]);
-  const [localExport, setLocalExport] = useState<LocalExportData | null>(null);
-  const [tasks, setTasks] = useState<BackgroundTask[]>([]);
-
-  // Loading & refresh states
-  const [loading, setLoading] = useState(true);
-  const [refreshing, setRefreshing] = useState(false);
+  const {
+    cards,
+    datasetTargets,
+    kaggleDatasets,
+    localExport,
+    tasks,
+    setTasks,
+    refreshing,
+    refresh,
+  } = useTrainingData();
   const [syncBusyTarget, setSyncBusyTarget] = useState<string | null>(null);
   const [checkingTarget, setCheckingTarget] = useState<string | null>(null);
 
@@ -73,51 +74,7 @@ export default function DataSyncPage() {
     onConfirm: () => {},
   });
 
-  const loadData = useCallback(async (isSilent = false) => {
-    if (inReview) {
-      setLoading(false);
-      return;
-    }
-    if (!isSilent) setRefreshing(true);
-
-    const getJson = (url: string) =>
-      fetch(url, { cache: "no-store" }).then((r) => (r.ok ? r.json() : null));
-
-    try {
-      const [accData, dsData, taskData] = await Promise.all([
-        getJson("/api/training-advanced/accounts?quick=true"),
-        getJson("/api/training-advanced/dataset"),
-        getJson("/api/training-advanced/tasks"),
-      ]);
-
-      if (accData) {
-        if (accData.cards) setCards(accData.cards);
-        if (accData.kaggleDatasets) setKaggleDatasets(accData.kaggleDatasets);
-      }
-
-      if (dsData) {
-        if (dsData.targets) setDatasetTargets(dsData.targets);
-        if (dsData.localExport) setLocalExport(dsData.localExport);
-      }
-
-      if (taskData?.tasks) {
-        setTasks(taskData.tasks);
-      }
-    } catch {
-      toast.error("Failed to refresh dataset sync status");
-    } finally {
-      setLoading(false);
-      setRefreshing(false);
-    }
-  }, [inReview]);
-
-  useEffect(() => {
-    loadData();
-    const timer = setInterval(() => {
-      loadData(true);
-    }, 5000);
-    return () => clearInterval(timer);
-  }, [loadData]);
+  const loadData = useCallback((_silent?: boolean) => refresh(), [refresh]);
 
   const syncTasks = useMemo(() => {
     return tasks.filter((t) => t.type === "sync");
@@ -512,16 +469,6 @@ export default function DataSyncPage() {
     );
   }
 
-  if (loading) {
-    return (
-      <div className="flex h-[70vh] flex-col items-center justify-center space-y-4">
-        <Loader2 className="h-8 w-8 animate-spin text-primary" />
-        <p className="text-sm font-medium text-muted-foreground">
-          Loading dataset sync status, compute accounts, and history...
-        </p>
-      </div>
-    );
-  }
 
   return (
     <div className="space-y-8 pb-12">

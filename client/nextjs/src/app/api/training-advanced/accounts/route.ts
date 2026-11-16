@@ -10,7 +10,7 @@ export async function GET(req: Request) {
   }
 
   try {
-    const quick = new URL(req.url).searchParams.get("quick") === "1";
+    const quick = new URL(req.url).searchParams.get("quick") === "1" || new URL(req.url).searchParams.get("quick") === "true";
     const data = quick ? await fetchAccountsQuick() : await fetchAccounts();
     return NextResponse.json(data);
   } catch (err: any) {

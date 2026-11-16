@@ -12,8 +12,16 @@ import { ask, h200Route, loadDotEnv, pickAccount, UNREACHABLE } from "./lib/acco
 
 export { loadDotEnv, ask };
 
+// Windows' own ssh.exe reads piped input in small chunks (about 1-2 MB/s even
+// on gigabit LAN). Git for Windows ships a full OpenSSH that streams at line
+// speed, so it is used when present.
+const GIT_SSH = "C:/Program Files/Git/usr/bin/ssh.exe";
+export const SSH_BIN =
+  process.env.BME_SSH_BIN || (process.platform === "win32" && fs.existsSync(GIT_SSH) ? GIT_SSH : "ssh");
+const POSIX_ASKPASS = process.platform !== "win32" || SSH_BIN !== "ssh";
+
 function writeAskpass() {
-  if (process.platform === "win32") {
+  if (!POSIX_ASKPASS) {
     const file = path.join(os.tmpdir(), `bme-ssh-askpass-${process.pid}.cmd`);
     fs.writeFileSync(
       file,
@@ -23,7 +31,7 @@ function writeAskpass() {
   }
   const file = path.join(os.tmpdir(), `bme-ssh-askpass-${process.pid}.sh`);
   fs.writeFileSync(file, '#!/bin/sh\ncase "$1" in *"$BME_SSH_USER@"*) printf \'%s\\n\' "$BME_SSH_PASS" ;; esac\n', { mode: 0o700 });
-  return file;
+  return file.split(path.sep).join("/");
 }
 
 /** want: a roll number or name ("149", "reegan") to skip the menu, as `--as 149` does. */
@@ -40,6 +48,7 @@ export async function chooseH200(root, want = "") {
     target: `${account.h200.user}@${route.host}`,
     remote: route.remote,
     sshOpts: route.sshOpts,
+    sshBin: SSH_BIN,
     unreachable: UNREACHABLE,
     env: {
       ...process.env,
