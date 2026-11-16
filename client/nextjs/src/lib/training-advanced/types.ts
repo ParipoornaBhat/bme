@@ -103,6 +103,7 @@ export interface TargetDatasetStatus {
   platform: PlatformType;
   label: string;
   datasetVersion: string;
+  datasetSlug?: string;
   localExportVersion: string;
   isUpToDate: boolean;
   reason?: string;

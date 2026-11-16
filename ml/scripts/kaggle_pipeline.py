@@ -2004,7 +2004,7 @@ def run_doctor(
         print("[FAIL] Kaggle credentials detected INSIDE the repository.")
         print("  Fix: Move kaggle.json to ~/.kaggle/kaggle.json and delete it from the workspace.")
         has_fail = True
-    elif user_cred.exists() or (env_user and (env_key or env_token)) or env_token:
+    elif api is not None or user_cred.exists() or (env_user and (env_key or env_token)) or env_token:
         print("[PASS] Kaggle credentials present outside repository.")
     else:
         print("[FAIL] Kaggle credentials not found in ~/.kaggle/kaggle.json or environment.")
