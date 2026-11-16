@@ -144,9 +144,30 @@ function AnnotatePageContent() {
       if (!res.ok) throw new Error("cases unavailable");
       const j = await res.json();
       const list: Case[] = j.cases ?? [];
+      const loadedAnnotators: string[] = j.annotators ?? [];
       setCases(list);
-      setAnnotators(j.annotators ?? []);
+      setAnnotators(loadedAnnotators);
       setShowNames(Boolean(j.showSourceNames));
+      setWho((prev) => {
+        if (!prev) return "";
+        const norm = prev.toLowerCase().replace(/[_\s-]+/g, "");
+        const valid =
+          loadedAnnotators.some((a) => {
+            const aNorm = a.toLowerCase().replace(/[_\s-]+/g, "");
+            return aNorm.includes(norm) || norm.includes(aNorm);
+          }) ||
+          list.some((c) => {
+            const cOwner = (c.assignedTo || c.annotatedBy || "").toLowerCase().replace(/[_\s-]+/g, "");
+            return cOwner && (cOwner.includes(norm) || norm.includes(cOwner));
+          });
+        if (!valid) {
+          try {
+            localStorage.removeItem("bme_annotate_3d_who");
+          } catch { /* ignore */ }
+          return "";
+        }
+        return prev;
+      });
       setSelected((prev) => {
         const want = urlCase ?? prev ?? localStorage.getItem("bme_annotate_3d_selected");
         return want && list.some((c) => c.id === want) ? want : (list[0]?.id ?? null);
@@ -176,16 +197,31 @@ function AnnotatePageContent() {
   useEffect(() => { load(); }, []);
 
   const visible = useMemo(
-    () =>
-      cases.filter(
-        (c) =>
-          (!who || c.assignedTo === who || c.assignedTo === "ALL") &&
-          matchesFilter(c, filter) &&
-          (!q ||
-            c.id.toLowerCase().includes(q.toLowerCase()) ||
-            (!isReview && (c.flag?.reason ?? "").toLowerCase().includes(q.toLowerCase())) ||
-            (!isReview && (c.flag?.note ?? "").toLowerCase().includes(q.toLowerCase()))),
-      ),
+    () => {
+      const normWho = who.trim().toLowerCase().replace(/[_\s-]+/g, "");
+      const normQ = q.trim().toLowerCase();
+      return cases.filter((c) => {
+        if (normWho) {
+          const owner = (c.assignedTo || c.annotatedBy || "").trim().toLowerCase().replace(/[_\s-]+/g, "");
+          const matchOwner =
+            owner === "all" ||
+            owner === normWho ||
+            (owner.length > 0 && (owner.includes(normWho) || normWho.includes(owner)));
+          if (!matchOwner) return false;
+        }
+
+        if (!matchesFilter(c, filter)) return false;
+
+        if (normQ) {
+          const matchId = c.id.toLowerCase().includes(normQ);
+          const matchReason = !isReview && (c.flag?.reason ?? "").toLowerCase().includes(normQ);
+          const matchNote = !isReview && (c.flag?.note ?? "").toLowerCase().includes(normQ);
+          if (!matchId && !matchReason && !matchNote) return false;
+        }
+
+        return true;
+      });
+    },
     [cases, who, q, filter, isReview],
   );
 
@@ -413,9 +449,25 @@ function AnnotatePageContent() {
                     </p>
                   )}
                   {casesState === "ready" && cases.length > 0 && visible.length === 0 && (
-                    <p className="p-4 text-center text-xs text-muted-foreground">
-                      No cases match.
-                    </p>
+                    <div className="p-4 text-center text-xs text-muted-foreground space-y-2">
+                      <p>No cases match current filter.</p>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setWho("");
+                          setQ("");
+                          setFilter("all");
+                          try {
+                            localStorage.removeItem("bme_annotate_3d_who");
+                            localStorage.removeItem("bme_annotate_3d_q");
+                            localStorage.setItem("bme_annotate_3d_filter", "all");
+                          } catch { /* ignore */ }
+                        }}
+                        className="inline-block rounded border border-border bg-background px-2.5 py-1 text-xs font-semibold text-primary hover:bg-muted transition cursor-pointer"
+                      >
+                        Reset filters
+                      </button>
+                    </div>
                   )}
                 </div>
 
