@@ -73,6 +73,29 @@ function getDb() {
         : { idleTimeoutMillis: 30_000, connectionTimeoutMillis: 15_000 }),
     });
 
+    // A self-hosted Postgres may not offer TLS at all. When the server says so,
+    // drop TLS for this pool and retry once, instead of failing every query.
+    const refusesSSL = (e: unknown) =>
+      Boolean((pool as any).options?.ssl) && /does not support SSL/i.test(String((e as Error)?.message ?? e));
+    const origQuery = pool.query.bind(pool) as (...a: any[]) => any;
+    (pool as any).query = (...args: any[]) => {
+      if (typeof args[args.length - 1] === "function") return origQuery(...args);
+      return origQuery(...args).catch((e: unknown) => {
+        if (!refusesSSL(e)) throw e;
+        (pool as any).options.ssl = false;
+        return origQuery(...args);
+      });
+    };
+    const origConnect = pool.connect.bind(pool) as (...a: any[]) => any;
+    (pool as any).connect = (cb?: unknown) => {
+      if (typeof cb === "function") return origConnect(cb);
+      return origConnect().catch((e: unknown) => {
+        if (!refusesSSL(e)) throw e;
+        (pool as any).options.ssl = false;
+        return origConnect();
+      });
+    };
+
     pool.on("error", (err) => {
       console.error("Database pool unexpected error:", err);
     });
