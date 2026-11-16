@@ -2563,12 +2563,23 @@ export default function Viewer({
   const persist = useCallback(async (snap: Uint8Array, series: string, baseAnnotator?: string | null) => {
     if (isReviewMode()) {
       const baseQ = baseAnnotator ? `?base=${encodeURIComponent(baseAnnotator)}` : "";
-      const res = await fetch(`/api/annotation/${caseId}${baseQ}`, {
-        method: "POST",
-        headers: { "Content-Type": "application/octet-stream" },
-        body: new Uint8Array(snap),
-      });
-      const j = await res.json();
+      // A labelmap is one byte per voxel (often 10 MB or more); the hosted
+      // site rejects requests over 4.5 MB, so it is sent gzip-compressed.
+      let payload: BodyInit = new Uint8Array(snap);
+      const headers: Record<string, string> = { "Content-Type": "application/octet-stream" };
+      if (typeof CompressionStream !== "undefined") {
+        const gz = new Blob([new Uint8Array(snap)]).stream().pipeThrough(new CompressionStream("gzip"));
+        payload = await new Response(gz).arrayBuffer();
+        headers["X-Labels-Encoding"] = "gzip";
+      }
+      const res = await fetch(`/api/annotation/${caseId}${baseQ}`, { method: "POST", headers, body: payload });
+      const text = await res.text();
+      let j: { error?: string; review?: unknown; unchanged?: boolean } = {};
+      try {
+        j = JSON.parse(text);
+      } catch {
+        throw new Error(res.status === 413 ? "This scan is too large to save online." : `Save failed (${res.status}).`);
+      }
       if (!res.ok) throw new Error(j.error ?? "save failed");
       return { me, logged: false, review: j.review, unchanged: Boolean(j.unchanged) };
     }
@@ -3474,7 +3485,7 @@ export default function Viewer({
             {!isReview && (
               <button
                 type="button"
-                onClick={() => { void triggerSync(); }}
+                onClick={() => { void triggerSync({ all: true }); }}
                 disabled={isSyncing || busy || switching}
                 title={syncStatus ? `Cloud Database Sync (${syncStatus})` : "Sync annotations with cloud database"}
                 className={`p-1.5 rounded border transition cursor-pointer flex items-center gap-1 ${
@@ -3895,7 +3906,7 @@ export default function Viewer({
             {!isReview && (
               <button
                 type="button"
-                onClick={() => { void triggerSync(); }}
+                onClick={() => { void triggerSync({ all: true }); }}
                 disabled={isSyncing || busy || switching}
                 title={syncStatus ? `Cloud Database Sync (${syncStatus})` : "Sync annotations with cloud database"}
                 className={`p-1.5 rounded border transition cursor-pointer flex items-center gap-1 ${

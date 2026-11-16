@@ -235,7 +235,14 @@ async function reviewPostHandler(
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 
-  const body = Buffer.from(await req.arrayBuffer());
+  let body = Buffer.from(await req.arrayBuffer());
+  if (req.headers.get("x-labels-encoding") === "gzip") {
+    try {
+      body = zlib.gunzipSync(body);
+    } catch {
+      return NextResponse.json({ error: "could not read the compressed labelmap" }, { status: 400 });
+    }
+  }
   if (body.length === 0) {
     return NextResponse.json({ error: "empty labelmap" }, { status: 400 });
   }
@@ -374,6 +381,21 @@ async function reviewPostHandler(
   }
 
   const kind = user.role === "team" ? "team" : "review";
+  if (user.role === "team") {
+    try {
+      const [owner] = await db.select().from(caseOwner).where(eq(caseOwner.caseId, caseId)).limit(1);
+      if (!owner) {
+        await db.insert(caseOwner).values({ caseId, annotatedBy: user.displayName, source: "first-save", setBy: safeMe });
+      } else if (!owner.annotatedBy) {
+        await db
+          .update(caseOwner)
+          .set({ annotatedBy: user.displayName, source: "first-save", setBy: safeMe, setAt: new Date() })
+          .where(eq(caseOwner.caseId, caseId));
+      }
+    } catch (e) {
+      console.error("could not record the case owner:", e instanceof Error ? e.message : e);
+    }
+  }
   const labelsGzB64 = zlib.gzipSync(body).toString("base64");
   const now = new Date();
 
