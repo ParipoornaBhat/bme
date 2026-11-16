@@ -20,16 +20,18 @@ export const SSH_BIN =
   process.env.BME_SSH_BIN || (process.platform === "win32" && fs.existsSync(GIT_SSH) ? GIT_SSH : "ssh");
 const POSIX_ASKPASS = process.platform !== "win32" || SSH_BIN !== "ssh";
 
+let askpassSeq = 0;
+
 function writeAskpass() {
   if (!POSIX_ASKPASS) {
-    const file = path.join(os.tmpdir(), `bme-ssh-askpass-${process.pid}.cmd`);
+    const file = path.join(os.tmpdir(), `bme-ssh-askpass-${process.pid}-${++askpassSeq}.cmd`);
     fs.writeFileSync(
       file,
       '@echo off\r\necho(%~1| findstr /L /C:"%BME_SSH_USER%@" >nul && echo(%BME_SSH_PASS%\r\n',
     );
     return file;
   }
-  const file = path.join(os.tmpdir(), `bme-ssh-askpass-${process.pid}.sh`);
+  const file = path.join(os.tmpdir(), `bme-ssh-askpass-${process.pid}-${++askpassSeq}.sh`);
   fs.writeFileSync(file, '#!/bin/sh\ncase "$1" in *"$BME_SSH_USER@"*) printf \'%s\\n\' "$BME_SSH_PASS" ;; esac\n', { mode: 0o700 });
   return file.split(path.sep).join("/");
 }

@@ -49,6 +49,7 @@ export function SyncTasksHistory({
   const [historyTargetFilter, setHistoryTargetFilter] = useState<string>("all");
   const [historyStatusFilter, setHistoryStatusFilter] = useState<string>("all");
   const [expandedLogs, setExpandedLogs] = useState<Record<string, boolean>>({});
+  const [showAll, setShowAll] = useState(false);
 
   const toggleLog = (id: string) => {
     setExpandedLogs((prev) => ({ ...prev, [id]: !prev[id] }));
@@ -164,9 +165,18 @@ export function SyncTasksHistory({
       </div>
 
       {/* Task List */}
+      {filteredTasks.length > 8 && (
+        <button
+          type="button"
+          onClick={() => setShowAll((v) => !v)}
+          className="text-[11px] font-semibold text-primary hover:underline cursor-pointer"
+        >
+          {showAll ? "Show only the newest 8" : `Show all ${filteredTasks.length} entries`}
+        </button>
+      )}
       <div className="space-y-3 pt-2">
         {filteredTasks.length > 0 ? (
-          filteredTasks.map((task) => {
+          (showAll ? filteredTasks : filteredTasks.slice(0, 8)).map((task) => {
             const isExpanded = Boolean(expandedLogs[task.id]);
             const isRefused =
               (task.status as string) === "refused" ||

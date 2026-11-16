@@ -25,6 +25,10 @@ function tasksFile(): string {
   return path.join(tasksDir(), "tasks.json");
 }
 
+// Launch, continue and setup tasks started by this app process. After a
+// restart this set is empty, so their old "running" records are shown as ended.
+const liveTasks = new Set<string>();
+
 export function getTasks(): BackgroundTask[] {
   try {
     const f = tasksFile();
@@ -33,7 +37,17 @@ export function getTasks(): BackgroundTask[] {
     // A sync marked running whose process is gone (for example after the app restarted) is shown as ended.
     return tasks.map((t) => {
       const started = Date.parse(t.startedAt || "");
-      if (t.status === "running" && t.type === "start" && !Number.isNaN(started) && Date.now() - started > 60 * 60 * 1000) {
+      if (t.status === "running" && (t.type === "start" || t.type === "resume" || t.type === "setup") && !liveTasks.has(t.id) && !Number.isNaN(started) && Date.now() - started > 15000) {
+        return {
+          ...t,
+          status: "failed",
+          endedAt: t.endedAt || new Date().toISOString(),
+          message: t.type === "setup"
+            ? "The app restarted while this was running. The install continues on the server; press the button again to follow it."
+            : "The app restarted before this finished. Press Refresh Status to see what the H200 says.",
+        };
+      }
+      if (t.status === "running" && (t.type === "start" || t.type === "resume" || t.type === "setup") && !Number.isNaN(started) && Date.now() - started > 60 * 60 * 1000) {
         return { ...t, status: "failed", endedAt: t.endedAt || new Date().toISOString(), message: "Launch ended without a result (the app restarted or the process stopped)." };
       }
       if (t.status !== "running" || !t.id.startsWith("sync-") || !t.target) return t;
@@ -304,6 +318,7 @@ export async function syncDataset(
   child.stderr?.on("data", onChunk);
 
   child.on("exit", (code) => {
+    liveTasks.delete(taskId);
     clearSyncLock(targetId);
     if (cancelledSyncs.has(taskId)) {
       task.status = "cancelled";
@@ -326,6 +341,54 @@ export async function syncDataset(
 
 export async function cancelJob(platform: PlatformType, targetId: string, jobId?: string): Promise<{ success: boolean; message: string }> {
   return runBridgeCommand(["cancel", platform, targetId, jobId || ""], 15000);
+}
+
+export function setupEnv(targetId: string): { success: boolean; message: string; taskId: string } {
+  const busy = getTasks().find((t) => t.status === "running" && t.target === targetId && t.type !== "sync");
+  if (busy) return { success: false, message: `Something is still running for ${targetId}. Wait for it to finish.`, taskId: busy.id };
+  const taskId = `setup-${Date.now()}`;
+  const task: BackgroundTask = {
+    id: taskId,
+    type: "setup",
+    target: targetId,
+    status: "running",
+    startedAt: new Date().toISOString(),
+    message: `Installing the Python environment on ${targetId}...`,
+    log: [],
+  };
+  saveTask(task);
+  liveTasks.add(taskId);
+  const child = spawn(process.execPath, [bridgeScript, "setup", targetId], {
+    cwd: root,
+    detached: true,
+    windowsHide: true,
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  let log = "";
+  let lastSave = 0;
+  const toLines = (text: string) => text.split(/\r?\n|\r/).map((l) => l.trim()).filter(Boolean);
+  const onOutput = (chunk: Buffer) => {
+    log += chunk.toString();
+    const lines = toLines(log);
+    task.log = lines.slice(-200);
+    task.message = lines[lines.length - 1] || task.message;
+    if (Date.now() - lastSave > 1000) {
+      lastSave = Date.now();
+      saveTask(task);
+    }
+  };
+  child.stdout?.on("data", onOutput);
+  child.stderr?.on("data", onOutput);
+  child.on("exit", (code) => {
+    liveTasks.delete(taskId);
+    task.status = code === 0 ? "completed" : "failed";
+    task.endedAt = new Date().toISOString();
+    task.message = code === 0 ? "Python environment is ready." : "Setup did not finish. See the log.";
+    task.log = toLines(log).slice(-200);
+    saveTask(task);
+  });
+  child.unref();
+  return { success: true, message: `Setup started for ${targetId}`, taskId };
 }
 
 export async function startJob({
@@ -361,6 +424,7 @@ export async function startJob({
     log: [],
   };
   saveTask(task);
+  liveTasks.add(taskId);
 
   const child = spawn(
     process.execPath,
@@ -388,6 +452,7 @@ export async function startJob({
   child.stderr?.on("data", onOutput);
 
   child.on("exit", (code) => {
+    liveTasks.delete(taskId);
     task.status = code === 0 ? "completed" : "failed";
     task.endedAt = new Date().toISOString();
     task.message = code === 0 ? `Run ${methodId} submitted.` : `Run ${methodId} was not started (exit code ${code}).`;
@@ -420,6 +485,7 @@ export async function resumeJob({
     log: [],
   };
   saveTask(task);
+  liveTasks.add(taskId);
 
   let scriptPath = "";
   let args: string[] = [];
@@ -429,6 +495,8 @@ export async function resumeJob({
     scriptPath = path.join(root, "scripts", "h200-menu.js");
     if (methodId?.includes("holdout")) {
       args = ["holdout", "--as", roll];
+    } else if (methodId?.startsWith("selftest-")) {
+      args = ["selftest", methodId.replace("selftest-", ""), "--as", roll];
     } else if (methodId === "unet-noaug") {
       args = ["resume3dplain", "--as", roll];
     } else if (methodId?.includes("aug")) {
@@ -450,18 +518,34 @@ export async function resumeJob({
   const child = spawn(process.execPath, [scriptPath, ...args], {
     cwd: root,
     detached: true,
+    windowsHide: true,
+    env: { ...process.env, BME_NO_PROMPT: "1" },
     stdio: ["ignore", "pipe", "pipe"],
   });
 
   let log = "";
-  child.stdout?.on("data", (chunk) => { log += chunk; });
-  child.stderr?.on("data", (chunk) => { log += chunk; });
+  let lastSave = 0;
+  const toLines = (text: string) => text.split(/\r?\n|\r/).map((l) => l.trim()).filter(Boolean);
+  const onOutput = (chunk: Buffer) => {
+    log += chunk.toString();
+    const lines = toLines(log);
+    task.log = lines.slice(-200);
+    task.message = lines[lines.length - 1] || task.message;
+    if (Date.now() - lastSave > 1000) {
+      lastSave = Date.now();
+      saveTask(task);
+    }
+  };
+  child.stdout?.on("data", onOutput);
+  child.stderr?.on("data", onOutput);
 
   child.on("exit", (code) => {
-    task.status = code === 0 ? "completed" : "failed";
+    liveTasks.delete(taskId);
+    const submitted = platform !== "h200" || /Submitted batch job/.test(log);
+    task.status = code === 0 && submitted ? "completed" : "failed";
     task.endedAt = new Date().toISOString();
-    task.message = code === 0 ? `Resume for ${methodId} finished successfully.` : `Resume stopped with code ${code}`;
-    task.log = log.split(/\r?\n|\r/).map((l) => l.trim()).filter(Boolean).slice(-30);
+    task.message = task.status === "completed" ? `Next part of ${methodId} submitted.` : `The next part of ${methodId} was not started.`;
+    task.log = toLines(log).slice(-200);
     saveTask(task);
   });
 

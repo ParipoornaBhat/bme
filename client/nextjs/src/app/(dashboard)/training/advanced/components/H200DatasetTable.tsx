@@ -103,8 +103,6 @@ export function H200DatasetTable({
             <tr>
               <th className="px-3.5 py-3">Account Label</th>
               <th className="px-3 py-3">Route</th>
-              <th className="px-3 py-3">Remote Version</th>
-              <th className="px-3 py-3">Local Version</th>
               <th className="px-3 py-3">Sync Status</th>
               <th className="px-3 py-3">Data to Send</th>
               <th className="px-3 py-3">Last Sync</th>
@@ -116,7 +114,7 @@ export function H200DatasetTable({
             {targets.length > 0 ? (
               targets.map((t) => {
                 const card = cards.find((c) => c.id === t.targetId);
-                const isConnected = card ? card.connected : true;
+                const isConnected = card ? card.connected || Boolean(card.checking) : true;
                 const isBlocked = Boolean(t.runningJobBlocking);
                 const isBusy = syncBusyTarget === t.targetId;
                 const activeSync = syncTasks.find(
@@ -126,7 +124,10 @@ export function H200DatasetTable({
 
                 let stateLabel = "Ready";
                 let stateClass = "bg-emerald-500/10 text-emerald-600 dark:text-emerald-400";
-                if (!isConnected) {
+                if (card?.checking) {
+                  stateLabel = "Checking";
+                  stateClass = "bg-muted text-muted-foreground";
+                } else if (!isConnected) {
                   stateLabel = "Offline";
                   stateClass = "bg-destructive/10 text-destructive";
                 } else if (isBlocked) {
@@ -153,14 +154,6 @@ export function H200DatasetTable({
                       >
                         {t.isRemoteRoute ? "Remote (Jump)" : "College LAN"}
                       </span>
-                    </td>
-
-                    <td className="px-3 py-3 font-mono text-[11px] text-muted-foreground whitespace-nowrap">
-                      {t.datasetVersion || "server-synced"}
-                    </td>
-
-                    <td className="px-3 py-3 font-mono text-[11px] text-muted-foreground whitespace-nowrap">
-                      {localExportHash ? localExportHash.slice(0, 12) : localExportVersion || "-"}
                     </td>
 
                     <td className="px-3 py-3 whitespace-nowrap">

@@ -78,6 +78,19 @@ function parseLogProgress(logText, defaultFolds = 5, defaultEpochs = 40, started
   };
 }
 
+const H200_RUNS = [
+  { folder: "results-nnunet-3d_fullres", methodId: "nnunet-3d", job: "bme_nnunet", log: "nnunet", label: "nnU-Net ResEnc M, 3D" },
+  { folder: "results-nnunet-2d", methodId: "nnunet-2d", job: "bme_nnunet", log: "nnunet", label: "nnU-Net ResEnc M, 2D" },
+  { folder: "results3d-aug-low", methodId: "unet-aug-low", job: "bme_aug_low", log: "aug_low", label: "3D U-Net, augmentation low" },
+  { folder: "results3d-aug-med", methodId: "unet-aug-med", job: "bme_aug_med", log: "aug_med", label: "3D U-Net, augmentation med" },
+  { folder: "results3d-aug-max", methodId: "unet-aug-max", job: "bme_aug_max", log: "aug_max", label: "3D U-Net, augmentation max" },
+  { folder: "results3d-holdout", methodId: "unet-holdout", job: "bme_holdout", log: "holdout", label: "3D U-Net, fixed 80/20 split" },
+  { folder: "results3d-h200-plain", methodId: "unet-noaug", job: "bme_unet3d_plain", log: "unet3dplain", label: "3D U-Net, no augmentation" },
+  { folder: "results3d-selftest-aug", methodId: "selftest-aug", job: "bme_selftest_aug", log: "selftest_aug", label: "Self-test, augmentation max" },
+  { folder: "results3d-selftest-plain", methodId: "selftest-plain", job: "bme_selftest_plain", log: "selftest_plain", label: "Self-test, no augmentation" },
+  { folder: "results3d-h200-v2", methodId: "train3d", job: "bme_unet3d", log: "unet3d", label: "3D U-Net (v2)" },
+];
+
 async function runSshCommand(session, cmd, timeoutMs = 15000) {
   return new Promise((resolve) => {
     const child = spawn(
@@ -161,6 +174,8 @@ async function handleAccounts() {
       }
 
       let connected = false;
+      let envReady = null;
+      let nnunetReady = null;
       let connDetails = isDirectH200
         ? "Direct college network route"
         : `Outside college, via jump host ${route.jump}`;
@@ -177,25 +192,53 @@ async function handleAccounts() {
             connected = true;
             const statusRes = await runSshCommand(
               session,
-              `squeue -u $USER -h -o '%i|%j|%T|%M|%l'; ` +
+              `squeue -u $USER -h -o '%i|%j|%T|%M|%l|%r'; ` +
               `echo "===RESULTS==="; ` +
-              `cd $HOME/bme/data 2>/dev/null && for d in results3d-holdout results3d-aug-low results3d-aug-med results3d-aug-max results3d-h200-v2 results-nnunet-3d_fullres results-nnunet-2d; do ` +
+              `cd $HOME/bme/data 2>/dev/null && for d in ${H200_RUNS.map((r) => r.folder).join(" ")}; do ` +
               `[ -f $d/metrics.json ] && echo "$d|finished"; ` +
               `[ ! -f $d/metrics.json ] && [ -n "$(ls -A $d 2>/dev/null)" ] && echo "$d|stopped"; done; ` +
+              `echo "===ENV==="; [ -x $HOME/bme/env/bin/python3 ] && echo ENV_OK; ` +
+              `$HOME/bme/env/bin/python3 -c "import nnunetv2" 2>/dev/null && echo NNUNET_OK; ` +
+              `echo "===LAST==="; sacct -u $USER -S now-3days -X -n -P --format=JobID,JobName,State,Elapsed 2>/dev/null | tail -1; ` +
+              `e=$(ls -t $HOME/bme/logs/*.err 2>/dev/null | head -1); [ -n "$e" ] && tail -n 1 "$e"; ` +
+              `echo "===PARTS==="; ` +
+              `for p in ${[...new Set(H200_RUNS.map((r) => r.log))].join(" ")}; do echo "$p|$(find $HOME/bme/logs -name "\${p}_*.out" -size +600c 2>/dev/null | wc -l)"; done; ` +
               `echo "===LOG==="; ` +
-              `f=$(ls -t $HOME/bme/logs/*.out 2>/dev/null | head -1); [ -n "$f" ] && { echo "FILE:$f"; tail -n 25 "$f"; }`,
-              10000
+              `f=$(ls -t $HOME/bme/logs/*.out 2>/dev/null | head -1); [ -n "$f" ] && { echo "FILE:$f"; tail -n 25 "$f"; }; true`,
+              12000
             );
 
             if (statusRes.code === 0) {
               const [squeuePart, rest1 = ""] = statusRes.out.split("===RESULTS===");
-              const [resultsPart, logPart = ""] = rest1.split("===LOG===");
+              const [resultsAndParts, logPart = ""] = rest1.split("===LOG===");
+              const [beforeParts, partsPart = ""] = resultsAndParts.split("===PARTS===");
+              const [beforeLast, lastPart = ""] = beforeParts.split("===LAST===");
+              const [resultsPart, envPart = ""] = beforeLast.split("===ENV===");
+              envReady = envPart.includes("ENV_OK");
+              nnunetReady = envPart.includes("NNUNET_OK");
+              const lastLines = lastPart.trim().split(/\r?\n/).filter(Boolean);
+              const [lastId = "", lastName = "", lastState = "", lastElapsed = ""] = (lastLines[0] || "").split("|");
+              const lastErr = lastLines[1] || "";
+              const partsByLog = {};
+              for (const line of partsPart.trim().split(/\r?\n/).filter(Boolean)) {
+                const [k, n] = line.split("|");
+                partsByLog[k] = Number(n) || 0;
+              }
+              const folderState = {};
+              for (const line of resultsPart.trim().split(/\r?\n/).filter(Boolean)) {
+                const [f, st] = line.split("|");
+                folderState[f] = st;
+              }
+              let run = null;
 
               const activeJobLine = squeuePart.trim().split(/\r?\n/).filter(Boolean)[0];
               const logLines = logPart.trim().split(/\r?\n/).filter(Boolean);
               const tailText = logLines.join("\n");
 
               let jobStatus = "idle";
+              let queueReason = "";
+              let ownLog = null;
+              let nnProgress = null;
               let resumePending = false;
               let methodId = "";
               let methodLabel = "";
@@ -204,31 +247,32 @@ async function handleAccounts() {
               let elapsedSeconds = null;
 
               if (activeJobLine) {
-                const [jid, jname, jstate, jelapsed] = activeJobLine.split("|");
+                const [jid, jname, jstate, jelapsed, , jreason = ""] = activeJobLine.split("|");
                 slurmJobId = jid;
-                jobStatus = jstate === "RUNNING" ? "running" : "running";
-                methodId = jname.replace(/^bme_/, "");
-                methodLabel = `Job ${jid} (${jname})`;
+                jobStatus = jstate === "RUNNING" || jstate === "COMPLETING" ? "running" : "queued";
+                queueReason = jreason;
+                const sameJob = H200_RUNS.filter((r) => r.job === jname);
+                run = sameJob.find((r) => folderState[r.folder] === "stopped") || sameJob[0] || null;
+                methodId = run ? run.methodId : jname.replace(/^bme_/, "");
+                methodLabel = run ? `${run.label} (job ${jid})` : `Job ${jid} (${jname})`;
                 const parts = (jelapsed || "").split(":").map(Number);
                 if (parts.length === 3) elapsedSeconds = parts[0] * 3600 + parts[1] * 60 + parts[2];
                 else if (parts.length === 2) elapsedSeconds = parts[0] * 60 + parts[1];
               } else {
-                for (const rLine of resultsPart.trim().split(/\r?\n/).filter(Boolean)) {
-                  const [rFolder, rState] = rLine.split("|");
-                  if (rState === "stopped") {
-                    jobStatus = "stopped";
-                    resumePending = true;
-                    methodId = rFolder.replace("results3d-", "").replace("results-", "");
-                    methodLabel = rFolder;
-                    break;
-                  }
+                run = H200_RUNS.find((r) => folderState[r.folder] === "stopped") || null;
+                if (run) {
+                  jobStatus = "stopped";
+                  resumePending = true;
+                  methodId = run.methodId;
+                  methodLabel = run.label;
                 }
               }
 
               let metaStartedBy = { usn: acc.usn, name: acc.name || acc.roll };
               let metaAccount = acc.h200?.user || `nnm23cs${acc.roll}_stu_cse`;
               let metaHost = "";
-              const statusFile = path.join(root, "data", `results3d-${methodId}`, "run_status.json");
+              const statusFile = path.join(root, "data", run ? run.folder : `results3d-${methodId}`, "run_status.json");
+              const partsDone = run ? partsByLog[run.log] || 0 : 0;
               if (fs.existsSync(statusFile)) {
                 try {
                   const meta = JSON.parse(fs.readFileSync(statusFile, "utf8"));
@@ -239,13 +283,78 @@ async function handleAccounts() {
                 } catch {}
               }
 
-              const progress = parseLogProgress(tailText, 5, 40, startedAt);
+              let partNo = Math.max(1, partsDone);
+              if (run && slurmJobId) {
+                const nn = run.methodId.startsWith("nnunet")
+                  ? `cd $HOME/bme/data/nnunet/results/Dataset501_BMEKnee/nnUNetTrainer_BME100__nnUNetResEncUNetMPlans__${run.methodId === "nnunet-2d" ? "2d" : "3d_fullres"} 2>/dev/null && ` +
+                    `for f in 0 1 2 3 4; do if [ -f fold_$f/checkpoint_final.pth ]; then echo "FOLD $f 100"; else echo "FOLD $f $(cat fold_$f/training_log_*.txt 2>/dev/null | grep -c 'Epoch time')"; fi; done; ` +
+                    `cat fold_*/training_log_*.txt 2>/dev/null | grep -E 'Epoch [0-9]+|train_loss|Pseudo dice|Epoch time' | tail -n 8; `
+                  : "";
+                const own = await runSshCommand(
+                  session,
+                  `echo "PRIOR $(find $HOME/bme/logs -name "${run.log}_*.out" -size +600c ! -name "${run.log}_${slurmJobId}.out" 2>/dev/null | wc -l)"; ` +
+                  `echo "===OWN==="; tail -n 20 $HOME/bme/logs/${run.log}_${slurmJobId}.out 2>/dev/null; ` +
+                  `echo "===NN==="; ${nn}true`,
+                  10000
+                );
+                if (own.code === 0) {
+                  const prior = Number((own.out.match(/PRIOR (\d+)/) || [])[1] || 0);
+                  partNo = prior + 1;
+                  const [, afterOwn = ""] = own.out.split("===OWN===");
+                  const [ownPart, nnPart = ""] = afterOwn.split("===NN===");
+                  ownLog = ownPart.trim().split(/\r?\n/).filter(Boolean).map((l) => l.slice(0, 240));
+                  const folds = [...nnPart.matchAll(/FOLD (\d) (\d+)/g)];
+                  if (folds.length) {
+                    const done = folds.reduce((a, m) => a + Math.min(100, Number(m[2])), 0);
+                    const cur = folds.findIndex((m) => Number(m[2]) < 100);
+                    nnProgress = {
+                      doneEpochs: done,
+                      totalEpochs: 500,
+                      doneFolds: folds.filter((m) => Number(m[2]) >= 100).length,
+                      totalFolds: 5,
+                      currentFold: cur < 0 ? 4 : cur,
+                      currentEpoch: cur < 0 ? 100 : Number(folds[cur][2]),
+                      percent: Math.round((done / 500) * 100),
+                      etaSeconds: null,
+                    };
+                    const nnLines = nnPart.trim().split(/\r?\n/).filter((l) => l && !l.startsWith("FOLD ")).map((l) => l.slice(0, 240));
+                    if (nnLines.length) ownLog = nnLines;
+                  }
+                }
+              }
+              const progress = jobStatus === "queued" ? null : nnProgress || parseLogProgress((ownLog || logLines).join("\n"), 5, 40, startedAt);
 
-              if (jobStatus !== "idle" || resumePending) {
+              // The newest job ended in failure: say so instead of offering "Continue".
+              const lastFailed = !activeJobLine && /FAILED|OUT_OF_MEMORY|NODE_FAIL/.test(lastState) && lastName.startsWith("bme_");
+              if (lastFailed) {
+                const failedRun = H200_RUNS.filter((r) => r.job === lastName).find((r) => !run || r === run) || run;
+                const why = /env\/bin\/python3: No such file/.test(lastErr)
+                  ? "this account has no Python environment yet (run: pnpm h200 setup)"
+                  : lastErr.slice(0, 160) || "see the log on the server";
+                currentJob = {
+                  methodId: failedRun?.methodId || methodId,
+                  methodLabel: `${failedRun?.label || lastName} (job ${lastId})`,
+                  iteration: `Job ${lastId} failed after ${lastElapsed}: ${why}`,
+                  startedBy: metaStartedBy,
+                  startedAt,
+                  elapsedSeconds: null,
+                  status: "failed",
+                  resumePending: false,
+                  resumeAutomatic: false,
+                  slurmJobId: lastId,
+                  logTail: [lastErr, ...logLines.slice(-8)].filter(Boolean),
+                  progress: null,
+                };
+              } else if (jobStatus !== "idle" || resumePending) {
                 currentJob = {
                   methodId,
                   methodLabel: methodLabel || methodId,
-                  iteration: resumePending ? "Resume pending" : "1st run",
+                  iteration: resumePending
+                    ? `Part ${partsDone} ended, not finished. Press Continue for part ${partsDone + 1}.`
+                    : jobStatus === "queued"
+                    ? `Part ${partNo} is waiting in the H200 queue (${queueReason || "no free GPU slot"}). Nothing has run yet.`
+                    : `Part ${partNo} running`,
+                  partsDone,
                   startedBy: metaStartedBy,
                   startedAt,
                   elapsedSeconds,
@@ -253,7 +362,9 @@ async function handleAccounts() {
                   resumePending,
                   resumeAutomatic: false,
                   slurmJobId,
-                  logTail: logLines.slice(-20),
+                  logTail: jobStatus === "queued"
+                    ? ["Waiting for a free GPU slot on the H200. The log starts when the job starts."]
+                    : ownLog && ownLog.length ? ownLog : ["No output from this job yet."],
                   progress,
                 };
                 cacheCardJob(id, currentJob);
@@ -269,7 +380,7 @@ async function handleAccounts() {
         }
       }
 
-      if (!currentJob) {
+      if (!currentJob && !connected) {
         const cached = readCachedCardJob(id);
         if (cached?.currentJob) {
           currentJob = {
@@ -282,6 +393,8 @@ async function handleAccounts() {
 
       return {
         id,
+        envReady,
+        nnunetReady,
         platform: "h200",
         label: `H200 - ${acc.usn}${acc.name ? ` (${acc.name})` : ""}`,
         accountName: acc.h200?.user || `nnm23cs${acc.roll}_stu_cse`,
@@ -519,8 +632,10 @@ async function handleRuns() {
       const matchedMethod = METHODS.find((x) => x.id === methodId || baseName.includes(x.id));
       const methodLabel = matchedMethod ? matchedMethod.label : methodId;
 
-      let platform = meta?.platform || (d.includes("-pc") ? "local" : (d.startsWith("results3d_experiments") ? "kaggle" : "h200"));
-      let platformLabel = platform === "h200" ? "College H200" : platform === "kaggle" ? "Kaggle" : "This PC";
+      let platform = meta?.platform || (d.startsWith("results3d_experiments") ? "kaggle" : "local");
+      let platformLabel = !meta?.platform && platform === "local"
+        ? "Local folder (origin not recorded)"
+        : platform === "h200" ? "College H200" : platform === "kaggle" ? "Kaggle" : "This PC";
 
       const startedBy = meta?.startedBy || m?.startedBy || { usn: "-", name: "Unknown" };
       const account = meta?.account || m?.account || "-";
@@ -642,6 +757,29 @@ async function handleDatasetStatus() {
     if (st.export) localExport = st.export;
     needsUpload = Boolean(st.needs_upload);
     uploadReason = st.reason || "";
+  }
+
+  // No Kaggle export yet: describe the local training dataset straight from disk.
+  if (localExport.hash === "unknown") {
+    try {
+      const annDir = path.join(root, "data", "annotations");
+      let cases = 0, files = 0, bytes = 0, newest = 0;
+      for (const cid of fs.readdirSync(annDir)) {
+        const seg = path.join(annDir, cid, `${cid}.seg.nrrd`);
+        if (!fs.existsSync(seg)) continue;
+        cases++;
+        const st = fs.statSync(seg);
+        files++; bytes += st.size; newest = Math.max(newest, st.mtimeMs);
+        const dir = path.join(root, "data", "nifti", cid);
+        let series = "primary";
+        try { series = JSON.parse(fs.readFileSync(path.join(dir, "series.json"), "utf8")).annotated || "primary"; } catch {}
+        for (const name of [`${cid}_${series}.nii.gz`, `${cid}_primary.nii.gz`]) {
+          const vol = path.join(dir, name);
+          if (fs.existsSync(vol)) { files++; bytes += fs.statSync(vol).size; break; }
+        }
+      }
+      localExport = { cases, files, bytes, hash: newest ? `local-${new Date(newest).toISOString().slice(0, 10)}` : "unknown" };
+    } catch {}
   }
 
   // Active sync locks from cache (no slow remote calls)
@@ -918,7 +1056,9 @@ async function handleStart(platform, targetId, methodId, extraJson = "{}") {
   } else if (platform === "h200") {
     const roll = targetId.replace("h200-", "");
     let h200Args = ["aug", extra.augLevel || "med", "--as", roll];
-    if (methodId === "unet-noaug") {
+    if (methodId.startsWith("selftest-")) {
+      h200Args = ["selftest", methodId.replace("selftest-", ""), "--as", roll];
+    } else if (methodId === "unet-noaug") {
       h200Args = ["train3dplain", "--as", roll];
     } else if (methodId.startsWith("unet-aug-")) {
       h200Args = ["aug", methodId.replace("unet-aug-", ""), "--as", roll];
@@ -1046,6 +1186,15 @@ try {
     result = await handleRuns();
   } else if (action === "dataset-status") {
     result = await handleDatasetStatus();
+  } else if (action === "setup") {
+    const roll = String(arg1 || "").replace("h200-", "");
+    const r = await runStreaming(process.execPath, [path.join(root, "scripts", "h200-menu.js"), "setup", "--as", roll], {
+      env: { ...process.env, BME_NO_PROMPT: "1" },
+    });
+    if (r.status !== 0 || !/SETUP_OK/.test(r.stdout)) {
+      throw new Error(`Setup did not finish on ${roll}: ${(r.stderr || r.stdout || "").trim().split(/\r?\n/).slice(-2).join(" | ")}`);
+    }
+    result = { success: true, message: `Python environment ready on H200 account ${roll}` };
   } else if (action === "dataset-plan") {
     result = handleDatasetPlan(arg1);
   } else if (action === "dataset-sync") {

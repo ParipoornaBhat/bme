@@ -74,6 +74,7 @@ export default function DataSyncPage() {
     onConfirm: () => {},
   });
 
+  const h200Route = datasetTargets.find((t) => t.platform === "h200") || null;
   const loadData = useCallback((_silent?: boolean) => refresh(), [refresh]);
 
   const syncTasks = useMemo(() => {
@@ -512,10 +513,19 @@ export default function DataSyncPage() {
         </div>
 
         <div className="flex items-center gap-2 px-2">
-          <span className="inline-flex items-center gap-1.5 rounded-full border border-amber-500/30 bg-amber-500/10 px-3 py-1 text-[11px] font-semibold text-amber-700 dark:text-amber-300">
-            <span className="h-1.5 w-1.5 rounded-full bg-amber-500" />
-            Remote Route: <code className="font-mono text-[10px]">pc-server-1</code>
-          </span>
+          {h200Route && (
+            <span
+              className={`inline-flex items-center gap-1.5 rounded-full border px-3 py-1 text-[11px] font-semibold ${
+                h200Route.isRemoteRoute
+                  ? "border-amber-500/30 bg-amber-500/10 text-amber-700 dark:text-amber-300"
+                  : "border-emerald-500/30 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300"
+              }`}
+              title={h200Route.routeLabel || ""}
+            >
+              <span className={`h-1.5 w-1.5 rounded-full ${h200Route.isRemoteRoute ? "bg-amber-500" : "bg-emerald-500"}`} />
+              {h200Route.isRemoteRoute ? "H200: remote route (uses internet data)" : "H200: college network, direct"}
+            </span>
+          )}
         </div>
       </div>
 

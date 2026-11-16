@@ -58,7 +58,8 @@ export interface CurrentJob {
   startedBy?: StartedBy;
   startedAt?: string | null;
   elapsedSeconds?: number | null;
-  status: "idle" | "running" | "stopped" | "finished" | "incomplete" | "failed";
+  status: "idle" | "queued" | "running" | "stopped" | "finished" | "incomplete" | "failed";
+  partsDone?: number;
   resumePending: boolean;
   resumeAutomatic: boolean; // Always false today
   kernelSlug?: string;
@@ -72,6 +73,8 @@ export interface CurrentJob {
 
 export interface AccountCard {
   id: string;
+  envReady?: boolean | null;
+  nnunetReady?: boolean | null;
   checking?: boolean;
   platform: PlatformType;
   label: string;
@@ -140,7 +143,7 @@ export interface MethodSpec {
 
 export interface BackgroundTask {
   id: string;
-  type: "start" | "resume" | "cancel" | "sync";
+  type: "start" | "resume" | "cancel" | "sync" | "setup";
   target: string;
   status: "running" | "completed" | "failed" | "cancelled";
   startedAt: string;

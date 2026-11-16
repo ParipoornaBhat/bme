@@ -52,10 +52,10 @@ export function KaggleDatasetCard({
         <div>
           <div className="flex items-center gap-2">
             <Cloud className="h-5 w-5 text-sky-500" />
-            <h2 className="text-lg font-bold tracking-tight">Kaggle Datasets &amp; Permissions</h2>
+            <h2 className="text-lg font-bold tracking-tight">{target.label}</h2>
           </div>
           <p className="text-xs text-muted-foreground mt-0.5">
-            Private Kaggle training dataset ownership, upload versions, and team sharing.
+            This account's own private Kaggle dataset. Training on this account reads it.
           </p>
         </div>
 

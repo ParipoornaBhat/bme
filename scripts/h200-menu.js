@@ -86,6 +86,10 @@ async function internetOk(bytes, what) {
   }
   console.log(`You are outside the college network: this ${what} goes through pc-server-1`);
   console.log(`and uses about ${fmt(bytes)} of your internet data. On college WiFi it would not ask.`);
+  if (process.env.BME_NO_PROMPT === "1") {
+    console.log("Not started: the data on the H200 is behind. Sync it first on the Data page.");
+    return false;
+  }
   return (await ask("Go ahead? [y/N] ")).toLowerCase() === "y";
 }
 
@@ -260,6 +264,9 @@ async function submit(sbatch, what, logPrefix, extra = "", flags = "") {
     const lvl = logPrefix.slice(4);
     outFolder = `results3d-aug-${lvl}`;
     methodId = `unet-aug-${lvl}`;
+  } else if (logPrefix.startsWith("selftest_")) {
+    outFolder = `results3d-selftest-${logPrefix.slice(9)}`;
+    methodId = `selftest-${logPrefix.slice(9)}`;
   } else if (logPrefix === "holdout") {
     outFolder = "results3d-holdout";
     methodId = "unet-holdout";
@@ -375,6 +382,36 @@ async function aug(args) {
 }
 
 /**
+ * A two-minute check of the whole path: start, stop at the time limit with a
+ * checkpoint, then continue. 12 cases, 2 folds, at most 1.5 minutes of training
+ * per job. `aug` uses augmentation max, `plain` uses none. Run it again to
+ * continue; it reports "finished" only if the short run completes.
+ */
+async function selftest(args) {
+  const kind = args[0] === "plain" ? "plain" : "aug";
+  const out = `results3d-selftest-${kind}`;
+  const state = await ssh(
+    `cd ${REMOTE}/data 2>/dev/null && { [ -f ${out}/metrics.json ] && echo DONE; ls ${out}/*.pt ${out}/checkpoints ${out}/fold_* >/dev/null 2>&1 && echo STARTED; }; true`,
+  );
+  if (state.code !== 0) fail(session.unreachable, state.code);
+  if (state.out.includes("DONE")) {
+    console.log(`${out} already finished. Delete data/${out} on the server to run the self-test again.`);
+    return;
+  }
+  const resume = state.out.includes("STARTED");
+  console.log(`${resume ? "Continuing" : "Starting"} the ${kind} self-test -> data/${out} (about 2 minutes).`);
+  if (!(await okWithOtherJobs())) return;
+  const name = `bme_selftest_${kind}`;
+  await submit(
+    kind === "aug" ? "train_3d_aug.sbatch" : "train_3d_plain.sbatch",
+    name,
+    `selftest_${kind}`,
+    `${kind === "aug" ? "max " : ""}--out ${out} --max-cases 12 --folds 2 --epochs 40 --hours 0.03 --max-runtime-minutes 1.5${resume ? " --resume" : ""}`,
+    `--time=00:08:00 --job-name=${name} --output=$HOME/bme/logs/selftest_${kind}_%j.out --error=$HOME/bme/logs/selftest_${kind}_%j.err`,
+  );
+}
+
+/**
  * One round of the 3D U-Net (augmentation med) on the fixed 80/20 split in
  * data/splits/holdout_80_20.json -> data/results3d-holdout. Continues if started.
  */
@@ -462,7 +499,7 @@ async function best(args) {
     console.log("Start it, then choose this again after ~30 min to see the real estimate.");
   }
   console.log("Each job stops itself at 3 h 45. Choose this again to continue from the last checkpoint.");
-  if ((await ask(`${p.left === 5 * NN_EPOCHS ? "Start" : "Continue"}? [y/N] `)).toLowerCase() !== "y") return;
+  if (process.env.BME_NO_PROMPT !== "1" && (await ask(`${p.left === 5 * NN_EPOCHS ? "Start" : "Continue"}? [y/N] `)).toLowerCase() !== "y") return;
   if (!(await okWithOtherJobs())) return;
   await submit("nnunet.sbatch", "bme_nnunet", "nnunet", config);
 }
@@ -533,8 +570,26 @@ async function setup() {
   console.log("Will run on the server, inside ~/bme/env only:");
   steps.forEach((x) => console.log(`  ${x}`));
   if (!out.includes("HAVE_TORCH")) console.log("CUDA PyTorch is ~2.5 GB, downloaded by the server.");
-  if ((await ask("Go ahead? [y/N] ")).toLowerCase() !== "y") return;
-  const r = await ssh(`set -e; ${steps.join(" && ")} && echo SETUP_OK`, { interactive: true });
+  const quiet = process.env.BME_NO_PROMPT === "1";
+  if (usedGb >= DISK_LIMIT_GB - 8) fail(`Server home uses ${usedGb} GB; setup needs about 8 GB under the 50 GB limit. Free space first.`);
+  if (!quiet && (await ask("Go ahead? [y/N] ")).toLowerCase() !== "y") return;
+  let r;
+  if (quiet) {
+    // Detached on the server with its own log, so a dropped connection or an
+    // app restart does not cut the install short. The log is followed live.
+    const body = steps.map((x) => x.replace("/pip install ", "/pip install --progress-bar off ")).join(" && ");
+    r = await ssh(
+      `mkdir -p ${REMOTE}/logs && L=${REMOTE}/logs/setup.log && F=${REMOTE}/logs/setup.pid && ` +
+        `if [ -f $F ] && kill -0 $(cat $F) 2>/dev/null; then echo "An install is already running on this account; following it."; ` +
+        `else : > $L; nohup bash -c 'echo $$ > ${REMOTE}/logs/setup.pid; ${body} && echo SETUP_OK || echo SETUP_FAILED; rm -f ${REMOTE}/logs/setup.pid' >> $L 2>&1 & sleep 2; fi; ` +
+        `tail -n +1 -f $L & T=$!; ` +
+        `while [ -f $F ] && kill -0 $(cat $F) 2>/dev/null; do sleep 3; done; sleep 1; kill $T 2>/dev/null; ` +
+        `grep -q SETUP_OK $L`,
+      { interactive: true },
+    );
+  } else {
+    r = await ssh(`set -e; ${steps.join(" && ")} && echo SETUP_OK`, { interactive: true });
+  }
   if (r.code !== 0) fail("Setup stopped; nothing else was changed.", r.code);
   await checkEnv();
 }
@@ -628,6 +683,7 @@ const OPS = [
   { key: "status", label: "Status", about: "Your jobs, disk use, which results are finished, last log lines.", fn: status },
   { key: "push", label: "Push data", about: "Send code and every annotated 3D case. Only new or changed files go.", fn: push },
   { key: "best", label: "Best model: nnU-Net (start or continue)", about: "nnU-Net ResEnc M, bone + edema, 2D or 3D part. Shows progress and the time left, then submits one 4 h job.", fn: best },
+  { key: "selftest", label: "Self-test (2 minutes): aug or plain", about: "A tiny run that checks start, stop with a checkpoint, and continue.", fn: selftest },
   { key: "holdout", label: "Holdout: one round on the fixed 80/20 split", about: "3D U-Net, augmentation med, trained once on 80% and checked on the fixed 20% -> data/results3d-holdout.", fn: holdout },
   { key: "aug", label: "Augmentation levels: low / med / max", about: "Same 3D U-Net at one augmentation level -> data/results3d-aug-<level>. Continues if already started.", fn: aug },
   { key: "train3d", label: "Train 3D (long, ~3.5 h)", about: `Push, then sbatch ml/slurm/train_3d.sbatch -> ${R3D}. Live rotation/zoom, 1 mm grid.`, fn: () => submit("train_3d.sbatch", "bme_unet3d", "unet3d") },

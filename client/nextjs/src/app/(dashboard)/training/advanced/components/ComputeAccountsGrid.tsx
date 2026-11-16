@@ -94,6 +94,11 @@ export function ComputeAccountsGrid({
                     </>
                   )}
                 </span>
+                {card.platform === "h200" && card.envReady === false && (
+                  <span className="mt-1.5 block rounded bg-destructive/10 px-2 py-0.5 text-[10px] font-semibold text-destructive">
+                    No Python env
+                  </span>
+                )}
                 {!card.connected && !card.checking && (
                   <button
                     type="button"
@@ -121,6 +126,11 @@ export function ComputeAccountsGrid({
                       <span className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">
                         Job: {job.methodLabel || job.methodId}
                       </span>
+                      {job.iteration && (
+                        <span className="inline-flex items-center rounded-md bg-primary/10 px-1.5 py-0.5 text-[10px] font-semibold text-primary">
+                          {job.iteration}
+                        </span>
+                      )}
                       {job.isCached && job.cachedAt && (
                         <span className="inline-flex items-center gap-1 rounded-md bg-muted px-1.5 py-0.5 text-[9px] text-muted-foreground font-mono">
                           Cached {new Date(job.cachedAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
@@ -148,7 +158,7 @@ export function ComputeAccountsGrid({
                     <div className="rounded-xl border border-amber-500/30 bg-amber-500/5 p-2.5 text-[11px] text-amber-700 dark:text-amber-300">
                       <p className="font-semibold">Notice on Resume:</p>
                       <p className="mt-0.5">
-                        Today resume is <strong>NOT automatic</strong>; you must press Resume below (or run the same method again).
+                        Each H200 job is one part of at most 3 h 45 m. The next part does <strong>not</strong> start by itself: press Continue below. It carries on from the last saved checkpoint.
                       </p>
                     </div>
                   )}
@@ -236,7 +246,7 @@ export function ComputeAccountsGrid({
                         className="inline-flex flex-1 items-center justify-center gap-1.5 rounded-xl bg-amber-500/20 px-3 py-2 text-xs font-bold text-amber-700 dark:text-amber-300 hover:bg-amber-500/30 transition-all cursor-pointer"
                       >
                         <RotateCcw className="h-3.5 w-3.5" />
-                        {isKaggle ? "Continue (--continue-previous)" : "Resume"}
+                        {isKaggle ? "Continue (--continue-previous)" : "Continue next part"}
                       </button>
                     )}
                     {job.status === "running" && (
