@@ -217,6 +217,20 @@ const nextConfig = {
   // "Can't resolve './client.js'". Transpiling the workspace package and
   // aliasing the extension makes the same source resolve here.
   transpilePackages: ["@bme/db"],
+  // Routes read data/ at runtime with computed paths, so the tracer would
+  // otherwise walk every scan and backup on each build.
+  outputFileTracingExcludes: {
+    "*": [
+      "../../data/**",
+      "../../BME/**",
+      "../../Non BME/**",
+      "../../inbox/**",
+      "../../ml/**",
+      "../../drive-upload/**",
+      "../../docs/**",
+      "./.next/cache/**",
+    ],
+  },
   allowedDevOrigins,
   // A 3D labelmap is one byte per voxel. A 624×768×22 scan is already ~10.1 MB,
   // and the middleware default drops anything past 10 MB, which makes write_seg

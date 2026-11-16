@@ -158,7 +158,16 @@ export function TrainingDataProvider({ children }: { children: ReactNode }) {
           markLoaded("accounts");
         }
         const full = await getJson("/api/training-advanced/accounts");
-        if (full?.cards) applyCards(full.cards, true);
+        if (full?.cards?.length) {
+          applyCards(full.cards, true);
+        } else if (cache.cards.some((c) => c.checking)) {
+          applyCards(
+            cache.cards.map((c) =>
+              c.checking ? { ...c, checking: false, connectionDetails: "Connection check failed. Press Retry." } : c,
+            ),
+            false,
+          );
+        }
         markLoaded("accounts");
       }),
     [once, applyCards, markLoaded],

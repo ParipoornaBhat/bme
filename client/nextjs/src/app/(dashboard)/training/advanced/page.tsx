@@ -101,6 +101,14 @@ const METHODS: MethodSpec[] = [
     arch: "cnet_dual_unet",
     localSupported: true,
   },
+  {
+    n: 10,
+    id: "unet-noaug",
+    where: "h200",
+    label: "3D U-Net, no augmentation (control)",
+    tests: "the control for 3-4: same model, no augmentation",
+    localSupported: false,
+  },
 ];
 
 const fmtDuration = (sec: number | null | undefined): string => {

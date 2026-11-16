@@ -2,6 +2,7 @@
 
 import {
   AlertTriangle,
+  RefreshCw,
   CheckCircle2,
   Cloud,
   FileCode,
@@ -23,6 +24,7 @@ export interface KaggleDatasetCardProps {
   onUpload: (targetId?: string) => void;
   onFreshUpload: (targetId?: string) => void;
   onStopSync: (targetId: string) => void;
+  onCheck?: () => void;
 }
 
 export function KaggleDatasetCard({
@@ -34,6 +36,7 @@ export function KaggleDatasetCard({
   onUpload,
   onFreshUpload,
   onStopSync,
+  onCheck,
 }: KaggleDatasetCardProps) {
   if (!target) return null;
 
@@ -57,6 +60,16 @@ export function KaggleDatasetCard({
         </div>
 
         <div className="flex items-center gap-2">
+          <button
+            type="button"
+            onClick={() => onCheck?.()}
+            className="inline-flex items-center gap-1.5 rounded-xl border border-border bg-card px-3 py-1.5 text-xs font-semibold text-muted-foreground hover:bg-accent hover:text-foreground cursor-pointer"
+            title="Re-read this account's dataset status"
+          >
+            <RefreshCw className="h-3.5 w-3.5" />
+            Check
+          </button>
+
           {/* Incremental Upload / Update Button */}
           <button
             type="button"

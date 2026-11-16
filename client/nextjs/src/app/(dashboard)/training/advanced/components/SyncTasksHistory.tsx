@@ -17,6 +17,7 @@ export interface SyncTasksHistoryProps {
   refreshing: boolean;
   onRefresh: () => void;
   onClearHistory: () => void;
+  onDeleteTask?: (id: string) => void;
   onResumeSync: (targetId: string) => void;
   fmtDate: (iso?: string | null) => string;
 }
@@ -41,6 +42,7 @@ export function SyncTasksHistory({
   refreshing,
   onRefresh,
   onClearHistory,
+  onDeleteTask,
   onResumeSync,
   fmtDate,
 }: SyncTasksHistoryProps) {
@@ -252,6 +254,18 @@ export function SyncTasksHistory({
                     >
                       <RotateCcw className="h-3 w-3 text-primary" />
                       Resume Sync
+                    </button>
+                  )}
+
+                  {task.status !== "running" && onDeleteTask && (
+                    <button
+                      type="button"
+                      onClick={() => onDeleteTask(task.id)}
+                      className="ml-auto inline-flex items-center gap-1 text-[11px] font-semibold text-destructive/80 hover:text-destructive cursor-pointer"
+                      title="Delete this entry from history"
+                    >
+                      <Trash2 className="h-3 w-3" />
+                      Delete
                     </button>
                   )}
 

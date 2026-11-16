@@ -26,10 +26,20 @@ function getDb() {
       isRemote = false;
     }
 
+    const noSSL = /[?&](sslmode=disable|ssl=false)/.test(connectionString);
+    if (noSSL) {
+      connectionString = connectionString
+        .replace(/([\?&])sslmode=[^&]*/, "$1")
+        .replace(/([\?&])ssl=[^&]*/, "$1")
+        .replace(/\?&/, "?")
+        .replace(/[?&]$/, "");
+    }
+
     const hasSSL =
-      connectionString.includes("sslmode=require") ||
+      !noSSL &&
+      (connectionString.includes("sslmode=require") ||
       connectionString.includes("ssl=true") ||
-      isRemote;
+      isRemote);
 
     if (hasSSL) {
       connectionString = connectionString
@@ -56,7 +66,7 @@ function getDb() {
 
     const pool = new pg.Pool({
       connectionString,
-      ssl: hasSSL || process.env.NODE_ENV === "production" ? { rejectUnauthorized: false } : undefined,
+      ssl: !noSSL && (hasSSL || process.env.NODE_ENV === "production") ? { rejectUnauthorized: false } : undefined,
       max: 10,
       ...(onWorkers
         ? { maxUses: 1, idleTimeoutMillis: 1, allowExitOnIdle: true }

@@ -442,9 +442,23 @@ export default function DataSyncPage() {
     return datasetTargets.filter((t) => t.platform === "h200");
   }, [datasetTargets]);
 
-  const kaggleTarget = useMemo(() => {
-    return datasetTargets.find((t) => t.platform === "kaggle") || null;
+  const kaggleTargets = useMemo(() => {
+    return datasetTargets.filter((t) => t.platform === "kaggle");
   }, [datasetTargets]);
+
+  const handleDeleteTask = async (id: string) => {
+    try {
+      const res = await fetch(`/api/training-advanced/tasks?id=${encodeURIComponent(id)}`, { method: "DELETE" });
+      if (res.ok) {
+        setTasks(tasks.filter((t) => t.id !== id));
+        toast.success("History entry deleted.");
+      } else {
+        toast.error("Could not delete (a running sync cannot be deleted).");
+      }
+    } catch (err: any) {
+      toast.error(err.message || "Failed to delete history entry");
+    }
+  };
 
   if (inReview) {
     return (
@@ -559,16 +573,20 @@ export default function DataSyncPage() {
       />
 
       {/* 3. Kaggle Dataset Card */}
-      <KaggleDatasetCard
-        target={kaggleTarget}
-        cards={cards}
-        kaggleDatasets={kaggleDatasets}
-        syncTasks={syncTasks}
-        syncBusyTarget={syncBusyTarget}
-        onUpload={handleKaggleUpload}
-        onFreshUpload={handleKaggleFreshUpload}
-        onStopSync={stopSync}
-      />
+      {kaggleTargets.map((kt) => (
+        <KaggleDatasetCard
+          key={kt.targetId}
+          target={kt}
+          cards={cards}
+          kaggleDatasets={kaggleDatasets}
+          syncTasks={syncTasks}
+          syncBusyTarget={syncBusyTarget}
+          onUpload={handleKaggleUpload}
+          onFreshUpload={handleKaggleFreshUpload}
+          onStopSync={stopSync}
+          onCheck={() => loadData(false)}
+        />
+      ))}
 
       {/* 4. Sync & Upload History Panel */}
       <SyncTasksHistory
@@ -576,6 +594,7 @@ export default function DataSyncPage() {
         refreshing={refreshing}
         onRefresh={() => loadData(false)}
         onClearHistory={handleClearHistory}
+        onDeleteTask={handleDeleteTask}
         onResumeSync={(targetId) => { void executeSync(targetId, true, false); }}
         fmtDate={fmtDate}
       />

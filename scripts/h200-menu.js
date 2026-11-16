@@ -182,11 +182,15 @@ async function push() {
   let bytes = 0;
   let same = 0;
   for (const rel of files) {
-    const size = fs.statSync(path.join(root, rel)).size;
+    const full = path.join(root, rel);
+    // Code is checked out with CRLF on Windows but reaches the H200 as LF, so
+    // compare the LF size; otherwise the same files look changed on every check.
+    const size = fs.statSync(full).size;
+    const lfSize = rel.startsWith("ml/") ? fs.readFileSync(full).filter((c) => c !== 13).length : size;
     const hashed = rel.endsWith(".seg.nrrd") || rel === "data/worklist.csv" || rel === HOLDOUT;
     const unchanged = !isFresh && (hashed
       ? remoteMd5.get(rel) === md5(path.join(root, rel))
-      : remoteSize.get(rel) === size);
+      : remoteSize.get(rel) === size || remoteSize.get(rel) === lfSize);
     if (unchanged) {
       same++;
       continue;
@@ -196,7 +200,7 @@ async function push() {
   }
   console.log(`Already on the server and unchanged: ${same} file(s).`);
   if (process.argv.includes("--plan")) {
-    console.log("PLAN " + JSON.stringify({ files: send.length, bytes, same }));
+    console.log("PLAN " + JSON.stringify({ files: send.length, bytes, same, names: send.slice(0, 20) }));
     return;
   }
   if (!send.length) {
@@ -247,7 +251,7 @@ async function submit(sbatch, what, logPrefix, extra = "", flags = "") {
   const busy = await ssh(`squeue -u $USER -h -n ${what} -o '%i %T %M'`);
   if (busy.out.trim()) {
     console.log(`A ${what} job is already queued or running:\n  ${busy.out.trim()}`);
-    if ((await ask("Start another anyway? [y/N] ")).toLowerCase() !== "y") return;
+    if (!(await askYes("Start another anyway? [y/N] "))) return;
   }
 
   let outFolder = "";
@@ -308,12 +312,22 @@ async function submit(sbatch, what, logPrefix, extra = "", flags = "") {
 }
 
 /** Ask before queueing a second job on one account; each job holds a GPU slice. */
+// Run from the dashboard with BME_NO_PROMPT=1: nothing can answer a question,
+// so refuse instead of continuing silently.
+async function askYes(question) {
+  if (process.env.BME_NO_PROMPT === "1") {
+    console.log("Not started: this account already has a job. Stop it first, or start it from the terminal.");
+    return false;
+  }
+  return (await ask(question)).toLowerCase() === "y";
+}
+
 async function okWithOtherJobs() {
   const r = await ssh(`squeue -u $USER -h -o '%i %j %T %M'`);
   if (r.code !== 0) fail(session.unreachable, r.code);
   if (!r.out.trim()) return true;
   console.log(`This account already has a job:\n  ${r.out.trim().split(/\r?\n/).join("\n  ")}`);
-  return (await ask("Queue this one as well? [y/N] ")).toLowerCase() === "y";
+  return askYes("Queue this one as well? [y/N] ");
 }
 
 function hours(seconds) {

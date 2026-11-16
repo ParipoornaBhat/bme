@@ -72,6 +72,7 @@ export interface CurrentJob {
 
 export interface AccountCard {
   id: string;
+  checking?: boolean;
   platform: PlatformType;
   label: string;
   accountName: string;

@@ -688,40 +688,47 @@ async function handleDatasetStatus() {
     });
   }
 
-  // Kaggle dataset sync: 1 designated account (owner or first usable)
-  const kaggleSyncAcc = owner || all.find(usable.kaggle);
-  if (kaggleSyncAcc) {
-    const targetId = `kaggle-${kaggleSyncAcc.roll}-${kaggleSyncAcc.slot || 1}`;
+  // Kaggle: one row per usable account. Each account has its own dataset and
+  // staging folder, so each row is checked and synced with its own credentials.
+  for (const acc of all.filter(usable.kaggle)) {
+    const slot = acc.slot || 1;
+    const targetId = `kaggle-${acc.roll}-${slot}`;
+    const isOwner = Boolean(owner && owner.roll === acc.roll && (owner.slot || 1) === slot);
 
     let hasUploaded = false;
     let isEmpty = true;
     let lastUpdated = null;
     let uploadedHash = null;
-
-    const stagingDir = stagingFor(kaggleSyncAcc);
-    const appFile = path.join(stagingDir, "dataset_approval.json");
+    const appFile = path.join(stagingFor(acc), "dataset_approval.json");
     if (fs.existsSync(appFile)) {
       try {
         const appData = JSON.parse(fs.readFileSync(appFile, "utf8"));
         uploadedHash = appData.uploaded_hash || null;
         hasUploaded = Boolean(uploadedHash);
-        const cases = appData.case_count || 0;
-        const files = appData.file_count || 0;
-        isEmpty = !hasUploaded || (cases === 0 && files === 0);
+        isEmpty = !hasUploaded || ((appData.case_count || 0) === 0 && (appData.file_count || 0) === 0);
         lastUpdated = appData.uploaded_at || null;
       } catch {}
     }
 
-    const isUpToDate = hasUploaded && !isEmpty && !needsUpload;
+    const knownLocal = localExport.hash !== "unknown";
+    const accNeedsUpload = isOwner
+      ? needsUpload || !hasUploaded
+      : !hasUploaded || (knownLocal && uploadedHash !== localExport.hash);
+    const isUpToDate = hasUploaded && !isEmpty && !accNeedsUpload;
 
     targets.push({
       targetId,
       platform: "kaggle",
-      label: `Kaggle - ${kaggleSyncAcc.kaggleUser || kaggleSyncAcc.label} (Dataset Sync)`,
+      label: `Kaggle - ${acc.kaggleUser || acc.label}`,
+      isOwner,
       datasetVersion: hasUploaded ? (uploadedHash?.slice(0, 12) || "uploaded") : "not-uploaded",
       localExportVersion: localExport.hash,
       isUpToDate,
-      reason: isEmpty ? "Dataset empty / not uploaded" : needsUpload ? (uploadReason || "Local data changed") : "Up to date",
+      reason: isEmpty
+        ? "Dataset empty / not uploaded"
+        : accNeedsUpload
+        ? (isOwner && uploadReason ? uploadReason : "Local data changed")
+        : "Up to date",
       casesCount: localExport.cases,
       filesCount: localExport.files,
       bytesToSync: localExport.bytes,
@@ -802,9 +809,11 @@ async function handleDatasetSync(targetId, confirmed = false, isFresh = false) {
   }
 
   if (target.platform === "kaggle") {
-    const { owner } = datasetOwner(mergedEnv());
-    const syncAcc = owner || findAccount(listAccounts(mergedEnv()), targetId.replace("kaggle-", "").split("-")[0]);
-    if (!syncAcc) throw new Error("No Kaggle dataset sync account found in .env");
+    const m = /^kaggle-(.+)-(\d+)$/.exec(targetId);
+    const syncAcc = m
+      ? listAccounts(mergedEnv()).filter(usable.kaggle).find((a) => a.roll === m[1] && String(a.slot || 1) === m[2])
+      : null;
+    if (!syncAcc) throw new Error(`No Kaggle account found for ${targetId}`);
 
     // Require explicit confirmation for internet data upload
     if (!confirmed) {
@@ -909,7 +918,9 @@ async function handleStart(platform, targetId, methodId, extraJson = "{}") {
   } else if (platform === "h200") {
     const roll = targetId.replace("h200-", "");
     let h200Args = ["aug", extra.augLevel || "med", "--as", roll];
-    if (methodId.startsWith("unet-aug-")) {
+    if (methodId === "unet-noaug") {
+      h200Args = ["train3dplain", "--as", roll];
+    } else if (methodId.startsWith("unet-aug-")) {
       h200Args = ["aug", methodId.replace("unet-aug-", ""), "--as", roll];
     } else if (methodId === "unet-holdout") {
       h200Args = ["holdout", "--as", roll];
@@ -918,14 +929,14 @@ async function handleStart(platform, targetId, methodId, extraJson = "{}") {
     } else if (methodId === "nnunet-2d") {
       h200Args = ["best", "2d", "--as", roll];
     }
-    const r = spawnSync(process.execPath, [path.join(root, "scripts", "h200-menu.js"), ...h200Args], {
-      windowsHide: true,
-      cwd: root,
-      encoding: "utf8",
-      stdio: "pipe",
+    const r = await runStreaming(process.execPath, [path.join(root, "scripts", "h200-menu.js"), ...h200Args], {
+      env: { ...process.env, BME_NO_PROMPT: "1" },
     });
-    if (r.status !== 0) throw new Error(`H200 start failed: ${r.stderr || r.stdout}`);
-    return { success: true, message: `H200 job started for ${methodId} on account ${roll}` };
+    if (r.status !== 0 || !/Submitted batch job/.test(r.stdout)) {
+      const tail = (r.stderr || r.stdout || "").trim().split(/\r?\n/).slice(-3).join(" | ");
+      throw new Error(`H200 did not start the run: ${tail || "no answer from the H200"}`);
+    }
+    return { success: true, message: `H200 job submitted for ${methodId} on account ${roll}` };
   } else if (platform === "local") {
     const r = spawnSync(process.execPath, [path.join(root, "scripts", "train-local.js"), methodId], {
       windowsHide: true,

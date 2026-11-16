@@ -60,6 +60,10 @@ export function StartTrainingForm({
   const isDataBehind = currentSelectedTarget?.platform === "h200" && targetStatus && !targetStatus.isUpToDate;
   const isBlocked = Boolean(currentSelectedTarget?.currentJob && currentSelectedTarget.currentJob.status === "running");
   const isKaggleNoDs = currentSelectedTarget?.platform === "kaggle" && kaggleDatasets.length === 0;
+  const launching = tasks.some((t) => t.type === "start" && t.status === "running" && t.target === currentSelectedTarget?.id);
+  const lastLaunch = tasks
+    .filter((t) => t.type === "start" && t.target === currentSelectedTarget?.id)
+    .sort((a, b) => (b.startedAt || "").localeCompare(a.startedAt || ""))[0];
 
   return (
     <div className="space-y-4 rounded-2xl border border-border bg-card p-6 shadow-sm">
@@ -75,7 +79,7 @@ export function StartTrainingForm({
         {/* Pick Method */}
         <div className="sm:col-span-2">
           <label className="text-xs font-bold uppercase tracking-wider text-muted-foreground block mb-1.5">
-            1. Select Method (The 9 Methods)
+            1. Select Method (The 10 Methods)
           </label>
           <select
             value={selectedMethodId}
@@ -158,6 +162,7 @@ export function StartTrainingForm({
         )}
 
         {/* Augmentation Level */}
+        {currentSelectedMethod?.id !== "unet-noaug" && (
         <div>
           <label className="text-xs font-bold uppercase tracking-wider text-muted-foreground block mb-1.5">
             Augmentation Level
@@ -172,6 +177,8 @@ export function StartTrainingForm({
             <option value="max">Max (same + noise, 30-50% patches)</option>
           </select>
         </div>
+
+        )}
 
         {/* Validation Split */}
         <div>
@@ -247,13 +254,28 @@ export function StartTrainingForm({
           <span>Full metadata (`startedBy`, `platform`, `account`, `host`, `startedAt`) recorded automatically.</span>
         </div>
 
+        {lastLaunch && (
+          <div className="rounded-xl border border-border bg-muted/30 p-3 space-y-2">
+            <div className="flex items-center justify-between text-[11px]">
+              <span className="font-semibold">
+                Last launch:{" "}
+                {lastLaunch.status === "running" ? "launching..." : lastLaunch.status === "completed" ? "submitted" : "not started"}
+              </span>
+              <span className="text-muted-foreground">{new Date(lastLaunch.startedAt).toLocaleString()}</span>
+            </div>
+            <pre className="max-h-48 overflow-auto rounded-lg bg-black/80 p-2 text-[10px] leading-relaxed text-green-300 font-mono whitespace-pre-wrap">
+              {(lastLaunch.log && lastLaunch.log.length ? lastLaunch.log.slice(-12) : [lastLaunch.message || ""]).join("\n")}
+            </pre>
+          </div>
+        )}
+
         <button
           type="button"
           onClick={onSubmit}
-          disabled={startBusy || !currentSelectedTarget?.connected || isKaggleNoDs || isDataBehind || isSyncActive || isBlocked}
+          disabled={startBusy || launching || !currentSelectedTarget?.connected || isKaggleNoDs || isDataBehind || isSyncActive || isBlocked}
           className="inline-flex items-center justify-center gap-2 rounded-xl bg-primary px-5 py-2.5 text-xs font-bold text-primary-foreground hover:bg-primary/90 transition-all cursor-pointer disabled:opacity-40"
         >
-          {startBusy ? <Loader2 className="h-4 w-4 animate-spin" /> : <Play className="h-4 w-4" />}
+          {startBusy || launching ? <Loader2 className="h-4 w-4 animate-spin" /> : <Play className="h-4 w-4" />}
           Start Run
         </button>
       </div>

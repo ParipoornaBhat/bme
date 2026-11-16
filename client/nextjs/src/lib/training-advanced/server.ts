@@ -33,6 +33,9 @@ export function getTasks(): BackgroundTask[] {
     // A sync marked running whose process is gone (for example after the app restarted) is shown as ended.
     return tasks.map((t) => {
       const started = Date.parse(t.startedAt || "");
+      if (t.status === "running" && t.type === "start" && !Number.isNaN(started) && Date.now() - started > 60 * 60 * 1000) {
+        return { ...t, status: "failed", endedAt: t.endedAt || new Date().toISOString(), message: "Launch ended without a result (the app restarted or the process stopped)." };
+      }
       if (t.status !== "running" || !t.id.startsWith("sync-") || !t.target) return t;
       if (Number.isNaN(started) || Date.now() - started < 30000) return t;
       const lock = readSyncLock(t.target);
@@ -164,6 +167,18 @@ function clearSyncLock(targetId: string) {
 }
 
 const cancelledSyncs = new Set<string>();
+
+export function deleteTask(id: string): boolean {
+  const all = getTasks();
+  const found = all.find((t) => t.id === id);
+  if (!found || found.status === "running") return false;
+  try {
+    fs.writeFileSync(tasksFile(), JSON.stringify(all.filter((t) => t.id !== id), null, 2), "utf8");
+  } catch {
+    return false;
+  }
+  return true;
+}
 
 export function clearTasks(): void {
   try {
@@ -331,6 +346,10 @@ export async function startJob({
   };
   datasetOwnerRoll?: string;
 }): Promise<{ success: boolean; message: string; taskId: string }> {
+  const busy = getTasks().find((t) => t.type === "start" && t.status === "running" && t.target === targetId);
+  if (busy) {
+    return { success: false, message: `A launch on ${targetId} is still running. Wait for it to finish.`, taskId: busy.id };
+  }
   const taskId = `start-${Date.now()}`;
   const task: BackgroundTask = {
     id: taskId,
@@ -354,14 +373,25 @@ export async function startJob({
   );
 
   let log = "";
-  child.stdout?.on("data", (chunk) => { log += chunk; });
-  child.stderr?.on("data", (chunk) => { log += chunk; });
+  let lastSave = 0;
+  const onOutput = (chunk: Buffer) => {
+    log += chunk.toString();
+    const lines = log.split(/\r?\n|\r/).map((l) => l.trim()).filter(Boolean);
+    task.log = lines.slice(-200);
+    task.message = lines[lines.length - 1] || task.message;
+    if (Date.now() - lastSave > 1000) {
+      lastSave = Date.now();
+      saveTask(task);
+    }
+  };
+  child.stdout?.on("data", onOutput);
+  child.stderr?.on("data", onOutput);
 
   child.on("exit", (code) => {
     task.status = code === 0 ? "completed" : "failed";
     task.endedAt = new Date().toISOString();
-    task.message = code === 0 ? `Run ${methodId} launched successfully.` : `Run ${methodId} failed with exit code ${code}`;
-    task.log = log.split(/\r?\n|\r/).map((l) => l.trim()).filter(Boolean).slice(-30);
+    task.message = code === 0 ? `Run ${methodId} submitted.` : `Run ${methodId} was not started (exit code ${code}).`;
+    task.log = log.split(/\r?\n|\r/).map((l) => l.trim()).filter(Boolean).slice(-200);
     saveTask(task);
   });
 
@@ -399,6 +429,8 @@ export async function resumeJob({
     scriptPath = path.join(root, "scripts", "h200-menu.js");
     if (methodId?.includes("holdout")) {
       args = ["holdout", "--as", roll];
+    } else if (methodId === "unet-noaug") {
+      args = ["resume3dplain", "--as", roll];
     } else if (methodId?.includes("aug")) {
       const lvl = methodId.includes("max") ? "max" : methodId.includes("low") ? "low" : "med";
       args = ["aug", lvl, "--as", roll];
