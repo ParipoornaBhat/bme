@@ -44,6 +44,7 @@ import {
   ZoomOut,
 } from "lucide-react";
 import { toast } from "sonner";
+import { decodeDraft, deleteDraft, draftKey, hashLabels, loadDraft, saveDraft } from "~/lib/annotation-draft";
 import { useSession } from "~/lib/auth-client";
 import { isReviewMode } from "~/lib/app-mode";
 import { streamNifti, getCachedVolume, prefetchVolume, cancelPrefetch, type StreamInfo } from "~/lib/stream-volume";
@@ -1089,6 +1090,30 @@ export default function Viewer({
           toast.error(`Saved annotation for ${caseId} could not be loaded; saving is disabled so it is not overwritten.`);
         }
 
+        // Unsaved edits from an earlier visit (a refresh, a closed tab, a failed save).
+        const savedBase = initial;
+        const thisDraftKey = draftKey(caseId, seriesId);
+        let restoredAt = 0;
+        let staleDraft: Uint8Array | null = null;
+        let staleAt = 0;
+        if (!loadError && edemaHere && !isCollaborator) {
+          const d = await loadDraft(thisDraftKey);
+          const mine = d && (!d.user || !draftUserRef.current || d.user === draftUserRef.current);
+          if (d && mine && d.length === n) {
+            const draftLabels = decodeDraft(d);
+            let same = true;
+            for (let i = 0; i < n; i++) if (draftLabels[i] !== savedBase[i]) { same = false; break; }
+            if (same) void deleteDraft(thisDraftKey);
+            else if (d.baseHash === hashLabels(savedBase)) {
+              initial = draftLabels;
+              restoredAt = d.at;
+            } else {
+              staleDraft = draftLabels;
+              staleAt = d.at;
+            }
+          } else if (d && mine) void deleteDraft(thisDraftKey);
+        }
+
         if (cancelled) return;
         setSavedLoadError(loadError);
         setVol({ data, dims, spacing, axes, orient, lo, hi });
@@ -1101,7 +1126,42 @@ export default function Viewer({
         setCounts(countLabels(initial));
         // The dimensions are on the info bar already; the status is the news.
         setStatus(note ? note.replace(/^ · /, "").replace(/^./, (c) => c.toUpperCase()) : "No saved annotation yet");
-        setDirty(false);
+        draftBaseHash.current = hashLabels(savedBase);
+        const when = (t: number) => new Date(t).toLocaleString([], { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" });
+        if (restoredAt) {
+          cleanLabels.current = savedBase.slice();
+          setDirty(true);
+          setStatus(`Unsaved edits from ${when(restoredAt)} restored. Press Save to keep them.`);
+          toast.info(`Your unsaved edits on ${caseId} from ${when(restoredAt)} were restored. They are not saved yet.`, {
+            duration: 15000,
+            action: {
+              label: "Discard them",
+              onClick: () => {
+                void deleteDraft(thisDraftKey);
+                setLabels(savedBase.slice());
+                setCounts(countLabels(savedBase));
+                setDirty(false);
+              },
+            },
+          });
+        } else {
+          setDirty(false);
+          if (staleDraft) {
+            const mineLabels = staleDraft;
+            toast.warning(`You have unsaved edits on ${caseId} from ${when(staleAt)}, but the saved annotation changed after that.`, {
+              duration: 30000,
+              action: {
+                label: "Load my edits",
+                onClick: () => {
+                  cleanLabels.current = savedBase.slice();
+                  setLabels(mineLabels);
+                  setCounts(countLabels(mineLabels));
+                  setDirty(true);
+                },
+              },
+            });
+          }
+        }
 
         // Prefetch next case if known in review mode
         if (isReview && nextCaseId) {
@@ -1492,12 +1552,66 @@ export default function Viewer({
     setCounts(c);
   }, [labels]);
 
+  // ---- unsaved edits survive a refresh ----------------------------------
+  // Each edit is written to this browser a moment later (IndexedDB). It is
+  // restored when the case is opened again, and removed once Save succeeds.
+  const draftKeyRef = useRef("");
+  draftKeyRef.current = draftKey(caseId, seriesId);
+  const draftUserRef = useRef("local");
+  draftUserRef.current = isReview ? reviewUser?.username || "" : "local";
+  const draftBaseHash = useRef(0);
+  const draftTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const writeDraftNow = useCallback((key: string) => {
+    const cur = labelsRef.current;
+    if (!cur || draftKeyRef.current !== key) return;
+    void saveDraft(key, draftUserRef.current, cur, draftBaseHash.current);
+  }, []);
+  const scheduleDraft = useCallback(() => {
+    const key = draftKeyRef.current;
+    if (draftTimer.current) clearTimeout(draftTimer.current);
+    draftTimer.current = setTimeout(() => {
+      draftTimer.current = null;
+      writeDraftNow(key);
+    }, 1200);
+  }, [writeDraftNow]);
+  const dropDraft = useCallback((key: string) => {
+    if (draftTimer.current) clearTimeout(draftTimer.current);
+    draftTimer.current = null;
+    void deleteDraft(key);
+  }, []);
+  // Saved (or undone back to the saved state): the draft has done its job.
+  const draftWas = useRef({ key: "", dirty: false });
+  useEffect(() => {
+    const key = draftKeyRef.current;
+    const was = draftWas.current;
+    if (was.key === key && was.dirty && !dirty) dropDraft(key);
+    if (!dirty && labels) draftBaseHash.current = hashLabels(labels);
+    draftWas.current = { key, dirty };
+  }, [dirty, labels, caseId, seriesId, dropDraft]);
+  // A tab that is being hidden or closed writes at once instead of waiting.
+  useEffect(() => {
+    const flush = () => {
+      if (!draftTimer.current) return;
+      clearTimeout(draftTimer.current);
+      draftTimer.current = null;
+      writeDraftNow(draftKeyRef.current);
+    };
+    const onHide = () => { if (document.visibilityState === "hidden") flush(); };
+    document.addEventListener("visibilitychange", onHide);
+    window.addEventListener("pagehide", flush);
+    return () => {
+      document.removeEventListener("visibilitychange", onHide);
+      window.removeEventListener("pagehide", flush);
+    };
+  }, [writeDraftNow]);
+
   // ---- history ---------------------------------------------------------
   const markEdited = useCallback(() => {
     editVersion.current++;
     setDirty(true);
     scheduleFlush();
-  }, [scheduleFlush]);
+    scheduleDraft();
+  }, [scheduleFlush, scheduleDraft]);
 
   const pushUndo = useCallback(() => {
     if (!labels) return;
@@ -2440,6 +2554,7 @@ export default function Viewer({
     if (dirty) {
       const ok = window.confirm("You have unsaved changes. Switch annotation and discard unsaved edits?");
       if (!ok) return;
+      dropDraft(draftKeyRef.current);
     }
     if (!vol) return;
     const n = vol.dims[0] * vol.dims[1] * vol.dims[2];
@@ -2977,6 +3092,7 @@ export default function Viewer({
   const switchCase = (go?: () => void) => {
     if (!go) return;
     if (dirty && !autoSave && !confirm(`${caseId} has unsaved changes. Switch case and lose them?`)) return;
+    if (dirty && !autoSave) dropDraft(draftKeyRef.current);
     go();
   };
 
@@ -3084,7 +3200,7 @@ export default function Viewer({
         <div className="space-y-1.5">
           {railCheck("Only inside bone", maskInside, setMaskInside)}
           {railCheck("Protect lesion", protectLesion, changeProtectLesion)}
-          {railCheck("Auto-pan", autoPan, setAutoPan, "While drawing in a zoomed view, slide the image when the pointer nears an edge")}
+          {railCheck("Fix view while drawing", !autoPan, (on: boolean) => setAutoPan(!on), "On: the image stays still when the pointer nears an edge. Off: it slides (auto-pan). Remembered on this device for every account.")}
           {railCheck("Dotted pencil trace", pencilDotted, setPencilDotted, "While tracing, show only a dotted outline instead of a solid edge over a tinted fill preview")}
           {railSelect("Draw with", drawDefault, setDrawDefault, "Tool chosen when you pick a label or turn the eraser off")}
           {railSelect("Erase with", eraseDefault, setEraseDefault, "Tool chosen when you turn the eraser on")}

@@ -2424,15 +2424,15 @@ export default function Painter2D({
 
                   <label
                     className="flex items-center gap-1.5 text-xs text-muted-foreground cursor-pointer select-none ml-1"
-                    title="While drawing on a zoomed image, slide it when the pointer nears an edge"
+                    title="On: the image stays still when the pointer nears an edge. Off: it slides (auto-pan). Remembered on this device for every account."
                   >
                     <input
                       type="checkbox"
-                      checked={autoPan}
-                      onChange={(e) => setAutoPan(e.target.checked)}
+                      checked={!autoPan}
+                      onChange={(e) => setAutoPan(!e.target.checked)}
                       className="rounded border-border accent-primary h-3.5 w-3.5"
                     />
-                    <span>Auto-pan</span>
+                    <span>Fix view while drawing</span>
                   </label>
                   <label
                     className="flex items-center gap-1 text-xs text-muted-foreground select-none ml-1"
