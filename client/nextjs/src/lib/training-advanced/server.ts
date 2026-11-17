@@ -499,6 +499,7 @@ export async function resumeJob({
     scriptPath = path.join(root, "scripts", "h200-menu.js");
     const m = methodId || "";
     if (m.startsWith("selftest-")) args = ["selftest", m.replace("selftest-", "")];
+    else if (m.startsWith("arch-")) args = ["arch", m.split("-")[1], m.split("-")[2] || "med"];
     else if (m.startsWith("nnunet-")) args = ["best", m.includes("2d") ? "2d" : "3d", ...(m.endsWith("-noaug") ? ["noaug"] : [])];
     else if (m.startsWith("unet-holdout")) args = ["holdout", m.replace("unet-holdout", "").replace("-", "") || "med"];
     else if (m === "unet-noaug") args = ["plain"];

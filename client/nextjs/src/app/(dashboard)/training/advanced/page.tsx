@@ -23,6 +23,7 @@ import { ComputeAccountsGrid } from "./components/ComputeAccountsGrid";
 import { StartTrainingForm } from "./components/StartTrainingForm";
 import { RunHistoryTable } from "./components/RunHistoryTable";
 import { useTrainingData } from "./TrainingDataProvider";
+import { toPlatform } from "~/lib/training-advanced/method-map";
 
 const METHODS: MethodSpec[] = [
   {
@@ -197,6 +198,8 @@ export default function AdvancedTrainingPage() {
     try {
       const targetCard = cards.find((c) => c.id === selectedTargetId);
       if (!targetCard) throw new Error("Please select an execution target");
+      const mapped = toPlatform(selectedMethodId, targetCard.platform);
+      if (!mapped) throw new Error("This model cannot run on that account (nnU-Net, the self-test and the fixed 80/20 split are H200 only).");
 
       const res = await fetch("/api/training-advanced/start", {
         method: "POST",
@@ -204,9 +207,9 @@ export default function AdvancedTrainingPage() {
         body: JSON.stringify({
           platform: targetCard.platform,
           targetId: selectedTargetId,
-          methodId: selectedMethodId,
+          methodId: mapped.methodId,
           extra: {
-            augLevel,
+            augLevel: mapped.augLevel ?? augLevel,
             splitMode,
             epochs,
             datasetOwnerRoll: selectedDatasetOwner,

@@ -10,20 +10,21 @@ import type {
   TargetDatasetStatus,
 } from "~/lib/training-advanced/types";
 import { LogModal, TerminalBox, type LogTarget } from "./TerminalView";
+import { methodIdFor, parseMethod, type Aug } from "~/lib/training-advanced/method-map";
 
-type Aug = "builtin" | "none" | "low" | "med" | "max";
 type Where = "h200" | "kaggle";
 
 // The model is one choice, the augmentation another, the validation split a third.
-const MODELS: { key: string; label: string; where: Where; augs: Aug[]; holdout?: boolean }[] = [
-  { key: "nnunet-3d", label: "nnU-Net ResEnc M, 3D", where: "h200", augs: ["builtin", "none"] },
-  { key: "nnunet-2d", label: "nnU-Net ResEnc M, 2D", where: "h200", augs: ["builtin", "none"] },
-  { key: "unet3d", label: "3D U-Net", where: "h200", augs: ["none", "low", "med", "max"], holdout: true },
-  { key: "k-unet3d", label: "3D U-Net (Kaggle settings)", where: "kaggle", augs: ["none", "low", "med", "max"] },
-  { key: "k-mednext", label: "MedNeXt", where: "kaggle", augs: ["none", "low", "med", "max"] },
-  { key: "k-orthogate", label: "OrthoGate-MedNeXt", where: "kaggle", augs: ["none", "low", "med", "max"] },
-  { key: "k-cnet-dual", label: "C-Net dual U-Net", where: "kaggle", augs: ["none", "low", "med", "max"] },
-  { key: "selftest", label: "Self-test (2 minutes, checks start / stop / continue)", where: "h200", augs: ["none", "max"] },
+// `targets` lists the kinds of account that can run it; the account is a separate choice.
+const ALL_AUGS: Aug[] = ["none", "low", "med", "max"];
+const MODELS: { key: string; label: string; targets: Where[]; augs: Aug[]; holdout?: boolean }[] = [
+  { key: "nnunet-3d", label: "nnU-Net ResEnc M, 3D", targets: ["h200"], augs: ["builtin", "none"] },
+  { key: "nnunet-2d", label: "nnU-Net ResEnc M, 2D", targets: ["h200"], augs: ["builtin", "none"] },
+  { key: "unet3d", label: "3D U-Net", targets: ["h200", "kaggle"], augs: ALL_AUGS, holdout: true },
+  { key: "mednext", label: "MedNeXt", targets: ["h200", "kaggle"], augs: ALL_AUGS },
+  { key: "orthogate", label: "OrthoGate-MedNeXt", targets: ["h200", "kaggle"], augs: ALL_AUGS },
+  { key: "cnet", label: "C-Net dual U-Net", targets: ["h200", "kaggle"], augs: ALL_AUGS },
+  { key: "selftest", label: "Self-test (2 minutes, checks start / stop / continue)", targets: ["h200"], augs: ["none", "max"] },
 ];
 
 const AUG_LABEL: Record<Aug, string> = {
@@ -33,25 +34,6 @@ const AUG_LABEL: Record<Aug, string> = {
   med: "Medium (nnU-Net strength, +-30 deg, 20% of patches)",
   max: "Max (same + noise, 30-50% of patches)",
 };
-
-function parseMethod(mid: string, kaggleAug: Aug): { model: string; aug: Aug; holdout: boolean } {
-  if (mid.startsWith("nnunet-")) return { model: mid.includes("2d") ? "nnunet-2d" : "nnunet-3d", aug: mid.endsWith("-noaug") ? "none" : "builtin", holdout: false };
-  if (mid.startsWith("unet-holdout")) return { model: "unet3d", aug: (mid.replace("unet-holdout", "").replace("-", "") || "med") as Aug, holdout: true };
-  if (mid === "unet-noaug") return { model: "unet3d", aug: "none", holdout: false };
-  if (mid.startsWith("unet-aug-")) return { model: "unet3d", aug: mid.replace("unet-aug-", "") as Aug, holdout: false };
-  if (mid.startsWith("selftest-")) return { model: "selftest", aug: mid === "selftest-plain" ? "none" : "max", holdout: false };
-  return { model: mid, aug: kaggleAug, holdout: false };
-}
-
-function methodIdFor(model: string, aug: Aug, holdout: boolean): string {
-  if (model.startsWith("nnunet-")) return aug === "none" ? `${model}-noaug` : model;
-  if (model === "selftest") return aug === "none" ? "selftest-plain" : "selftest-aug";
-  if (model === "unet3d") {
-    if (holdout) return aug === "med" ? "unet-holdout" : `unet-holdout-${aug}`;
-    return aug === "none" ? "unet-noaug" : `unet-aug-${aug}`;
-  }
-  return model;
-}
 
 export interface StartTrainingFormProps {
   methods: MethodSpec[];
@@ -98,29 +80,35 @@ export function StartTrainingForm({
 }: StartTrainingFormProps) {
   const [openLog, setOpenLog] = useState<LogTarget | null>(null);
   const mid = selectedMethodId;
-  const sel = parseMethod(mid, augLevel);
+  const sel = parseMethod(mid);
   const model = MODELS.find((m) => m.key === sel.model) || MODELS[0];
   const currentSelectedMethod = methods.find((m) => m.id === mid);
   const currentSelectedTarget = cards.find((c) => c.id === selectedTargetId) || cards[0];
 
-  // Only targets this model can run on.
+  const platform = currentSelectedTarget?.platform;
+  // Only accounts this model can run on.
   const validCards = cards.filter(
-    (c) => c.platform === model.where || (c.platform === "local" && model.key === "unet3d" && !sel.holdout && sel.aug !== "none"),
+    (c) =>
+      model.targets.includes(c.platform as Where) ||
+      (c.platform === "local" && model.key === "unet3d" && !sel.holdout && sel.aug !== "none"),
   );
   useEffect(() => {
     if (validCards.length > 0 && !validCards.some((c) => c.id === selectedTargetId)) {
       onTargetChange(validCards[0].id);
     }
   }, [selectedMethodId, selectedTargetId, validCards.length]); // eslint-disable-line react-hooks/exhaustive-deps
+  // The fixed 80/20 split exists on the H200 only.
+  useEffect(() => {
+    if (platform === "kaggle" && sel.holdout) onMethodChange(methodIdFor(model.key, sel.aug, false));
+  }, [platform, sel.holdout]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const pickModel = (key: string) => {
     const next = MODELS.find((m) => m.key === key) || MODELS[0];
     const aug: Aug = next.augs.includes(sel.aug) ? sel.aug : next.augs.includes("med") ? "med" : next.augs[0];
-    if (next.where === "kaggle" && aug !== "builtin") onAugLevelChange(aug);
     onMethodChange(methodIdFor(next.key, aug, Boolean(next.holdout) && sel.holdout));
   };
   const pickAug = (aug: Aug) => {
-    if (model.where === "kaggle" && aug !== "builtin") onAugLevelChange(aug);
+    if (aug !== "builtin") onAugLevelChange(aug);
     onMethodChange(methodIdFor(model.key, aug, sel.holdout));
   };
 
@@ -129,16 +117,19 @@ export function StartTrainingForm({
     ? `12 cases, 2 folds, at most 1.5 minutes of training per job, ${augText}. Press Continue next part once to check resume.`
     : model.key.startsWith("nnunet")
     ? `5 folds x 100 epochs, ${augText}. Each job stops at 3 h 45 m; Continue carries on.`
+    : platform === "kaggle"
+    ? `${model.label} with the Kaggle settings for this architecture, ${augText}.`
     : model.key === "unet3d"
     ? sel.holdout
       ? `one round on the fixed 80/20 split, ${augText}. The split is made automatically the first time and never changes.`
       : `patient-level 5-fold cross-validation, ${augText}.`
-    : `the Kaggle settings for this architecture, ${augText}.`;
+    : `${model.label} on the H200 with the 3D U-Net settings (patch 160x160x16, batch 4), patient-level 5-fold cross-validation, ${augText}. Not run on the H200 before: if the 18 GB slice is too small the card shows the error.`;
+  const showEpochInput = platform === "h200" && model.key !== "selftest" && !model.key.startsWith("nnunet");
   const epochsText = model.key === "selftest"
     ? "As many as fit in 1.5 minutes"
     : model.key.startsWith("nnunet")
     ? "100 per fold (fixed by nnU-Net ResEnc M)"
-    : model.where === "h200"
+    : platform === "h200"
     ? `${epochs} per fold, over as many parts of at most 3 h 45 m as it takes`
     : "Fixed by the Kaggle settings for this architecture";
   const needsNnunet = mid.startsWith("nnunet");
@@ -186,7 +177,7 @@ export function StartTrainingForm({
           >
             {MODELS.map((m) => (
               <option key={m.key} value={m.key}>
-                {m.label} ({m.where.toUpperCase()})
+                {m.label} ({m.targets.map((t) => t.toUpperCase()).join(" or ")})
               </option>
             ))}
           </select>
@@ -291,14 +282,14 @@ export function StartTrainingForm({
           </label>
           <select
             value={sel.holdout ? "holdout" : "5folds"}
-            disabled={!model.holdout}
+            disabled={!model.holdout || platform === "kaggle"}
             onChange={(e) => onMethodChange(methodIdFor(model.key, sel.aug, e.target.value === "holdout"))}
             className="w-full rounded-xl border border-border bg-background px-3 py-2 text-xs font-semibold cursor-pointer disabled:opacity-60 disabled:cursor-not-allowed"
           >
             <option value="5folds">5-Fold Patient Cross-Validation</option>
             <option value="holdout">Fixed 80/20 Holdout Split</option>
           </select>
-          {!model.holdout && (
+          {(!model.holdout || platform === "kaggle") && (
             <p className="mt-1 text-[10px] text-muted-foreground">
               The fixed 80/20 split is wired for the 3D U-Net on the H200 only.
             </p>
@@ -310,7 +301,7 @@ export function StartTrainingForm({
           <label className="text-xs font-bold uppercase tracking-wider text-muted-foreground block mb-1.5">
             Epochs
           </label>
-          {model.key === "unet3d" ? (
+          {showEpochInput ? (
             <div className="space-y-1">
               <input
                 type="number"

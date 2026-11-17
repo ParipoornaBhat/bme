@@ -137,6 +137,21 @@ const H200_RUNS = [
   { folder: "results3d-h200-v2", methodId: "train3d", job: "bme_unet3d", log: "unet3d", label: "3D U-Net (v2)" },
 ];
 
+// The other architectures on the H200: same trainer, same settings as the 3D U-Net.
+const ARCH_LABELS = { mednext: "MedNeXt", orthogate: "OrthoGate-MedNeXt", cnet: "C-Net dual U-Net" };
+for (const [k, label] of Object.entries(ARCH_LABELS)) {
+  for (const lvl of ["none", "low", "med", "max"]) {
+    H200_RUNS.push({
+      folder: `results3d-${k}-${lvl}`,
+      methodId: `arch-${k}-${lvl}`,
+      job: `bme_${k}_${lvl}`,
+      log: `arch_${k}_${lvl}`,
+      label: `${label}, ${lvl === "none" ? "no augmentation" : `augmentation ${lvl}`}`,
+    });
+  }
+}
+const KAGGLE_TO_ARCH = { "k-mednext": "mednext", "k-orthogate": "orthogate", "k-cnet-dual": "cnet" };
+
 async function runSshCommand(session, cmd, timeoutMs = 15000) {
   return new Promise((resolve) => {
     const child = spawn(
@@ -243,7 +258,7 @@ async function handleAccounts() {
               `echo "===RESULTS==="; ` +
               `cd $HOME/bme/data 2>/dev/null && for d in ${H200_RUNS.map((r) => r.folder).join(" ")}; do ` +
               `[ -f $d/metrics.json ] && echo "$d|finished"; ` +
-              `[ ! -f $d/metrics.json ] && [ -n "$(ls -A $d 2>/dev/null)" ] && echo "$d|stopped"; done; ` +
+              `[ ! -f $d/metrics.json ] && [ -n "$(ls -A $d 2>/dev/null | grep -v -e '^run_status.json$' -e '^dataset_manifest.json$')" ] && echo "$d|stopped"; done; ` +
               `echo "===ENV==="; [ -x $HOME/bme/env/bin/python3 ] && echo ENV_OK; ` +
               `$HOME/bme/env/bin/python3 -c "import nnunetv2" 2>/dev/null && echo NNUNET_OK; ` +
               `echo "===LAST==="; sacct -u $USER -S now-3days -X -n -P --format=JobID,JobName,State,Elapsed 2>/dev/null | tail -1; ` +
@@ -1183,6 +1198,8 @@ async function handleStart(platform, targetId, methodId, extraJson = "{}") {
     // Every one of these continues by itself when the run was already started.
     let h200Args = ["aug", ["low", "med", "max"].includes(extra.augLevel) ? extra.augLevel : "med"];
     if (methodId.startsWith("selftest-")) h200Args = ["selftest", methodId.replace("selftest-", "")];
+    else if (methodId.startsWith("arch-")) h200Args = ["arch", methodId.split("-")[1], methodId.split("-")[2] || "med"];
+    else if (KAGGLE_TO_ARCH[methodId]) h200Args = ["arch", KAGGLE_TO_ARCH[methodId], ["none", "low", "med", "max"].includes(extra.augLevel) ? extra.augLevel : "med"];
     else if (methodId.startsWith("nnunet-")) h200Args = ["best", methodId.includes("2d") ? "2d" : "3d", ...(methodId.endsWith("-noaug") ? ["noaug"] : [])];
     else if (methodId.startsWith("unet-holdout")) h200Args = ["holdout", methodId.replace("unet-holdout", "").replace("-", "") || "med"];
     else if (methodId === "unet-noaug") h200Args = ["plain"];

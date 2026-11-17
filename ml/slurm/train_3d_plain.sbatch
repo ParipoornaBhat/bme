@@ -26,7 +26,7 @@ export BME_GPU_FRACTION=0.95
 # 3 h 45 m parts as it takes, continued with --resume. Not set: the older 3.3 h budget shared by
 # all folds, which a run started that way must keep using.
 if [ -n "${BME_EPOCHS:-}" ]; then BUDGET=(--epochs "$BME_EPOCHS"); else BUDGET=(--epochs 400 --hours 3.3); fi
-"$PY" ml/scripts/train_3d.py . --model unet --model-arch unet3d --device cuda --out results3d-h200-plain \
+"$PY" ml/scripts/train_3d.py . --model unet --model-arch "${BME_ARCH:-unet3d}" --device cuda --out "${BME_OUT:-results3d-h200-plain}" \
   --folds 5 "${BUDGET[@]}" --max-runtime-minutes 225 --checkpoint-every-epoch \
   --spacing 1.0,1.0,3.0 --aniso --width 32 --patch 160,160,16 --patches-per-case 24 --batch 4 \
   --resample --sampling-mix lesion=0.33,bone=0.33,random=0.34 \
