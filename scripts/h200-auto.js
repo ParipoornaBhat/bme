@@ -44,8 +44,8 @@ const say = (line) => {
   } catch { /* the log is a convenience */ }
 };
 
-function bridge(args, timeout = 180000) {
-  const r = spawnSync(process.execPath, [BRIDGE, ...args], { cwd: root, encoding: "utf8", windowsHide: true, timeout });
+function bridge(args, timeout = 300000) {
+  const r = spawnSync(process.execPath, [BRIDGE, ...args], { cwd: root, encoding: "utf8", windowsHide: true, timeout, maxBuffer: 64 * 1024 * 1024 });
   const lines = (r.stdout || "").trim().split(/\r?\n/);
   for (let i = lines.length - 1; i >= 0; i--) {
     const l = lines[i].trim();
@@ -63,6 +63,7 @@ function check(act) {
     console.log("No tracked H200 runs. Runs started from the Training page are tracked automatically.");
     return;
   }
+  if (act) say(`checking ${list.length} tracked run(s)`);
   const res = bridge(["accounts"]);
   if (!res.json) {
     say(`Could not read the H200 accounts: ${res.error}`);
@@ -214,7 +215,13 @@ else if (cmd === "track") {
     const st = taskState();
     console.log(`Background check: ${st ? `on (${st})` : "off. Turn it on with: pnpm h200:auto on"}\n`);
   }
-  check(cmd === "run");
+  try {
+    check(cmd === "run");
+    if (cmd === "run") say("check done");
+  } catch (e) {
+    say(`check failed: ${e instanceof Error ? e.message : e}`);
+    process.exit(1);
+  }
 } else {
   console.log("Use: pnpm h200:auto [run | on | off | track <roll> <method> | untrack <roll>]");
   process.exit(1);

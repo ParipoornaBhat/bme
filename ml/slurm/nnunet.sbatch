@@ -55,7 +55,15 @@ echo "== convert"
 if [ ! -f "$nnUNet_preprocessed/Dataset501_BMEKnee/${PLANS}.json" ] || \
    [ ! -d "$nnUNet_preprocessed/Dataset501_BMEKnee/${PLANS}_${CONFIG}" ]; then
   echo "== plan and preprocess ($CONFIG)"
-  "$ENV/nnUNetv2_plan_and_preprocess" -d $DS -pl nnUNetPlannerResEncM -c "$CONFIG" -np 3 --verify_dataset_integrity
+  # A stuck preprocessing step (a worker dies and the parent waits forever) once held a job until
+  # Slurm's 4 h limit killed it, with no training done. Give it 60 minutes, then stop with a clear
+  # message so the next part can be submitted.
+  set +e
+  timeout 3600 "$ENV/nnUNetv2_plan_and_preprocess" -d $DS -pl nnUNetPlannerResEncM -c "$CONFIG" -np 3 --verify_dataset_integrity
+  PRE=$?
+  set -e
+  if [ "$PRE" -eq 124 ]; then echo "== preprocessing did not finish in 60 min and was stopped. Submit again."; exit 1; fi
+  [ "$PRE" -eq 0 ] || exit "$PRE"
 fi
 "$ENV/python3" ml/scripts/nnunet_prep.py splits .
 

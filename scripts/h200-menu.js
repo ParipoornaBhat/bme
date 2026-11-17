@@ -41,6 +41,7 @@ const RESULTS = [
   "results3d-h200-plain",
   "results-nnunet-3d_fullres",
   "results-nnunet-2d",
+  ...["mednext", "orthogate", "cnet"].flatMap((k) => ["none", "low", "med", "max"].map((l) => `results3d-${k}-${l}`)),
   "results-nnunet-3d_fullres-noaug",
   "results-nnunet-2d-noaug",
   "results3d-holdout",
@@ -148,6 +149,13 @@ async function internetOk(bytes, what) {
   console.log(`You are outside the college network: this ${what} goes through pc-server-1`);
   console.log(`and uses about ${fmt(bytes)} of your internet data. On college WiFi it would not ask.`);
   if (process.env.BME_NO_PROMPT === "1") {
+    // A code or annotation update of a few KB is not worth stopping a job for (auto-continue
+    // runs with nobody to ask). Anything bigger waits for the Data page.
+    const limit = 5 * 1024 * 1024;
+    if (bytes <= limit) {
+      console.log(`Small update (${fmt(bytes)}, under ${fmt(limit)}): sending it so the job can start.`);
+      return true;
+    }
     console.log("Not started: the data on the H200 is behind. Sync it first on the Data page.");
     return false;
   }
@@ -328,6 +336,10 @@ async function submit(sbatch, what, logPrefix, extra = "", flags = "") {
   } else if (logPrefix.startsWith("selftest_")) {
     outFolder = `results3d-selftest-${logPrefix.slice(9)}`;
     methodId = `selftest-${logPrefix.slice(9)}`;
+  } else if (logPrefix.startsWith("arch_")) {
+    const [, k, l] = logPrefix.split("_");
+    outFolder = `results3d-${k}-${l}`;
+    methodId = `arch-${k}-${l}`;
   } else if (logPrefix.startsWith("holdout_")) {
     outFolder = `results3d-holdout-${logPrefix.slice(8)}`;
     methodId = `unet-holdout-${logPrefix.slice(8)}`;
@@ -387,7 +399,9 @@ async function submit(sbatch, what, logPrefix, extra = "", flags = "") {
         meta.epochs = want >= 10 && want <= 400 ? want : 100;
       }
       if (meta.epochs) {
-        flags = `${flags} --export=ALL,BME_EPOCHS=${meta.epochs}`.trim();
+        flags = /--export=ALL,/.test(flags)
+          ? flags.replace(/--export=ALL,(\S*)/, (_m, v) => `--export=ALL,${v},BME_EPOCHS=${meta.epochs}`)
+          : `${flags} --export=ALL,BME_EPOCHS=${meta.epochs}`.trim();
         console.log(`Epochs per fold: ${meta.epochs}, over as many parts of at most 3 h 45 m as it takes.`);
       } else {
         console.log("This run was started with the older shared 3.3 h budget, so it keeps it.");
@@ -582,6 +596,42 @@ async function holdout(args = []) {
     `holdout${tag}`,
     `${level === "none" ? "" : `${level} `}--holdout ${HOLDOUT} --out ${out}${resume ? " --resume" : ""}`,
     `--job-name=bme_holdout${tag} --output=$HOME/bme/logs/holdout${tag}_%j.out --error=$HOME/bme/logs/holdout${tag}_%j.err`,
+  );
+}
+
+/**
+ * MedNeXt, OrthoGate-MedNeXt or C-Net on the H200, with the 3D U-Net's settings
+ * -> data/results3d-<arch>-<level>. Continues by itself when already started.
+ *   pnpm h200 arch mednext med
+ */
+const ARCH = { mednext: "mednext", orthogate: "orthogate_mednext", cnet: "cnet_dual_unet" };
+async function archRun(args) {
+  const key = ARCH[args[0]] ? args[0] : "";
+  const level = ["none", "low", "med", "max"].includes(args[1]) ? args[1] : "med";
+  if (!key) {
+    console.log("Use: pnpm h200 arch <mednext|orthogate|cnet> <none|low|med|max>");
+    return;
+  }
+  const out = `results3d-${key}-${level}`;
+  const state = await ssh(
+    `cd ${REMOTE}/data 2>/dev/null && { [ -f ${out}/metrics.json ] && echo DONE; ls ${out}/*.pt ${out}/checkpoints ${out}/fold_* >/dev/null 2>&1 && echo STARTED; }; true`,
+  );
+  if (state.code !== 0) fail(session.unreachable, state.code);
+  if (state.out.includes("DONE")) {
+    console.log(`${out} is already finished on this account. Download it with: pnpm runs:get`);
+    return;
+  }
+  const resume = state.out.includes("STARTED");
+  console.log(`${resume ? "Continuing" : "Starting"} ${key}, augmentation ${level} -> data/${out} (one job, under 4 h).`);
+  if (!(await okWithOtherJobs())) return;
+  const name = `bme_${key}_${level}`;
+  const tag = `arch_${key}_${level}`;
+  await submit(
+    level === "none" ? "train_3d_plain.sbatch" : "train_3d_aug.sbatch",
+    name,
+    tag,
+    `${level === "none" ? "" : `${level} `}${resume ? "--resume" : ""}`.trim(),
+    `--export=ALL,BME_ARCH=${ARCH[key]},BME_OUT=${out} --job-name=${name} --output=$HOME/bme/logs/${tag}_%j.out --error=$HOME/bme/logs/${tag}_%j.err`,
   );
 }
 
@@ -856,6 +906,7 @@ const OPS = [
   { key: "best", label: "Best model: nnU-Net (start or continue)", about: "nnU-Net ResEnc M, bone + edema, 2D or 3D part. Shows progress and the time left, then submits one 4 h job.", fn: best },
   { key: "selftest", label: "Self-test (2 minutes): aug or plain", about: "A tiny run that checks start, stop with a checkpoint, and continue.", fn: selftest },
   { key: "holdout", label: "Holdout: one round on the fixed 80/20 split", about: "3D U-Net trained once on 80% and checked on the fixed 20%. Add none, low, med or max for the augmentation (default med).", fn: holdout },
+  { key: "arch", label: "Other architectures: MedNeXt / OrthoGate / C-Net", about: "Same trainer and settings as the 3D U-Net. Add the name and the augmentation: pnpm h200 arch mednext med.", fn: archRun },
   { key: "plain", label: "3D U-Net, no augmentation (start or continue)", about: "The control run -> data/results3d-h200-plain. Continues if already started.", fn: plain },
   { key: "aug", label: "Augmentation levels: low / med / max", about: "Same 3D U-Net at one augmentation level -> data/results3d-aug-<level>. Continues if already started.", fn: aug },
   { key: "train3d", label: "Train 3D (long, ~3.5 h)", about: `Push, then sbatch ml/slurm/train_3d.sbatch -> ${R3D}. Live rotation/zoom, 1 mm grid.`, fn: () => submit("train_3d.sbatch", "bme_unet3d", "unet3d") },
