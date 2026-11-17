@@ -53,16 +53,28 @@ const g = globalThis as unknown as { __bmeSuggest?: Store };
 const store: Store = (g.__bmeSuggest ??= { jobs: new Map(), order: [], child: null, retry: null });
 
 function root() {
+  let curr = process.cwd();
+  while (curr !== path.dirname(curr)) {
+    if (fs.existsSync(path.join(curr, "data", "worklist.csv")) || fs.existsSync(path.join(curr, "ml", ".venv"))) {
+      return curr;
+    }
+    curr = path.dirname(curr);
+  }
   return path.resolve(process.cwd(), "..", "..");
 }
 
 function python() {
   const r = root();
-  const local =
-    process.platform === "win32"
-      ? path.join(r, "ml", ".venv", "Scripts", "python.exe")
-      : path.join(r, "ml", ".venv", "bin", "python");
-  return fs.existsSync(local) ? local : process.platform === "win32" ? "python" : "python3";
+  const candidates = [
+    path.join(r, "ml", ".venv", "Scripts", "python.exe"),
+    path.join(r, "ml", ".venv", "bin", "python"),
+    path.join(process.cwd(), "ml", ".venv", "Scripts", "python.exe"),
+    path.join(process.cwd(), "..", "..", "ml", ".venv", "Scripts", "python.exe"),
+  ];
+  for (const cand of candidates) {
+    if (fs.existsSync(cand)) return cand;
+  }
+  return process.platform === "win32" ? "python" : "python3";
 }
 
 const BASE = () => path.join(root(), "data", "suggest");
