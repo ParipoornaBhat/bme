@@ -3,6 +3,7 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { Readable } from "node:stream";
 import { fileURLToPath } from "node:url";
 import { ask, chooseH200 } from "./h200-login.js";
 import { findAccount, listAccounts, operator, python } from "./lib/accounts.js";
@@ -75,6 +76,60 @@ function ssh(command, opts = {}) {
     [...tty, ...session.sshOpts, "-o", "ConnectTimeout=30", "-o", "StrictHostKeyChecking=accept-new", session.target, command],
     { capture: !opts.stdin && !opts.interactive, ...opts },
   );
+}
+
+/** Write text to a file on the server through ssh's input (no command-line length limit). */
+function sshWrite(remoteFile, text) {
+  const dir = remoteFile.slice(0, remoteFile.lastIndexOf("/"));
+  return run(
+    session.sshBin || "ssh",
+    [...session.sshOpts, "-o", "ConnectTimeout=30", session.target, `mkdir -p ${dir} && cat > ${remoteFile}`],
+    { stdin: { stdout: Readable.from([text]) } },
+  );
+}
+
+/**
+ * The dataset this run trains on, fixed when it starts. A new run snapshots the
+ * cases whose annotation is complete; a run that continues keeps the snapshot
+ * already on the server, so every part and fold sees the same cases. A run
+ * started before snapshots existed is recorded with every annotated case,
+ * which is what it was started on.
+ */
+async function datasetSnapshot(outFolder, { resuming, keepAll }) {
+  const rel = `data/${outFolder}/dataset_manifest.json`;
+  const local = path.join(root, rel);
+  const onServer = await ssh(`cat ${REMOTE}/${rel} 2>/dev/null; true`);
+  let text = onServer.out.trim();
+  if (text.startsWith("{")) {
+    fs.mkdirSync(path.dirname(local), { recursive: true });
+    fs.writeFileSync(local, text + "\n", "utf8");
+    const m = JSON.parse(text);
+    console.log(`Dataset snapshot kept from ${m.created}: ${m.counts.used} of ${m.counts.annotated} annotated cases (${m.rule}).`);
+    return rel;
+  }
+  const all = keepAll || resuming;
+  console.log(all
+    ? "Recording the dataset this run uses: every annotated case."
+    : "Taking the dataset snapshot: only cases with complete annotations are used.");
+  const r = spawnSync(
+    python,
+    [path.join(root, "ml", "scripts", "dataset_manifest.py"), root, "--out", rel, ...(all ? ["--all"] : [])],
+    { cwd: root, encoding: "utf8", windowsHide: true, maxBuffer: 16 * 1024 * 1024 },
+  );
+  const out = r.stdout || "";
+  const left = out.split(/\r?\n/).filter((l) => l.includes("left out:"));
+  if (left.length) {
+    console.log(`Left out (${left.length}):`);
+    left.slice(0, 40).forEach((l) => console.log(l));
+    if (left.length > 40) console.log(`  ... and ${left.length - 40} more (see ${rel})`);
+  }
+  const line = out.split(/\r?\n/).find((l) => l.startsWith("SNAPSHOT "));
+  if (r.status !== 0 || !line) fail(`Could not take the dataset snapshot: ${(r.stderr || out).trim().split(/\r?\n/).pop()}`);
+  console.log(line.replace("SNAPSHOT ", "Snapshot: "));
+  text = fs.readFileSync(local, "utf8");
+  const w = await sshWrite(`${REMOTE}/${rel}`, text);
+  if (w.code !== 0) fail("Could not copy the dataset snapshot to the H200. Nothing was started.", w.code);
+  return rel;
 }
 
 function fmt(bytes) {
@@ -333,6 +388,14 @@ async function submit(sbatch, what, logPrefix, extra = "", flags = "") {
     } catch {
       /* ignore */
     }
+  }
+
+  if (outFolder && /^train_3d/.test(sbatch)) {
+    const rel = await datasetSnapshot(outFolder, { resuming: /--resume/.test(extra), keepAll: false });
+    extra = `${extra} --case-list ${rel}`;
+  } else if (outFolder && sbatch === "nnunet.sbatch") {
+    // nnU-Net trains on its own converted dataset (every annotated case); record which.
+    await datasetSnapshot(outFolder, { resuming: true, keepAll: true });
   }
 
   const r = await ssh(`cd ${REMOTE} && sbatch ${flags} ml/slurm/${sbatch} ${extra}`);

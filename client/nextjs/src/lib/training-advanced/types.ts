@@ -59,6 +59,8 @@ export interface CurrentJob {
   startedAt?: string | null;
   partStartedAt?: string | null;
   partCount?: number;
+  /** The dataset snapshot this run trains on, fixed when it started. */
+  dataset?: string;
   partLog?: Array<{
     part: number;
     startedAt: string;

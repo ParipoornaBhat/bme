@@ -207,6 +207,12 @@ export function ComputeAccountsGrid({
                           : fmtDuration(job.elapsedSeconds)}
                       </span>
                     </div>
+                    {job.dataset && (
+                      <div className="col-span-2">
+                        <span className="text-[10px] uppercase font-semibold text-muted-foreground block">Dataset (fixed at start)</span>
+                        <span className="font-medium text-foreground">{job.dataset}</span>
+                      </div>
+                    )}
                   </div>
 
                   {/* Intermediate Results & Checkpoints */}

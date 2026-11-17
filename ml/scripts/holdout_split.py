@@ -30,8 +30,9 @@ FOLDS = 5
 
 
 def annotated_cases(base: Path) -> list[dict]:
-    """Cases with a saved .seg.nrrd and its scan on this PC, as the trainer would load them."""
-    _, patients = load_worklist_metadata(base)
+    """Cases with a complete annotation and its scan on this PC (the dataset_manifest.py rule:
+    bone_marrow drawn, and edema drawn on BME-class scans). Incomplete ones never enter the split."""
+    classes, patients = load_worklist_metadata(base)
     ann = base / "data" / "annotations"
     if not ann.is_dir():
         raise SystemExit("data/annotations is not on this PC, so there is nothing to split.")
@@ -45,6 +46,10 @@ def annotated_cases(base: Path) -> list[dict]:
             lab, _, _ = build_labelmap(data, segments)
         except Exception as e:
             print(f"  {d.name}  skipped ({type(e).__name__})")
+            continue
+        cls = classes.get(d.name) or ("bme" if d.name.startswith("BME-") else "non_bme")
+        if int((lab == 1).sum()) == 0 or (cls == "bme" and int((lab == 2).sum()) == 0):
+            print(f"  {d.name}  skipped (annotation not complete yet)")
             continue
         cases.append({
             "id": d.name,

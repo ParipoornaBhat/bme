@@ -324,6 +324,14 @@ async function handleAccounts() {
               let metaAccount = acc.h200?.user || `nnm23cs${acc.roll}_stu_cse`;
               let metaHost = "";
               const statusFile = path.join(root, "data", run ? run.folder : `results3d-${methodId}`, "run_status.json");
+              let datasetNote = "";
+              try {
+                const dm = JSON.parse(fs.readFileSync(path.join(path.dirname(statusFile), "dataset_manifest.json"), "utf8"));
+                const when = new Date(dm.created).toLocaleString("en-IN", { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" });
+                datasetNote = `${dm.counts.used} of ${dm.counts.annotated} annotated cases (${dm.counts.used_bme} BME, ${dm.counts.used_non_bme} non-BME), snapshot ${when}` +
+                  (dm.counts.left_out ? `; ${dm.counts.left_out} left out as incomplete` : "") +
+                  (dm.rule && dm.rule.startsWith("every") ? "; started before snapshots, so every annotated case" : "");
+              } catch { /* run started before snapshots */ }
               const partsDone = run ? partsByLog[run.log] || 0 : 0;
               if (fs.existsSync(statusFile)) {
                 try {
@@ -458,6 +466,7 @@ async function handleAccounts() {
                   methodLabel: methodLabel || methodId,
                   partStartedAt,
                   partCount,
+                  dataset: datasetNote || undefined,
                   partLog,
                   intermediateResults,
                   iteration: resumePending

@@ -2234,6 +2234,9 @@ def main():
     ap.add_argument("--hours", type=float, default=0.0,
                     help="training time budget across all folds; epochs are fitted to it (0 = off)")
     ap.add_argument("--max-cases", type=int, default=0, help="smoke tests only")
+    ap.add_argument("--case-list", default=None, metavar="MANIFEST_JSON",
+                    help="train only the cases marked used in this dataset snapshot "
+                         "(ml/scripts/dataset_manifest.py); folds and resumes keep that set")
     ap.add_argument("--out-dir", type=str, default=None,
                     help="full output folder. Data experiments must point outside data/")
     ap.add_argument("--resume", action="store_true", help="Resume from latest checkpoints")
@@ -2462,6 +2465,33 @@ def main():
 
     if not case_ids:
         raise SystemExit(f"No 3D annotations found under {base}. Paint and save a case on the Annotate page first.")
+
+    if args.case_list:
+        # The dataset as it was when this run started: every part and fold uses exactly these cases.
+        manifest_path = Path(args.case_list)
+        if not manifest_path.is_absolute():
+            manifest_path = base / manifest_path
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        wanted = [c for c in manifest["cases"] if c.get("used")]
+        have = set(case_ids)
+        missing = [c["id"] for c in wanted if c["id"] not in have]
+        if missing:
+            raise SystemExit(f"The dataset snapshot {manifest_path.name} lists {len(missing)} case(s) not found here: "
+                             f"{', '.join(missing[:10])}. Sync the data first.")
+        case_ids = sorted(c["id"] for c in wanted)
+        changed = []
+        for c in wanted:
+            seg = ann / c["id"] / f"{c['id']}.seg.nrrd" if ann else None
+            if seg is not None and seg.exists() and c.get("seg_sha256"):
+                import hashlib
+                if hashlib.sha256(seg.read_bytes()).hexdigest() != c["seg_sha256"]:
+                    changed.append(c["id"])
+        cnt = manifest.get("counts", {})
+        print(f"Dataset snapshot from {manifest.get('created', '?')}: {len(case_ids)} of {cnt.get('annotated', '?')} "
+              f"annotated cases used, {cnt.get('left_out', 0)} left out. Rule: {manifest.get('rule', '?')}.", flush=True)
+        if changed:
+            print(f"WARNING: {len(changed)} annotation(s) changed since the snapshot and are read as they are now: "
+                  f"{', '.join(changed[:15])}", flush=True)
 
     if args.max_cases:
         case_ids = case_ids[: args.max_cases]
