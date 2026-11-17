@@ -441,7 +441,7 @@ def main():
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
         names = " ".join(slug for slug, _ in ready["pairs"])
-        source = ready["patient"] or item["zip_name"]
+        source = item["zip_name"] if expected else (ready["patient"] or item["zip_name"])
         append_rows(worklist, fields, [row])
         append_rows(base / "data" / "deid_map.csv", DEID_FIELDS, [{
             **{k: "" for k in DEID_FIELDS},
