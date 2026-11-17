@@ -139,7 +139,7 @@ export function StartTrainingForm({
     : model.key.startsWith("nnunet")
     ? "100 per fold (fixed by nnU-Net ResEnc M)"
     : model.where === "h200"
-    ? "Up to 400 per fold, limited by time: each part trains about 3.3 h, then saves and stops"
+    ? `${epochs} per fold, over as many parts of at most 3 h 45 m as it takes`
     : "Fixed by the Kaggle settings for this architecture";
   const needsNnunet = mid.startsWith("nnunet");
   const envMissing =
@@ -310,9 +310,26 @@ export function StartTrainingForm({
           <label className="text-xs font-bold uppercase tracking-wider text-muted-foreground block mb-1.5">
             Epochs
           </label>
-          <div className="w-full rounded-xl border border-border bg-muted/30 px-3 py-2 text-xs font-semibold text-muted-foreground">
-            {epochsText}
-          </div>
+          {model.key === "unet3d" ? (
+            <div className="space-y-1">
+              <input
+                type="number"
+                min={10}
+                max={400}
+                step={10}
+                value={epochs}
+                onChange={(e) => onEpochsChange(Math.max(10, Math.min(400, Math.round(Number(e.target.value) || 100))))}
+                className="w-full rounded-xl border border-border bg-background px-3 py-2 text-xs font-semibold"
+              />
+              <p className="text-[10px] text-muted-foreground">
+                Epochs per fold, 10 to 400. One epoch is about 2.3 min on the H200 slice, so 100 epochs x 5 folds is about 19 h, or 5 parts. A run keeps its count for every part. nnU-Net uses 100 per fold.
+              </p>
+            </div>
+          ) : (
+            <div className="w-full rounded-xl border border-border bg-muted/30 px-3 py-2 text-xs font-semibold text-muted-foreground">
+              {epochsText}
+            </div>
+          )}
         </div>
 
         {/* What this method runs (fixed by the method, not editable) */}

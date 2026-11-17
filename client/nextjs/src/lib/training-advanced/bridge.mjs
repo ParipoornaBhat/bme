@@ -1188,8 +1188,15 @@ async function handleStart(platform, targetId, methodId, extraJson = "{}") {
     else if (methodId === "unet-noaug") h200Args = ["plain"];
     else if (methodId.startsWith("unet-aug-")) h200Args = ["aug", methodId.replace("unet-aug-", "")];
     h200Args.push("--as", roll);
+    const epochsAsked = Math.round(Number(extra.epochs) || 0);
     const r = await runStreaming(process.execPath, [path.join(root, "scripts", "h200-menu.js"), ...h200Args], {
-      env: { ...process.env, BME_NO_PROMPT: "1" },
+      env: {
+        ...process.env,
+        BME_NO_PROMPT: "1",
+        ...(h200Args[0] !== "best" && !methodId.startsWith("selftest-") && epochsAsked >= 10 && epochsAsked <= 400
+          ? { BME_EPOCHS: String(epochsAsked) }
+          : {}),
+      },
     });
     if (r.status !== 0 || !/Submitted batch job/.test(r.stdout)) {
       const tail = (r.stderr || r.stdout || "").trim().split(/\r?\n/).slice(-3).join(" | ");

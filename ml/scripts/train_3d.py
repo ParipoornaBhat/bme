@@ -3047,7 +3047,8 @@ def main():
                     f"fitting {fold_epochs} epochs into {fold_budget / 60:.0f} min.",
                     flush=True,
                 )
-            if args.hours > 0:
+            # The dashboard cards read this line, so it prints with or without a time budget.
+            if fold_epochs > 0:
                 run_steps = len(folds_to_run) * fold_epochs
                 done = fold_pos * fold_epochs + epoch
                 bar_w = 24

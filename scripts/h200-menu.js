@@ -375,6 +375,24 @@ async function submit(sbatch, what, logPrefix, extra = "", flags = "") {
       const remotePrev = JSON.parse(pr.out.trim() || "{}");
       if (remotePrev.startedAt && (!prev.startedAt || new Date(remotePrev.startedAt) < new Date(prev.startedAt))) prev = remotePrev;
     } catch { /* none on the server yet */ }
+    // Epochs per fold: chosen once when the run starts and kept for every part, because a resume
+    // with a different count is refused by the trainer. A run started under the older shared
+    // 3.3 h budget (no count on record) keeps that budget.
+    if (/^train_3d/.test(sbatch) && !/--epochs/.test(extra)) {
+      const want = Math.round(Number(process.env.BME_EPOCHS) || 0);
+      if (prev.epochs) {
+        meta.epochs = prev.epochs;
+        if (want && want !== prev.epochs) console.log(`This run continues with its original ${prev.epochs} epochs per fold (${want} was asked for).`);
+      } else if (!prev.startedAt) {
+        meta.epochs = want >= 10 && want <= 400 ? want : 100;
+      }
+      if (meta.epochs) {
+        flags = `${flags} --export=ALL,BME_EPOCHS=${meta.epochs}`.trim();
+        console.log(`Epochs per fold: ${meta.epochs}, over as many parts of at most 3 h 45 m as it takes.`);
+      } else {
+        console.log("This run was started with the older shared 3.3 h budget, so it keeps it.");
+      }
+    }
     const now = meta.startedAt;
     meta.startedAt = prev.startedAt || now;
     meta.partStartedAt = now;

@@ -172,7 +172,7 @@ export default function AdvancedTrainingPage() {
   const [selectedDatasetOwner, setSelectedDatasetOwner] = useState<string>("");
   const [augLevel, setAugLevel] = useState<"none" | "low" | "med" | "max">("med");
   const [splitMode, setSplitMode] = useState<"5folds" | "holdout">("5folds");
-  const [epochs, setEpochs] = useState<number>(50);
+  const [epochs, setEpochs] = useState<number>(100);
 
   // Loading states
   const [startBusy, setStartBusy] = useState(false);
