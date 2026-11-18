@@ -58,7 +58,9 @@ DICOMDIR
 models/
 checkpoints/
 weights/
-runs/
+/runs/
+ml/runs/
+!client/nextjs/**/runs/
 logs/
 lightning_logs/
 wandb/

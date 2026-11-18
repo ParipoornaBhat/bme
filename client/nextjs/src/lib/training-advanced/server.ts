@@ -9,6 +9,7 @@ import type {
   TargetDatasetStatus,
   BackgroundTask,
   PlatformType,
+  H200Run,
 } from "./types";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -121,8 +122,16 @@ export async function fetchAccounts(): Promise<{ cards: AccountCard[]; route: an
   return runBridgeCommand(["accounts"], 60000);
 }
 
-export async function fetchJobLog(targetId: string, lines: number): Promise<{ file?: string; lines: string[]; err?: string[] }> {
-  return runBridgeCommand(["log", targetId, String(lines)], 40000);
+export async function fetchJobLog(
+  targetId: string,
+  lines: number,
+  jobId?: string
+): Promise<{ targetId?: string; platform?: PlatformType; file?: string; lines: string[]; err?: string[] }> {
+  return runBridgeCommand(["log", targetId, String(lines), jobId || ""], 40000);
+}
+
+export async function fetchRunsH200(): Promise<{ runs: H200Run[]; errors?: Array<{ roll: string; error: string }> }> {
+  return runBridgeCommand(["runs-h200"], 65000);
 }
 
 export async function fetchRuns(): Promise<RunItem[]> {

@@ -185,3 +185,77 @@ export interface BackgroundTask {
   error?: string | null;
   log?: string[];
 }
+
+export interface MetricSummary {
+  mean: number;
+  std?: number;
+}
+
+export interface H200RunPart {
+  part: number;
+  jobId: string;
+  slurmJobId?: string;
+  state: string;
+  start: string | null;
+  end: string | null;
+  elapsed: string | null;
+  exit: string | null;
+  logFile?: string;
+  foldEpoch?: string;
+}
+
+export interface H200RunDataset {
+  used?: number | null;
+  annotated?: number | null;
+  left_out?: number | null;
+  counts?: {
+    used?: number | null;
+    annotated?: number | null;
+    left_out?: number | null;
+  };
+}
+
+export interface H200RunResult {
+  summary?: Record<string, MetricSummary> | null;
+  bmeDice?: MetricSummary | null;
+  boneDice?: MetricSummary | null;
+  fpPerCase?: MetricSummary | null;
+  nCases?: number | null;
+  folds?: number | null;
+  epochs?: number | null;
+  foldMode?: string | null;
+  trainedAt?: string | null;
+  hoursTaken?: number | null;
+  [key: string]: any;
+}
+
+export interface H200Run {
+  id: string;
+  roll: string;
+  accountLabel: string;
+  methodId: string;
+  label: string;
+  startedAt: string | null;
+  startedBy: StartedBy | { name?: string; usn?: string } | null;
+  epochsPerFold?: number | null;
+  dataset?: H200RunDataset | null;
+  status: "running" | "queued" | "finished" | "part ended";
+  result?: H200RunResult | null;
+  partial?: any;
+  parts: H200RunPart[];
+  folder?: string;
+  hasLocalMetrics?: boolean;
+}
+
+export interface H200RunsResponse {
+  runs: H200Run[];
+  errors?: Array<{ roll: string; error: string }>;
+}
+
+export interface JobLogResponse {
+  targetId?: string;
+  platform?: PlatformType;
+  file?: string;
+  lines: string[];
+  err?: string[];
+}

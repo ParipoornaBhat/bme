@@ -52,6 +52,10 @@ export function TerminalBox({
   live,
   onOpen,
   heightClass = "h-44",
+  autoScroll = true,
+  clickToOpen = true,
+  onScroll,
+  containerRef,
 }: {
   title: string;
   prompt?: string;
@@ -59,11 +63,18 @@ export function TerminalBox({
   live?: boolean;
   onOpen?: () => void;
   heightClass?: string;
+  autoScroll?: boolean;
+  clickToOpen?: boolean;
+  onScroll?: (e: React.UIEvent<HTMLDivElement>) => void;
+  containerRef?: React.RefObject<HTMLDivElement | null>;
 }) {
-  const ref = useRef<HTMLDivElement>(null);
+  const localRef = useRef<HTMLDivElement>(null);
+  const ref = containerRef || localRef;
   useEffect(() => {
-    if (ref.current) ref.current.scrollTop = ref.current.scrollHeight;
-  }, [lines.length, lines[lines.length - 1]]); // eslint-disable-line react-hooks/exhaustive-deps
+    if (autoScroll && ref.current) {
+      ref.current.scrollTop = ref.current.scrollHeight;
+    }
+  }, [lines.length, lines[lines.length - 1], autoScroll]); // eslint-disable-line react-hooks/exhaustive-deps
   return (
     <div className="overflow-hidden rounded-lg border border-zinc-800 bg-black shadow-inner">
       <Bar
@@ -78,8 +89,9 @@ export function TerminalBox({
       />
       <div
         ref={ref}
-        onClick={onOpen}
-        className={`${heightClass} overflow-auto px-3 py-2 font-mono text-[10.5px] leading-[1.45] ${onOpen ? "cursor-pointer" : ""}`}
+        onScroll={onScroll}
+        onClick={clickToOpen ? onOpen : undefined}
+        className={`${heightClass} overflow-auto px-3 py-2 font-mono text-[10.5px] leading-[1.45] ${clickToOpen && onOpen ? "cursor-pointer" : ""}`}
       >
         <Lines prompt={prompt} lines={lines} live={live} />
       </div>
@@ -93,6 +105,7 @@ export interface LogTarget {
   /** Fetch from the server (H200, Kaggle, this PC). */
   platform?: string;
   targetId?: string;
+  jobId?: string;
   /** Or show these lines as they are (a launch that is already in memory). */
   lines?: string[];
   live?: boolean;
@@ -112,8 +125,9 @@ export function LogModal({ target, onClose }: { target: LogTarget | null; onClos
     let stop = false;
     const load = async () => {
       try {
+        const jobParam = target.jobId ? `&jobId=${encodeURIComponent(target.jobId)}` : "";
         const res = await fetch(
-          `/api/training-advanced/log?platform=${target.platform}&targetId=${encodeURIComponent(target.targetId || "")}&lines=600`,
+          `/api/training-advanced/log?platform=${target.platform || "h200"}&targetId=${encodeURIComponent(target.targetId || "")}${jobParam}&lines=600`,
           { cache: "no-store" },
         );
         const json = await res.json();

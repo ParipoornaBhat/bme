@@ -104,8 +104,14 @@ async function datasetSnapshot(outFolder, { resuming, keepAll }) {
   if (text.startsWith("{")) {
     fs.mkdirSync(path.dirname(local), { recursive: true });
     fs.writeFileSync(local, text + "\n", "utf8");
-    const m = JSON.parse(text);
-    console.log(`Dataset snapshot kept from ${m.created}: ${m.counts.used} of ${m.counts.annotated} annotated cases (${m.rule}).`);
+    try {
+      const m = JSON.parse(text);
+      const used = m?.counts?.used ?? m?.used ?? "?";
+      const ann = m?.counts?.annotated ?? m?.annotated ?? "?";
+      console.log(`Dataset snapshot kept from ${m?.created || "previous run"}: ${used} of ${ann} annotated cases (${m?.rule || "default"}).`);
+    } catch {
+      console.log(`Dataset snapshot kept from server (${rel}).`);
+    }
     return rel;
   }
   const all = keepAll || resuming;

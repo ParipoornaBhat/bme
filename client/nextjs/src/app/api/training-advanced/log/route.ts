@@ -16,12 +16,13 @@ export async function GET(req: NextRequest) {
   const targetId = searchParams.get("targetId") || "";
   const folder = searchParams.get("folder") || "";
   const linesCount = parseInt(searchParams.get("lines") || "50", 10);
+  const jobId = searchParams.get("jobId") || "";
 
   try {
     let lines: string[] = [];
 
     if (platform === "h200") {
-      return NextResponse.json(await fetchJobLog(targetId, linesCount));
+      return NextResponse.json(await fetchJobLog(targetId, linesCount, jobId));
     }
     if (platform === "local") {
       const dataDir = path.join(root, "data");

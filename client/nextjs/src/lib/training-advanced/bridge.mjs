@@ -306,6 +306,7 @@ async function handleAccounts() {
               let methodId = "";
               let methodLabel = "";
               let slurmJobId = "";
+              let jname = "";
               let startedAt = null;
               let partStartedAt = null;
               let partCount = 0;
@@ -314,8 +315,9 @@ async function handleAccounts() {
               let elapsedSeconds = null;
 
               if (activeJobLine) {
-                const [jid, jname, jstate, jelapsed, , jreason = ""] = activeJobLine.split("|");
+                const [jid, jobName, jstate, jelapsed, , jreason = ""] = activeJobLine.split("|");
                 slurmJobId = jid;
+                jname = jobName;
                 jobStatus = jstate === "RUNNING" || jstate === "COMPLETING" ? "running" : "queued";
                 queueReason = jreason;
                 const sameJob = H200_RUNS.filter((r) => r.job === jname);
@@ -328,6 +330,7 @@ async function handleAccounts() {
               } else {
                 run = H200_RUNS.find((r) => folderState[r.folder] === "stopped") || null;
                 if (run) {
+                  jname = run.job;
                   jobStatus = "stopped";
                   resumePending = true;
                   methodId = run.methodId;
@@ -1322,18 +1325,390 @@ async function handleCancel(platform, targetId, jobId) {
   throw new Error(`Unsupported platform: ${platform}`);
 }
 
+// ---------- H200 RUNS (DETAIL & HISTORY) -------------------------------------
+function parseElapsedSec(str) {
+  if (!str) return 0;
+  let days = 0;
+  let timeStr = String(str).trim();
+  if (timeStr.includes("-")) {
+    const parts = timeStr.split("-");
+    days = Number(parts[0]) || 0;
+    timeStr = parts[1] || "";
+  }
+  const parts = timeStr.split(":").map(Number);
+  if (parts.length === 3) {
+    return days * 86400 + (parts[0] || 0) * 3600 + (parts[1] || 0) * 60 + (parts[2] || 0);
+  }
+  if (parts.length === 2) {
+    return days * 86400 + (parts[0] || 0) * 60 + (parts[1] || 0);
+  }
+  return days * 86400;
+}
+
+async function handleRunsH200() {
+  const env = mergedEnv();
+  const all = listAccounts(env);
+  const h200Accounts = all.filter((acc) => acc.h200 && (!acc.slot || acc.slot <= 1));
+  const runs = [];
+  const errors = [];
+
+  const folderList = [...new Set(H200_RUNS.map((r) => r.folder))].join(" ");
+  const nnunetConfigs = [
+    { folder: "results-nnunet-3d_fullres", dir: "Dataset501_BMEKnee/nnUNetTrainer_BME100__nnUNetResEncUNetMPlans__3d_fullres" },
+    { folder: "results-nnunet-2d", dir: "Dataset501_BMEKnee/nnUNetTrainer_BME100__nnUNetResEncUNetMPlans__2d" },
+    { folder: "results-nnunet-3d_fullres-noaug", dir: "Dataset501_BMEKnee/nnUNetTrainer_BME100NoDA__nnUNetResEncUNetMPlans__3d_fullres" },
+    { folder: "results-nnunet-2d-noaug", dir: "Dataset501_BMEKnee/nnUNetTrainer_BME100NoDA__nnUNetResEncUNetMPlans__2d" },
+  ];
+  const nnunetCmd = nnunetConfigs
+    .map(
+      (c) =>
+        `b="$HOME/bme/data/nnunet/results/${c.dir}"; if [ -d "$b" ]; then echo ""; echo "@@NNUNET ${c.folder}"; ` +
+        `for f in 0 1 2 3 4; do ep=$(cat $b/fold_$f/training_log_*.txt 2>/dev/null | grep -c 'Epoch time'); ` +
+        `fin=$([ -f $b/fold_$f/checkpoint_final.pth ] && echo yes || echo no); ` +
+        `echo "FOLD $f $ep final $fin"; done; fi;`
+    )
+    .join(" ");
+
+  const sshQueryCmd =
+    `echo "===SACCT==="; ` +
+    `sacct -u $USER -X -n -P -S 2026-11-01 --format=JobID,JobName,State,Start,End,Elapsed,ExitCode 2>/dev/null; ` +
+    `echo "===RUNS==="; ` +
+    `for d in ${folderList}; do ` +
+    `p="$HOME/bme/data/$d"; if [ -d "$p" ]; then ` +
+    `[ -f "$p/run_status.json" ] && { echo ""; echo "@@STATUS $d"; cat "$p/run_status.json"; echo ""; }; ` +
+    `[ -f "$p/metrics.json" ] && { echo ""; echo "@@METRICS $d"; cat "$p/metrics.json"; echo ""; }; ` +
+    `[ -f "$p/metrics_partial.json" ] && { echo ""; echo "@@PARTIAL $d"; cat "$p/metrics_partial.json"; echo ""; }; ` +
+    `[ -f "$p/dataset_manifest.json" ] && { echo ""; echo "@@MANIFEST $d"; cat "$p/dataset_manifest.json"; echo ""; }; ` +
+    `fi; done; ` +
+    `${nnunetCmd} true`;
+
+  await Promise.all(
+    h200Accounts.map(async (acc) => {
+      let session = null;
+      try {
+        session = await chooseH200(root, acc.roll);
+      } catch (err) {
+        errors.push({ roll: acc.roll, error: err.message || "unreachable" });
+        return;
+      }
+
+      try {
+        const testRes = await runSshCommand(session, "echo OK", 7000);
+        if (testRes.code !== 0 || !testRes.out.includes("OK")) {
+          errors.push({ roll: acc.roll, error: "unreachable" });
+          return;
+        }
+
+        const queryRes = await runSshCommand(session, sshQueryCmd, 60000);
+        if (queryRes.code !== 0) {
+          errors.push({ roll: acc.roll, error: queryRes.err || "SSH query failed" });
+          return;
+        }
+
+        const [sacctPart = "", runsPart = ""] = queryRes.out.split("===RUNS===");
+        const sacctClean = sacctPart.replace("===SACCT===", "").trim();
+        const sacctLines = sacctClean.split(/\r?\n/).filter(Boolean);
+        const sacctJobs = [];
+        for (const line of sacctLines) {
+          const [jobId, jobName, state, start, end, elapsed, exitCode] = line.split("|");
+          if (jobId) {
+            sacctJobs.push({
+              jobId: jobId.trim(),
+              jobName: (jobName || "").trim(),
+              state: (state || "").trim(),
+              start: start && start !== "Unknown" ? start.trim() : null,
+              end: end && end !== "Unknown" ? end.trim() : null,
+              elapsed: elapsed && elapsed !== "Unknown" ? elapsed.trim() : null,
+              exit: exitCode ? exitCode.trim() : null,
+            });
+          }
+        }
+
+        const chunks = runsPart.split(/(?=^@@)/m);
+        const folderData = new Map();
+        for (const chunk of chunks) {
+          const trimmed = chunk.trim();
+          if (!trimmed.startsWith("@@")) continue;
+          const firstLineEnd = trimmed.indexOf("\n");
+          const header = (firstLineEnd === -1 ? trimmed : trimmed.slice(0, firstLineEnd)).trim();
+          const body = firstLineEnd === -1 ? "" : trimmed.slice(firstLineEnd + 1).trim();
+
+          const [tag, folder] = header.split(/\s+/);
+          if (!tag || !folder) continue;
+
+          if (!folderData.has(folder)) {
+            folderData.set(folder, { status: null, metrics: null, partial: null, manifest: null, nnunet: [] });
+          }
+          const fd = folderData.get(folder);
+
+          if (tag === "@@STATUS") {
+            try { fd.status = JSON.parse(body); } catch {}
+          } else if (tag === "@@METRICS") {
+            try { fd.metrics = JSON.parse(body); } catch {}
+          } else if (tag === "@@PARTIAL") {
+            try { fd.partial = JSON.parse(body); } catch {}
+          } else if (tag === "@@MANIFEST") {
+            try { fd.manifest = JSON.parse(body); } catch {}
+          } else if (tag === "@@NNUNET") {
+            const lines = body.split(/\r?\n/).filter(Boolean);
+            for (const l of lines) {
+              const m = l.match(/FOLD\s+(\d+)\s+(\d+)\s+final\s+(\w+)/i);
+              if (m) {
+                fd.nnunet.push({
+                  fold: Number(m[1]),
+                  epochs: Number(m[2]),
+                  final: m[3].toLowerCase() === "yes",
+                });
+              }
+            }
+          }
+        }
+
+        const accountLabel = acc.name ? `H200 - ${acc.roll} (${acc.name})` : `H200 - ${acc.roll}`;
+
+        for (const [folder, data] of folderData.entries()) {
+          const runConfig = H200_RUNS.find((r) => r.folder === folder) || {
+            folder,
+            methodId: folder,
+            job: folder,
+            log: folder,
+            label: folder,
+          };
+
+          const hasStatus = Boolean(data.status);
+          const hasMetrics = Boolean(data.metrics);
+          const hasNnunetFolds = data.nnunet.some((f) => f.epochs > 0 || f.final);
+          const hasMatchingSacct = sacctJobs.some((j) => j.jobName === runConfig.job);
+
+          if (!hasStatus && !hasMetrics && !hasNnunetFolds && !hasMatchingSacct) {
+            continue;
+          }
+
+          // Find matching sacct jobs for this run (from 2026-11-01 onwards)
+          const matchingSacct = sacctJobs.filter((j) => j.jobName === runConfig.job);
+
+          // Build parts map keyed by jobId
+          const partMap = new Map();
+
+          // 1. Add all matching sacct jobs
+          for (const sJob of matchingSacct) {
+            partMap.set(sJob.jobId, {
+              part: 0,
+              jobId: sJob.jobId,
+              state: sJob.state,
+              start: sJob.start,
+              end: sJob.end,
+              elapsed: sJob.elapsed,
+              exit: sJob.exit,
+              logFile: runConfig.log ? `${runConfig.log}_${sJob.jobId}.out` : undefined,
+            });
+          }
+
+          // 2. Merge partLog entries (which may have custom logFile or foldEpoch)
+          if (data.status?.partLog && Array.isArray(data.status.partLog)) {
+            for (const p of data.status.partLog) {
+              const jid = String(p.slurmJobId || p.jobId || "");
+              if (jid) {
+                const sJob = sacctJobs.find((j) => j.jobId === jid);
+                const existing = partMap.get(jid) || {};
+                partMap.set(jid, {
+                  part: p.part || existing.part || 0,
+                  jobId: jid,
+                  state: sJob?.state || existing.state || (p.endedAt ? "COMPLETED" : "UNKNOWN"),
+                  start: sJob?.start || existing.start || p.startedAt || null,
+                  end: sJob?.end || existing.end || p.endedAt || null,
+                  elapsed: sJob?.elapsed || existing.elapsed || null,
+                  exit: sJob?.exit || existing.exit || null,
+                  logFile: p.logFile || existing.logFile || (runConfig.log ? `${runConfig.log}_${jid}.out` : undefined),
+                  foldEpoch: p.results || p.foldEpoch || existing.foldEpoch || undefined,
+                });
+              }
+            }
+          }
+
+          if (partMap.size === 0 && data.status?.slurmJobId) {
+            const jid = String(data.status.slurmJobId);
+            const sJob = sacctJobs.find((j) => j.jobId === jid);
+            partMap.set(jid, {
+              part: data.status.parts || 1,
+              jobId: jid,
+              state: sJob?.state || "COMPLETED",
+              start: sJob?.start || data.status.partStartedAt || data.status.startedAt || null,
+              end: sJob?.end || null,
+              elapsed: sJob?.elapsed || null,
+              exit: sJob?.exit || null,
+              logFile: data.status.logFile || (runConfig.log ? `${runConfig.log}_${jid}.out` : undefined),
+            });
+          }
+
+          let parts = Array.from(partMap.values());
+          parts.sort((a, b) => {
+            const ta = a.start ? new Date(a.start).getTime() : 0;
+            const tb = b.start ? new Date(b.start).getTime() : 0;
+            if (ta !== tb) return ta - tb;
+            return Number(a.jobId) - Number(b.jobId);
+          });
+          parts.forEach((p, idx) => {
+            p.part = idx + 1;
+          });
+
+          const isQuickFail = (p) => {
+            if (/RUNNING|PENDING|COMPLETING/i.test(p.state)) return false;
+            const sec = parseElapsedSec(p.elapsed);
+            const exitNonZero = Boolean(p.exit && p.exit !== "0:0");
+            const stateFailed = /FAILED|CANCELLED|NODE_FAIL|TIMEOUT|BOOT_FAIL/i.test(p.state);
+            return (exitNonZero || stateFailed) && sec < 60;
+          };
+
+          // Filter out parts that failed within a minute (e.g. immediate setup failure)
+          parts = parts.filter((p) => !isQuickFail(p));
+
+          // If no usable parts and no completed metrics/folds, leave run out
+          if (parts.length === 0 && !hasMetrics && !hasNnunetFolds) {
+            continue;
+          }
+
+          // Re-index parts 1..N after filtering
+          parts.forEach((p, idx) => {
+            p.part = idx + 1;
+          });
+
+          let status = "part ended";
+          if (hasMetrics) {
+            status = "finished";
+          } else if (parts.some((p) => /RUNNING|COMPLETING/i.test(p.state))) {
+            status = "running";
+          } else if (parts.some((p) => /PENDING/i.test(p.state))) {
+            status = "queued";
+          } else {
+            status = "part ended";
+          }
+
+          if (data.nnunet.length > 0 && parts.length > 0) {
+            const activeFold = data.nnunet.find((f) => !f.final && f.epochs > 0);
+            if (activeFold && !parts[parts.length - 1].foldEpoch) {
+              parts[parts.length - 1].foldEpoch = `fold ${activeFold.fold} (${activeFold.epochs}/100)`;
+            }
+          }
+
+          const startedAt =
+            data.status?.startedAt ||
+            data.status?.partLog?.[0]?.startedAt ||
+            parts[0]?.start ||
+            data.metrics?.trained_at ||
+            null;
+
+          const rawStartedBy = data.status?.startedBy || data.metrics?.startedBy || null;
+          const startedBy = typeof rawStartedBy === "string" ? { name: rawStartedBy } : rawStartedBy;
+
+          const epochsPerFold =
+            data.status?.epochs ??
+            data.metrics?.epochs ??
+            (runConfig.methodId.includes("nnunet") ? 100 : null);
+
+          const manifestCounts = data.manifest?.counts || data.manifest || null;
+          const dataset = manifestCounts
+            ? {
+                used: manifestCounts.used ?? null,
+                annotated: manifestCounts.annotated ?? null,
+                left_out: manifestCounts.left_out ?? null,
+              }
+            : null;
+
+          let result = null;
+          if (data.metrics) {
+            const m = data.metrics;
+            const s = m.summary || {};
+            result = {
+              summary: s,
+              bmeDice: s.bme_dice || s.bme_dice_pos || null,
+              boneDice: s.bone_dice || null,
+              fpPerCase: s.fp_per_case || null,
+              nCases: m.n_cases ?? m.patient_count ?? null,
+              folds: m.folds ?? null,
+              epochs: m.epochs ?? null,
+              foldMode: m.fold_mode ?? null,
+              trainedAt: m.trained_at ?? null,
+              hoursTaken: m.hours_taken ?? null,
+            };
+          }
+
+          let partial = null;
+          if (data.nnunet.length > 0) {
+            const foldsDone = data.nnunet.filter((f) => f.final).length;
+            const activeFold = data.nnunet.find((f) => !f.final && f.epochs > 0);
+            partial = {
+              type: "nnunet",
+              foldsDone,
+              totalFolds: 5,
+              activeFold: activeFold ? { fold: activeFold.fold, epoch: activeFold.epochs, totalEpochs: 100 } : null,
+              folds: data.nnunet,
+            };
+          } else if (data.partial) {
+            partial = {
+              type: "unet3d",
+              foldsDone: Array.isArray(data.partial) ? data.partial.length : 0,
+              totalFolds: data.status?.folds || 5,
+              data: data.partial,
+            };
+          }
+
+          const localMetricsPath = path.join(root, "data", folder, "metrics.json");
+          const hasLocalMetrics = fs.existsSync(localMetricsPath);
+
+          runs.push({
+            id: `${acc.roll}:${folder}`,
+            roll: acc.roll,
+            accountLabel,
+            methodId: data.status?.methodId || runConfig.methodId || folder,
+            label: runConfig.label || folder,
+            startedAt,
+            startedBy,
+            epochsPerFold,
+            dataset,
+            status,
+            result,
+            partial,
+            parts,
+            folder,
+            hasLocalMetrics,
+          });
+        }
+      } catch (err) {
+        errors.push({ roll: acc.roll, error: err.message || "Failed reading runs" });
+      } finally {
+        session.close();
+      }
+    })
+  );
+
+  runs.sort((a, b) => {
+    const ta = a.startedAt ? new Date(a.startedAt).getTime() : 0;
+    const tb = b.startedAt ? new Date(b.startedAt).getTime() : 0;
+    return ta - tb;
+  });
+
+  return { runs, errors };
+}
+
 // ---------- FULL LOG ---------------------------------------------------------
-/** The log of the job on one H200 account: the running job's, else the newest. */
-async function handleLog(targetId, linesArg) {
+/** The log of the job on one H200 account: specific jobId, running job, or newest. */
+async function handleLog(targetId, linesArg, jobId) {
   const n = Math.min(2000, Math.max(20, Number(linesArg) || 400));
   const roll = String(targetId || "").replace("h200-", "");
   const session = await chooseH200(root, roll);
+  const isJobIdDigits = jobId && /^\d+$/.test(String(jobId).trim());
+  const cleanJobId = isJobIdDigits ? String(jobId).trim() : null;
   try {
+    const fileFindCmd = cleanJobId
+      ? `f=$(ls $HOME/bme/logs/*_${cleanJobId}.out 2>/dev/null | head -1); `
+      : `j=$(squeue -u $USER -h -o %i | head -1); f=""; ` +
+        `[ -n "$j" ] && f=$(ls $HOME/bme/logs/*_$j.out 2>/dev/null | head -1); ` +
+        `[ -z "$f" ] && f=$(ls -t $HOME/bme/logs/*.out 2>/dev/null | head -1); `;
+
     const r = await runSshCommand(
       session,
-      `j=$(squeue -u $USER -h -o %i | head -1); f=""; ` +
-      `[ -n "$j" ] && f=$(ls $HOME/bme/logs/*_$j.out 2>/dev/null | head -1); ` +
-      `[ -z "$f" ] && f=$(ls -t $HOME/bme/logs/*.out 2>/dev/null | head -1); ` +
+      `${fileFindCmd}` +
       `echo "FILE:$f"; [ -n "$f" ] && tail -n ${n} "$f"; ` +
       `echo "===TRAIN==="; case "$f" in *nnunet*) t=$(ls -t $HOME/bme/data/nnunet/results/Dataset501_BMEKnee/*/fold_*/training_log_*.txt 2>/dev/null | head -1); ` +
       `[ -n "$t" ] && { echo "FILE:$t"; tail -n ${n} "$t"; } ;; esac; ` +
@@ -1352,7 +1727,7 @@ async function handleLog(targetId, linesArg) {
       targetId,
       platform: "h200",
       file: ((out[0] || "").match(/^FILE:(.*)$/) || [])[1] || file,
-      lines: body.length ? body : ["No log on this account yet."],
+      lines: body.length ? body : [cleanJobId ? `No log found for job ${cleanJobId}.` : "No log on this account yet."],
       err: clean(errPart).filter((l) => !/^\s*$/.test(l)),
     };
   } finally {
@@ -1371,6 +1746,8 @@ try {
     result = await handleAccounts();
   } else if (action === "runs") {
     result = await handleRuns();
+  } else if (action === "runs-h200") {
+    result = await handleRunsH200();
   } else if (action === "dataset-status") {
     result = await handleDatasetStatus();
   } else if (action === "setup") {
@@ -1391,7 +1768,7 @@ try {
   } else if (action === "start") {
     result = await handleStart(arg1, arg2, arg3, arg4);
   } else if (action === "log") {
-    result = await handleLog(arg1, arg2);
+    result = await handleLog(arg1, arg2, arg3);
   } else if (action === "cancel") {
     result = await handleCancel(arg1, arg2, arg3);
   } else {
