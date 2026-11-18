@@ -361,7 +361,7 @@ function RunsPageContent() {
 
   const selectRun = (run: H200Run) => {
     setSelectedRunId(run.id);
-    router.replace(`/training/advanced/runs?run=${encodeURIComponent(run.id)}`, { scroll: false });
+    router.replace(`/training/advanced/run-history?run=${encodeURIComponent(run.id)}`, { scroll: false });
   };
 
   const copyToClipboard = async (text: string, key: string, label = "Copied") => {
@@ -584,7 +584,7 @@ function RunsPageContent() {
               type="button"
               onClick={() => {
                 setSelectedRunId(null);
-                router.replace("/training/advanced/runs", { scroll: false });
+                router.replace("/training/advanced/run-history", { scroll: false });
               }}
               className="inline-flex items-center gap-1.5 rounded-lg border border-border bg-card px-3 py-1.5 text-xs font-medium text-foreground hover:bg-accent cursor-pointer"
             >

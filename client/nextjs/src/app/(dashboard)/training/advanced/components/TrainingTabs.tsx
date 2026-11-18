@@ -37,10 +37,10 @@ export function TrainingTabs({ right }: TrainingTabsProps) {
       dot: isAnySyncRunning ? "emerald" : null,
     },
     {
-      href: "/training/advanced/runs",
+      href: "/training/advanced/run-history",
       label: "Runs",
       icon: Flame,
-      active: pathname === "/training/advanced/runs",
+      active: pathname === "/training/advanced/run-history",
       dot: isAnyRunRunning ? "amber" : null,
     },
   ];

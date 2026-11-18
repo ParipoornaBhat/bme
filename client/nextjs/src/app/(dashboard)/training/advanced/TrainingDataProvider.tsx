@@ -128,7 +128,7 @@ export function TrainingDataProvider({ children }: { children: ReactNode }) {
   const loadRuns = useCallback(
     () =>
       once("runs", async () => {
-        const d = await getJson("/api/training-advanced/runs");
+        const d = await getJson("/api/training-advanced/run-list");
         if (d?.runs) {
           cache.runs = d.runs;
           setRuns(d.runs);
