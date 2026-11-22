@@ -51,7 +51,11 @@ TR_DIR="$("$ENV/python3" -c 'import nnunetv2, os; print(os.path.join(os.path.dir
 cp ml/scripts/nnunet_trainer_bme.py "$TR_DIR/nnUNetTrainer_BME100.py"
 
 echo "== convert"
-"$ENV/python3" ml/scripts/nnunet_prep.py convert .
+# A run that already started keeps its frozen case list and folds. Only a new run (no
+# results folder for this configuration yet) builds a new list from the complete annotations.
+CONVERT_ARGS=""
+if [ ! -d "$RUN" ]; then CONVERT_ARGS="--refresh"; fi
+"$ENV/python3" ml/scripts/nnunet_prep.py convert . $CONVERT_ARGS
 if [ ! -f "$nnUNet_preprocessed/Dataset501_BMEKnee/${PLANS}.json" ] || \
    [ ! -d "$nnUNet_preprocessed/Dataset501_BMEKnee/${PLANS}_${CONFIG}" ]; then
   echo "== plan and preprocess ($CONFIG)"

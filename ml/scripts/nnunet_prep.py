@@ -36,7 +36,8 @@ import nibabel as nib
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from train_3d import SEED, dice, lesion_stats, load_case, rates, summarise  # noqa: E402
+from train_3d import SEED, dice, lesion_stats, load_case, load_worklist_metadata, rates, summarise  # noqa: E402
+from dataset_manifest import incomplete_reason  # noqa: E402
 
 DATASET = "Dataset501_BMEKnee"
 DATASET_ID = 501
@@ -67,20 +68,45 @@ def folds_like_train_3d(case_ids: list[str], folds_n: int = 5) -> list[list[str]
     return groups
 
 
-def cmd_convert(base: Path):
+def cmd_convert(base: Path, refresh: bool = False):
+    """Write the nnU-Net raw dataset.
+
+    The case list is frozen once written (raw/cases.json): a run that continues over
+    several jobs must train and validate on the same cases and folds, even if new
+    annotations arrive meanwhile. --refresh (a new run) builds the list again from the
+    complete annotations on this machine (ml/scripts/dataset_manifest.py rule); files of
+    cases no longer in the list are moved to raw/excluded/, never deleted.
+    """
     raw = base / "data" / "nnunet" / "raw" / DATASET
     (raw / "imagesTr").mkdir(parents=True, exist_ok=True)
     (raw / "labelsTr").mkdir(parents=True, exist_ok=True)
-    print(f"writing {raw}")
+    frozen_file = raw / "cases.json"
+    frozen = None
+    if frozen_file.exists() and not refresh:
+        frozen = json.loads(frozen_file.read_text(encoding="utf-8"))
+        print(f"writing {raw}: frozen case list of this run ({len(frozen)} cases); new annotations wait for a new run")
+    else:
+        print(f"writing {raw}: new case list from the complete annotations")
+    classes, _patients = load_worklist_metadata(base)
+    candidates = frozen if frozen is not None else annotated_cases(base)
     kept = []
-    for n, cid in enumerate(annotated_cases(base), 1):
+    for n, cid in enumerate(candidates, 1):
         img_out = raw / "imagesTr" / f"{nn_id(cid)}_0000.nii.gz"
         lab_out = raw / "labelsTr" / f"{nn_id(cid)}.nii.gz"
-        if img_out.exists() and lab_out.exists():
+        if frozen is not None and img_out.exists() and lab_out.exists():
             kept.append(cid)
             continue
         item = load_case(base, cid)
         if not item:
+            continue
+        if frozen is None:
+            cls = classes.get(cid) or ("bme" if cid.startswith("BME-") else "non_bme")
+            why = incomplete_reason(item["labels"], cls)
+            if why:
+                print(f"  {cid}  left out ({why})", flush=True)
+                continue
+        if img_out.exists() and lab_out.exists():
+            kept.append(cid)
             continue
         from train_3d import volume_path
 
@@ -102,6 +128,17 @@ def cmd_convert(base: Path):
         "description": "Bone marrow and bone marrow edema, clinical axial knee MRI. Pseudonymised IDs only.",
     }
     (raw / "dataset.json").write_text(json.dumps(meta, indent=2, sort_keys=False), encoding="utf-8")
+    if frozen is None:
+        # nnU-Net plans on every file in imagesTr/labelsTr, so files of cases left out move aside.
+        keep_ids = {nn_id(c) for c in kept}
+        excluded = raw / "excluded"
+        for sub in ("imagesTr", "labelsTr"):
+            for f in sorted((raw / sub).glob("*.nii.gz")):
+                stem = f.name.replace("_0000.nii.gz", "").replace(".nii.gz", "")
+                if stem not in keep_ids:
+                    (excluded / sub).mkdir(parents=True, exist_ok=True)
+                    f.replace(excluded / sub / f.name)
+                    print(f"  moved aside: {sub}/{f.name}", flush=True)
     (raw / "cases.json").write_text(json.dumps(kept), encoding="utf-8")
     print(f"{len(kept)} cases in {raw}")
 
@@ -193,10 +230,11 @@ def main():
     ap.add_argument("--config", default="3d_fullres")
     ap.add_argument("--out", default="")
     ap.add_argument("--trainer", default=TRAINER)
+    ap.add_argument("--refresh", action="store_true", help="convert: build a new case list (a new run only)")
     a = ap.parse_args()
     base = a.base.resolve()
     if a.cmd == "convert":
-        cmd_convert(base)
+        cmd_convert(base, a.refresh)
     elif a.cmd == "splits":
         cmd_splits(base)
     else:
