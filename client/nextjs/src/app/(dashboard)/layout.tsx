@@ -27,9 +27,29 @@ import {
   UserCircle,
   Loader2,
   History,
-  Server
+  Server,
+  ClipboardList
 } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
+import { AnnotationSummaryProvider, useAnnotationSummary } from "./annotation-summary-context";
+
+function SummaryBadge({ isMinimized }: { isMinimized?: boolean }) {
+  const { summary } = useAnnotationSummary();
+  const pending = summary?.threeD?.totals?.pending;
+  if (!pending || pending <= 0) return null;
+  if (isMinimized) {
+    return (
+      <span className="absolute -top-1 -right-1 flex h-4 w-4 items-center justify-center rounded-full bg-amber-500 text-[9px] font-bold text-black ring-2 ring-background">
+        {pending > 99 ? "99+" : pending}
+      </span>
+    );
+  }
+  return (
+    <span className="ml-auto rounded-full bg-amber-500/15 border border-amber-500/30 px-1.5 py-0.5 text-[10px] font-bold text-amber-500 tabular-nums">
+      {pending}
+    </span>
+  );
+}
 
 
 export default function DashboardLayout({ children }: { children: React.ReactNode }) {
@@ -214,10 +234,14 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
   }
 
   const navigation = isReview
-    ? [{ name: "Annotate", href: "/annotate", icon: PenTool }]
+    ? [
+        { name: "Annotate", href: "/annotate", icon: PenTool },
+        { name: "Summary", href: "/annotate/summary", icon: ClipboardList },
+      ]
     : [
         { name: "Dashboard", href: "/dashboard", icon: LayoutDashboard },
         { name: "Annotate", href: "/annotate", icon: PenTool },
+        { name: "Summary", href: "/annotate/summary", icon: ClipboardList },
         { name: "Activities", href: "/activities", icon: History },
         { name: "Training", href: "/training", icon: Cpu },
         { name: "Training (advanced)", href: "/training/advanced", icon: Server },
@@ -243,7 +267,8 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
           : { profile, loadingProfile: !profile, refreshProfile: fetchProfile }
       }
     >
-      <div className="h-[100dvh] flex flex-col bg-background overflow-hidden selection:bg-primary/30">
+      <AnnotationSummaryProvider>
+        <div className="h-[100dvh] flex flex-col bg-background overflow-hidden selection:bg-primary/30">
         {/* Top Navbar Header */}
         <header className="sticky top-0 z-40 w-full border-b border-border/40 bg-background/55 backdrop-blur-xl shrink-0">
           <div className="flex h-16 items-center justify-between px-4 sm:px-6 lg:px-8">
@@ -347,7 +372,8 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
                           }`}
                         >
                           <Icon className="h-5 w-5 mr-3 shrink-0" />
-                          {item.name}
+                          <span className="flex-1">{item.name}</span>
+                          {item.href === "/annotate/summary" && <SummaryBadge />}
                         </Link>
                       );
                     })}
@@ -397,12 +423,16 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
                       isActive 
                         ? "bg-primary/10 text-primary" 
                         : "text-muted-foreground hover:bg-accent/60 hover:text-foreground"
-                    } ${isMinimized ? "justify-center" : ""}`}
+                    } ${isMinimized ? "justify-center" : "justify-between"}`}
                   >
-                    <div className={`relative flex items-center justify-center ${isMinimized ? "" : "mr-3"}`}>
-                      <Icon className="h-5 w-5 shrink-0 transition-colors" />
+                    <div className="flex items-center min-w-0">
+                      <div className={`relative flex items-center justify-center ${isMinimized ? "" : "mr-3"}`}>
+                        <Icon className="h-5 w-5 shrink-0 transition-colors" />
+                        {isMinimized && item.href === "/annotate/summary" && <SummaryBadge isMinimized />}
+                      </div>
+                      {!isMinimized && <span className="truncate">{item.name}</span>}
                     </div>
-                    {!isMinimized && <span>{item.name}</span>}
+                    {!isMinimized && item.href === "/annotate/summary" && <SummaryBadge />}
                   </Link>
                 );
               })}
@@ -515,6 +545,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
           </main>
         </div>
       </div>
+      </AnnotationSummaryProvider>
     </DashboardContext.Provider>
   );
 }

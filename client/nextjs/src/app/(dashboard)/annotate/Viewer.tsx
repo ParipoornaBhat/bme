@@ -2812,6 +2812,9 @@ export default function Viewer({
         setReviewInfo({ status: "open", updatedAt: new Date().toISOString() });
         setPickedAnnotator("_mine");
         onSaved?.();
+        if (typeof window !== "undefined") {
+          window.dispatchEvent(new Event("bme:annotations-changed"));
+        }
       } else {
         setStatus(res.logged
           ? `Saved — recorded as annotated by ${res.me}`
@@ -2824,6 +2827,9 @@ export default function Viewer({
         toast.success(`Saved 3D mask for ${caseId}`);
         void triggerSync();
         onSaved?.();
+        if (typeof window !== "undefined") {
+          window.dispatchEvent(new Event("bme:annotations-changed"));
+        }
       }
     } catch (e) {
       const msg = e instanceof Error ? e.message : "save failed";
@@ -2873,6 +2879,9 @@ export default function Viewer({
           void triggerSync();
         }
         onSaved?.();
+        if (typeof window !== "undefined") {
+          window.dispatchEvent(new Event("bme:annotations-changed"));
+        }
       } catch {
         setAutoSaveStatus("Auto-save failed");
       } finally {

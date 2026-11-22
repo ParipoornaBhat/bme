@@ -93,6 +93,9 @@ function runSync(caseId: string, me: string | null, all: boolean): Promise<SyncR
       }
       store.status = `Synced ${new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", hour12: false })}`;
       announce(report);
+      if (typeof window !== "undefined") {
+        window.dispatchEvent(new Event("bme:annotations-changed"));
+      }
       const active = store.active;
       const changed = report.changedCases ?? [];
       if (active && changed.includes(active.caseId)) {

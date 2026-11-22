@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState, useCallback } from "react";
+import Link from "next/link";
 import {
   Play,
   Square,
@@ -18,6 +19,7 @@ import {
   Database,
   Sparkles,
 } from "lucide-react";
+import { useAnnotationSummary } from "../annotation-summary-context";
 import { BUILD_STAMP } from "../../api/training-3d/kaggle/buildStamp";
 import { KaggleRunSummary } from "./KaggleRunSummary";
 
@@ -103,6 +105,7 @@ export default function Train3D({
   onRunning,
   sectionMode = "default",
 }: Train3DProps = {}) {
+  const { summary } = useAnnotationSummary();
   const [state, setState] = useState<Train3DState | null>(null);
   const [torch, setTorch] = useState<TorchInfo | null>(null);
   const [device, setDevice] = useState<"auto" | "cuda" | "cpu">(propDevice ?? "auto");
@@ -581,8 +584,21 @@ export default function Train3D({
               {kaggleState?.running && <span className="h-2 w-2 rounded-full bg-emerald-400 animate-pulse ml-0.5" />}
             </button>
           </div>
-          <div className="text-xs text-muted-foreground tabular-nums">
-            {n} saved 3D case{n !== 1 ? "s" : ""} {state ? `(${state.bme} BME · ${state.nonBme} non-BME)` : ""}
+          <div className="text-xs text-muted-foreground tabular-nums flex flex-wrap items-center gap-2">
+            <span>
+              {n} saved 3D case{n !== 1 ? "s" : ""} {state ? `(${state.bme} BME · ${state.nonBme} non-BME)` : ""}
+            </span>
+            {summary?.threeD?.totals && (
+              <>
+                <span>&middot;</span>
+                <Link
+                  href="/annotate/summary"
+                  className="text-primary hover:underline font-medium"
+                >
+                  {summary.threeD.totals.complete} of {summary.threeD.totals.total} 3D cases complete, {summary.threeD.totals.pending} pending
+                </Link>
+              </>
+            )}
           </div>
         </div>
 

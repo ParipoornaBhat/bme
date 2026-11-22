@@ -1,11 +1,13 @@
 "use client";
 
 import { Suspense, useEffect, useMemo, useState } from "react";
+import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import { Boxes, CheckCircle2, ChevronLeft, ChevronRight, Circle, Download, Flag, Layers, Search, Users } from "lucide-react";
 import type { FlagRecord } from "~/lib/flag-store";
 import { useFocusMode } from "~/lib/useFocusMode";
 import { isReviewMode } from "~/lib/app-mode";
+import { useAnnotationSummary } from "../annotation-summary-context";
 import Viewer, { type ViewerView } from "./Viewer";
 import Painter2D from "./Painter2D";
 
@@ -44,6 +46,7 @@ function matchesFilter(c: Case, f: Filter) {
 
 function AnnotatePageContent() {
   const isReview = isReviewMode();
+  const { summary } = useAnnotationSummary();
   const router = useRouter();
   const searchParams = useSearchParams();
 
@@ -263,6 +266,17 @@ function AnnotatePageContent() {
 
         <div className="text-xs text-muted-foreground flex items-center gap-2">
           <span>{done} of {cases.length} annotated</span>
+          {summary?.threeD?.totals && (
+            <>
+              <span>&middot;</span>
+              <Link
+                href="/annotate/summary"
+                className="text-amber-500 hover:text-amber-400 font-medium hover:underline transition-colors"
+              >
+                {summary.threeD.totals.pending} pending, see summary
+              </Link>
+            </>
+          )}
           {!isReview && needFrom.length > 0 && (
             <span className="text-amber-500 font-medium">
               &middot; {needFrom.length} on teammate machine

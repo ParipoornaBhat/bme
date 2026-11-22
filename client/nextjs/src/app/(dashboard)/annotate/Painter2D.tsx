@@ -1677,6 +1677,10 @@ export default function Painter2D({
             ? { ...prev, hasMask: true, maskSavedAt: now.toISOString() }
             : prev,
         );
+
+        if (typeof window !== "undefined") {
+          window.dispatchEvent(new Event("bme:annotations-changed"));
+        }
       } else {
         const err = await res.json().catch(() => ({}));
         if (isAuto) {

@@ -1,5 +1,6 @@
 import fs from "node:fs";
 import zlib from "node:zlib";
+import { getNrrdFileStats } from "./annotation-stats";
 
 /**
  * Which labels an annotation actually contains: bone marrow, edema, or both.
@@ -40,7 +41,6 @@ export function union(list: (LabelPresence | null | undefined)[]): LabelPresence
   return { bone: known.some((p) => p.bone), edema: known.some((p) => p.edema) };
 }
 
-const fileCache = new Map<string, { mtimeMs: number; size: number; res: LabelPresence | null }>();
 const shaCache = new Map<string, LabelPresence | null>();
 
 /** A raw labelmap in the canonical values (1 = bone_marrow, 2 = bme). */
@@ -66,57 +66,10 @@ export function knownShaPresence(sha: string | null): LabelPresence | null | und
   return sha ? shaCache.get(sha) : undefined;
 }
 
-/** From a .seg.nrrd on disk: label values come from its Segment<i>_Name / _LabelValue / _Layer lines. */
+/** From a .seg.nrrd on disk: label presence derived from parsed slice counts. */
 export function nrrdPresence(file: string): LabelPresence | null {
-  let st: fs.Stats;
-  try {
-    st = fs.statSync(file);
-  } catch {
-    return null;
-  }
-  const hit = fileCache.get(file);
-  if (hit && hit.mtimeMs === st.mtimeMs && hit.size === st.size) return hit.res;
-  let res: LabelPresence | null = null;
-  try {
-    const buf = fs.readFileSync(file);
-    let sep = buf.indexOf("\n\n");
-    let skip = 2;
-    const crlf = buf.indexOf("\r\n\r\n");
-    if (crlf !== -1 && (sep === -1 || crlf < sep)) {
-      sep = crlf;
-      skip = 4;
-    }
-    if (sep === -1) throw new Error("no header end");
-    const header = buf.subarray(0, sep).toString("latin1");
-    const field = (k: string) => (header.match(new RegExp(`^${k}:\\s*(.+)$`, "mi")) || [])[1]?.trim() || "";
-    if (field("data file")) throw new Error("detached data");
-    const type = field("type").toLowerCase();
-    if (!/^(uint8|uchar|unsigned char|uint8_t)$/.test(type)) throw new Error(`type ${type}`);
-    const sizes = field("sizes").split(/\s+/).map(Number);
-    const layers = sizes.length === 4 ? sizes[0] : 1;
-    const payload = buf.subarray(sep + skip);
-    const raw = /gz/.test(field("encoding").toLowerCase()) ? zlib.gunzipSync(payload) : payload;
-
-    const segs: { name: string; value: number; layer: number }[] = [];
-    for (const m of header.matchAll(/^Segment(\d+)_Name:=(.+)$/gm)) {
-      const i = m[1];
-      const name = canonical(m[2]);
-      if (!name) continue;
-      const value = Number((header.match(new RegExp(`^Segment${i}_LabelValue:=(\\d+)`, "m")) || [])[1] || 0);
-      const layer = Number((header.match(new RegExp(`^Segment${i}_Layer:=(\\d+)`, "m")) || [])[1] || 0);
-      segs.push({ name, value, layer });
-    }
-    const has = (name: string) =>
-      segs.some((s) => {
-        if (s.name !== name || !s.value) return false;
-        if (layers === 1) return raw.indexOf(s.value) !== -1;
-        for (let i = s.layer; i < raw.length; i += layers) if (raw[i] === s.value) return true;
-        return false;
-      });
-    res = { bone: has("bone_marrow"), edema: has("bme") };
-  } catch {
-    res = null;
-  }
-  fileCache.set(file, { mtimeMs: st.mtimeMs, size: st.size, res });
-  return res;
+  const stats = getNrrdFileStats(file);
+  if (!stats) return null;
+  return { bone: stats.bone > 0, edema: stats.edema > 0 };
 }
+

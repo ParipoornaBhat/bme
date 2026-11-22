@@ -1,7 +1,9 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import Link from "next/link";
 import { Boxes, CheckCircle2, ChevronDown, Circle, Info, Layers, Loader2, PenTool, Play, Sparkles, Square, Target, Trash2, Trophy } from "lucide-react";
+import { useAnnotationSummary } from "../annotation-summary-context";
 import Train3D from "./Train3D";
 import { SystemMonitor, useSystem } from "~/components/SystemMonitor";
 
@@ -228,6 +230,7 @@ function DevicePicker({
 }
 
 export default function TrainingPage() {
+  const { summary } = useAnnotationSummary();
   const [archs, setArchs] = useState<string[]>([]);
   const [runs, setRuns] = useState<Run[]>([]);
   // The run the whole dashboard stands behind. Server-side in
@@ -419,6 +422,13 @@ export default function TrainingPage() {
         <p className="mt-1 text-sm text-muted-foreground">
           The two 2D pipelines stay as they are. The third tab trains the 3D bone and edema model.
         </p>
+        {summary?.threeD?.totals && (
+          <p className="mt-1 text-xs text-muted-foreground">
+            <Link href="/annotate/summary" className="text-primary hover:underline font-medium">
+              {summary.threeD.totals.complete} of {summary.threeD.totals.total} 3D cases complete, {summary.threeD.totals.pending} pending
+            </Link>
+          </p>
+        )}
       </div>
 
       <div className="flex flex-wrap items-center gap-1 border-b border-border">
