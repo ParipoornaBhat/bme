@@ -450,25 +450,8 @@ async function reviewPostHandler(
       savedAt: now,
     });
 
-    if (user.role === "radiologist" || user.role === "reviewer") {
-      const base = baseAnnotator || "_main";
-      const targets = base === "_main" ? ["_main"] : [base, "_main"];
-      await tx
-        .update(caseAnnotation)
-        .set({
-          deletedAt: now,
-          deletedBy: safeMe,
-          deletedReason: "superseded",
-          supersededBy: safeMe,
-        })
-        .where(
-          and(
-            eq(caseAnnotation.caseId, caseId),
-            inArray(caseAnnotation.annotator, targets),
-            isNull(caseAnnotation.deletedAt),
-          ),
-        );
-    }
+    // A reviewer's version is kept under her own name next to the team's annotation.
+    // It never marks the team's version deleted (that once hid 28 cases on the next sync).
   });
 
   try {
@@ -479,13 +462,6 @@ async function reviewPostHandler(
           annotator: safeMe,
           actor: safeMe,
           action: "review-submit",
-        },
-        {
-          caseId,
-          annotator: safeMe,
-          actor: safeMe,
-          action: "supersede",
-          details: { base },
         },
       ]);
     } else if (user.role === "team") {

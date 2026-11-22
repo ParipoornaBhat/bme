@@ -746,23 +746,27 @@ async function executeSync(options: AnnotationSyncOptions): Promise<SyncReport> 
     // Apply open review edits for radiologists (any laptop, safely once)
     if (!dryRun) {
       try {
-        const openRadEdits = await db
-          .select({
-            id: reviewEdit.id,
-            caseId: reviewEdit.caseId,
-            reviewer: reviewEdit.reviewer,
-            labelsGzB64: reviewEdit.labelsGzB64,
-            baseAnnotator: reviewEdit.baseAnnotator,
-          })
-          .from(reviewEdit)
-          .innerJoin(reviewAccount, eq(reviewEdit.reviewer, reviewAccount.username))
-          .where(
-            and(
-              eq(reviewEdit.kind, "review"),
-              eq(reviewEdit.status, "open"),
-              inArray(reviewAccount.role, ["radiologist", "reviewer"]),
-            ),
-          );
+        // A review edit stores the reviewer's display name ("Kanupriya"); the account's
+        // username may differ ("kanupriya"). Match either, ignoring case.
+        const reviewerAccounts = await db
+          .select({ username: reviewAccount.username, displayName: reviewAccount.displayName })
+          .from(reviewAccount)
+          .where(inArray(reviewAccount.role, ["radiologist", "reviewer"]));
+        const reviewerNames = new Set(
+          reviewerAccounts.flatMap((a) => [a.username, a.displayName].filter(Boolean).map((n) => String(n).toLowerCase())),
+        );
+        const openRadEdits = (
+          await db
+            .select({
+              id: reviewEdit.id,
+              caseId: reviewEdit.caseId,
+              reviewer: reviewEdit.reviewer,
+              labelsGzB64: reviewEdit.labelsGzB64,
+              baseAnnotator: reviewEdit.baseAnnotator,
+            })
+            .from(reviewEdit)
+            .where(and(eq(reviewEdit.kind, "review"), eq(reviewEdit.status, "open")))
+        ).filter((e) => reviewerNames.has(String(e.reviewer).toLowerCase()));
 
         for (const edit of openRadEdits) {
           if (onlySet && !onlySet.has(edit.caseId)) continue;
@@ -830,7 +834,7 @@ async function executeSync(options: AnnotationSyncOptions): Promise<SyncReport> 
 
             await exec(
               pythonExe,
-              [writeSegScript, repoRoot, edit.caseId, tmpRawPath, "--main", edit.reviewer],
+              [writeSegScript, repoRoot, edit.caseId, tmpRawPath, "--copy-only", edit.reviewer],
               {
                 cwd: repoRoot,
                 timeout: 120_000,
@@ -839,18 +843,14 @@ async function executeSync(options: AnnotationSyncOptions): Promise<SyncReport> 
 
             const caseDir = path.join(annotationsDir, edit.caseId);
             const radFileName = `${edit.caseId}__${edit.reviewer}.seg.nrrd`;
-            const mainFileName = `${edit.caseId}.seg.nrrd`;
             const radFilePath = path.join(caseDir, radFileName);
-            const mainFilePath = path.join(caseDir, mainFileName);
 
-            if (!fs.existsSync(radFilePath) || !fs.existsSync(mainFilePath)) {
-              throw new Error("write_seg completed but output files were missing");
+            if (!fs.existsSync(radFilePath)) {
+              throw new Error("write_seg completed but the reviewer's file is missing");
             }
 
             const radBuf = fs.readFileSync(radFilePath);
             const radSha = crypto.createHash("sha256").update(radBuf).digest("hex");
-            const mainBuf = fs.readFileSync(mainFilePath);
-            const mainSha = crypto.createHash("sha256").update(mainBuf).digest("hex");
             const hasBone = rawBuf.includes(1);
 
             // Push radiologist row
@@ -890,45 +890,7 @@ async function executeSync(options: AnnotationSyncOptions): Promise<SyncReport> 
                 },
               });
 
-            // Push _main row, clearing any tombstone on _main because it is new content
-            await db
-              .insert(caseAnnotation)
-              .values({
-                caseId: edit.caseId,
-                annotator: "_main",
-                contentB64: mainBuf.toString("base64"),
-                labelsGzB64: edit.labelsGzB64,
-                sha256: mainSha,
-                bytes: mainBuf.length,
-                scanFingerprint: null,
-                hasBone,
-                savedBy: edit.reviewer,
-                deletedAt: null,
-                deletedBy: null,
-                deletedReason: null,
-                supersededBy: null,
-                createdAt: new Date(),
-                updatedAt: new Date(),
-              })
-              .onConflictDoUpdate({
-                target: [caseAnnotation.caseId, caseAnnotation.annotator],
-                set: {
-                  contentB64: mainBuf.toString("base64"),
-                  labelsGzB64: edit.labelsGzB64,
-                  sha256: mainSha,
-                  bytes: mainBuf.length,
-                  hasBone,
-                  savedBy: edit.reviewer,
-                  deletedAt: null,
-                  deletedBy: null,
-                  deletedReason: null,
-                  supersededBy: null,
-                  updatedAt: new Date(),
-                },
-              });
-
             syncState[`${edit.caseId}/${edit.reviewer}`] = { sha: radSha, at: new Date().toISOString() };
-            syncState[`${edit.caseId}/_main`] = { sha: mainSha, at: new Date().toISOString() };
 
             await db
               .update(reviewEdit)
@@ -951,7 +913,7 @@ async function executeSync(options: AnnotationSyncOptions): Promise<SyncReport> 
               actor: claimer,
               action: "review-apply",
               sha256: radSha,
-              details: { role: "radiologist", main: true },
+              details: { role: "radiologist", main: false },
               at: new Date(),
             });
           } catch (applyErr) {

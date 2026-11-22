@@ -1,6 +1,7 @@
 """Write a Slicer-compatible .seg.nrrd from a raw labelmap produced by the web editor.
 
-    python ml/scripts/write_seg.py <base> <CASE_ID> <raw_file> [--series <series>] [--main] [<annotator>]
+    python ml/scripts/write_seg.py <base> <CASE_ID> <raw_file> [--series <series>] [--main | --copy-only] [<annotator>]
+    --copy-only writes only <CASE>__<annotator>.seg.nrrd and never the canonical file (a reviewer's own version).
 
 `raw_file` is a flat uint8 buffer, one byte per voxel, in the SAME index order as
 the case's `_primary.nii.gz` (x fastest). Values: 0 background, 1 bone_marrow,
@@ -63,12 +64,16 @@ def main():
     base, case_id, raw_path = Path(sys.argv[1]), sys.argv[2], Path(sys.argv[3])
     series, annotator = "", ""
     force_main = False
+    copy_only = False
     args = sys.argv[4:]
     i = 0
     positional = []
     while i < len(args):
         if args[i] == "--main":
             force_main = True
+            i += 1
+        elif args[i] == "--copy-only":
+            copy_only = True
             i += 1
         elif args[i] == "--series" and i + 1 < len(args):
             series = args[i + 1]
@@ -158,7 +163,7 @@ def main():
             except Exception:
                 owns_main = False
 
-        should_write_main = force_main or not_exists or no_other or owns_main
+        should_write_main = (force_main or not_exists or no_other or owns_main) and not copy_only
 
         nrrd.write(str(per), lab, header)
         written.append(per)
