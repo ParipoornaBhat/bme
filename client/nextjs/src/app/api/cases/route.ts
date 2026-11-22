@@ -1,10 +1,10 @@
 import { NextResponse } from "next/server";
 import fs from "node:fs";
 import path from "node:path";
-import { eq, and, isNull, isNotNull } from "drizzle-orm";
+import { eq, and, inArray, isNull, isNotNull } from "drizzle-orm";
 import { db, caseAnnotation, caseOwner, ownerForCase, caseReview } from "@bme/db";
 import { isReviewMode } from "~/lib/app-mode";
-import { reviewScan } from "~/lib/review-auth";
+import { reviewAccount, reviewScan } from "~/lib/review-auth";
 import { readFlags } from "~/lib/flag-store";
 
 /**
@@ -47,6 +47,39 @@ function compareCaseIds(a: CaseOrId, b: CaseOrId): number {
   return numA !== numB ? numA - numB : idA.localeCompare(idB);
 }
 
+/**
+ * For a case with no owner set: the person behind its earliest team copy (never a
+ * reviewer or mentor), in the short form the owner table uses ("Aditi_H_Nayak" -> "Aditi").
+ * Same rule the viewer uses for "Annotated by", so the list and the viewer agree.
+ */
+async function firstCopyOwners(): Promise<Map<string, string>> {
+  try {
+    const rev = await db
+      .select({ u: reviewAccount.username, d: reviewAccount.displayName })
+      .from(reviewAccount)
+      .where(inArray(reviewAccount.role, ["radiologist", "reviewer", "mentor"]));
+    const reviewers = new Set<string>(
+      rev.flatMap((r: { u: string; d: string }) => [r.u, r.d].filter(Boolean).map((x) => String(x).toLowerCase())),
+    );
+    const rows = await db
+      .select({ caseId: caseAnnotation.caseId, annotator: caseAnnotation.annotator, createdAt: caseAnnotation.createdAt })
+      .from(caseAnnotation)
+      .where(isNull(caseAnnotation.deletedAt));
+    rows.sort(
+      (a: { createdAt: Date | null }, b: { createdAt: Date | null }) =>
+        (a.createdAt ? new Date(a.createdAt).getTime() : 0) - (b.createdAt ? new Date(b.createdAt).getTime() : 0),
+    );
+    const out = new Map<string, string>();
+    for (const r of rows as { caseId: string; annotator: string }[]) {
+      if (r.annotator === "_main" || reviewers.has(r.annotator.toLowerCase()) || out.has(r.caseId)) continue;
+      out.set(r.caseId, r.annotator.split("_")[0]);
+    }
+    return out;
+  } catch {
+    return new Map();
+  }
+}
+
 async function reviewHandler() {
   const scans = await db.select().from(reviewScan);
   // Only the columns the list needs; the annotation itself is large.
@@ -87,6 +120,7 @@ async function reviewHandler() {
       .select({ caseId: caseOwner.caseId, annotatedBy: caseOwner.annotatedBy })
       .from(caseOwner);
     ownerMap = new Map(owners.map((o) => [o.caseId, o.annotatedBy]));
+    for (const [k, v] of await firstCopyOwners()) if (!ownerMap.get(k)) ownerMap.set(k, v);
   } catch {
     ownerMap = new Map();
   }
@@ -204,6 +238,7 @@ export async function GET() {
       .select({ caseId: caseOwner.caseId, annotatedBy: caseOwner.annotatedBy })
       .from(caseOwner);
     ownerMap = new Map(owners.map((o) => [o.caseId, o.annotatedBy]));
+    for (const [k, v] of await firstCopyOwners()) if (!ownerMap.get(k)) ownerMap.set(k, v);
     dbAvailable = true;
   } catch {
     dbAvailable = false;
