@@ -243,6 +243,27 @@ export async function GET(
     }
     seg = path.join(root(), "data", "annotations", caseId, `${caseId}__${by}.seg.nrrd`);
     if (!fs.existsSync(seg)) {
+      // A radiologist's review lives in the database until a sync writes it out as a file.
+      try {
+        const [edit] = await db
+          .select({ labelsGzB64: reviewEdit.labelsGzB64 })
+          .from(reviewEdit)
+          .where(and(eq(reviewEdit.caseId, caseId), eq(reviewEdit.reviewer, by)))
+          .orderBy(desc(reviewEdit.updatedAt), desc(reviewEdit.createdAt))
+          .limit(1);
+        if (edit?.labelsGzB64) {
+          const rawBuf = zlib.gunzipSync(Buffer.from(edit.labelsGzB64, "base64"));
+          return new NextResponse(new Uint8Array(rawBuf), {
+            headers: {
+              "Content-Type": "application/octet-stream",
+              "Content-Length": String(rawBuf.length),
+              "Cache-Control": "no-store",
+            },
+          });
+        }
+      } catch {
+        /* fall through to not found */
+      }
       return NextResponse.json({ exists: false, error: "annotator copy not found" }, { status: 404 });
     }
   } else {

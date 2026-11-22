@@ -282,7 +282,13 @@ async function fetchSavedLabels(
 ): Promise<{ labels: Uint8Array | null; warnings: string[] }> {
   const params = new URLSearchParams();
   if (series && series !== "primary") params.set("series", series);
-  if (annotator) params.set("by", annotator);
+  // "deleted:<name>" is a version that was deleted or replaced (Activities > Deleted).
+  if (annotator?.startsWith("deleted:")) {
+    params.set("by", annotator.slice("deleted:".length));
+    params.set("deleted", "1");
+  } else if (annotator) {
+    params.set("by", annotator);
+  }
   const q = params.toString() ? `?${params.toString()}` : "";
   const res = await fetch(access(`/api/annotation/${caseId}/labels${q}`), { cache: "no-store" });
   if (res.status === 404) return { labels: null, warnings: [] };
@@ -1069,8 +1075,16 @@ export default function Viewer({
         const mainItem = metaAnnotators.find((a) => a.isMain);
         const pickItem = ownerItem ?? mainItem ?? metaAnnotators[0];
         defaultAnnotator = pickItem ? pickItem.name : "";
+        // Opened from Activities (Open or Compare): show the version named in the address.
+        if (!isReview && typeof window !== "undefined") {
+          const sp = new URLSearchParams(window.location.search);
+          const urlBy = sp.get("by");
+          if (urlBy && sp.get("case") === caseId) {
+            defaultAnnotator = sp.get("deleted") === "1" ? `deleted:${urlBy}` : urlBy;
+          }
+        }
         setPickedAnnotator(defaultAnnotator);
-        baseAnnotatorRef.current = defaultAnnotator || "_main";
+        baseAnnotatorRef.current = defaultAnnotator.startsWith("deleted:") ? "_main" : defaultAnnotator || "_main";
 
         try {
           if (!edemaHere) {
@@ -2567,7 +2581,7 @@ export default function Viewer({
         setLabels(saved.labels);
         setPickedAnnotator(newAnnotator);
         if (newAnnotator !== "_mine") {
-          baseAnnotatorRef.current = newAnnotator || "_main";
+          baseAnnotatorRef.current = newAnnotator.startsWith("deleted:") ? "_main" : newAnnotator || "_main";
         }
         undoStack.current = [];
         redoStack.current = [];
@@ -2766,7 +2780,7 @@ export default function Viewer({
     const version = editVersion.current;
 
     try {
-      const baseForSave = pickedAnnotator === "_mine" ? (baseAnnotatorRef.current || null) : (pickedAnnotator || null);
+      const baseForSave = pickedAnnotator === "_mine" || pickedAnnotator.startsWith("deleted:") ? (baseAnnotatorRef.current || null) : (pickedAnnotator || null);
       const res = await persist(labels.slice(), seriesId, baseForSave);
       if (res.unchanged) {
         setStatus("No changes to save.");
@@ -2849,7 +2863,7 @@ export default function Viewer({
       saveInFlight.current = true;
       setAutoSaveStatus("Auto-saving…");
       try {
-        const baseForSave = pickedAnnotator === "_mine" ? (baseAnnotatorRef.current || null) : (pickedAnnotator || null);
+        const baseForSave = pickedAnnotator === "_mine" || pickedAnnotator.startsWith("deleted:") ? (baseAnnotatorRef.current || null) : (pickedAnnotator || null);
         await persist(snap, series, baseForSave);
         const time = new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
         setAutoSaveStatus(`Auto-saved ${time}`);

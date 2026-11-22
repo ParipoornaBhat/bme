@@ -303,22 +303,9 @@ export function AnnotatorPicker({
   const handleToggleAB = (target: "A" | "B") => {
     setActiveToggle(target);
     if (!urlCompare) return;
-
-    if (target === "A") {
-      startTransition(() => {
-        router.replace(
-          `/annotate?case=${encodeURIComponent(effectiveCaseId)}&by=${encodeURIComponent(deletedTarget)}&deleted=1&compare=${encodeURIComponent(urlCompare)}`
-        );
-      });
-      onChange(deletedTarget);
-    } else {
-      startTransition(() => {
-        router.replace(
-          `/annotate?case=${encodeURIComponent(effectiveCaseId)}&by=${encodeURIComponent(urlCompare)}&deleted=0&compare=${encodeURIComponent(deletedTarget)}`
-        );
-      });
-      onChange(urlCompare);
-    }
+    // A = the deleted version, B = the one that replaced it. Only the shown version changes,
+    // so the comparison (and its Dice scores) stays on screen.
+    onChange(target === "A" ? `deleted:${deletedTarget}` : urlCompare);
   };
 
   const mainAnnotator = annotators.find((a) => a.isMain);
