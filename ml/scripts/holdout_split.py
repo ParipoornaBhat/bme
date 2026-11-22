@@ -25,6 +25,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from seg2nifti import build_labelmap, read_segmentation  # noqa: E402
 from train_3d import HOLDOUT_FILE, SEED, load_worklist_metadata, stratified_patient_groups, volume_path  # noqa: E402
+from dataset_manifest import incomplete_reason  # noqa: E402
 
 FOLDS = 5
 
@@ -48,8 +49,9 @@ def annotated_cases(base: Path) -> list[dict]:
             print(f"  {d.name}  skipped ({type(e).__name__})")
             continue
         cls = classes.get(d.name) or ("bme" if d.name.startswith("BME-") else "non_bme")
-        if int((lab == 1).sum()) == 0 or (cls == "bme" and int((lab == 2).sum()) == 0):
-            print(f"  {d.name}  skipped (annotation not complete yet)")
+        why = incomplete_reason(lab, cls)
+        if why:
+            print(f"  {d.name}  skipped ({why})")
             continue
         cases.append({
             "id": d.name,

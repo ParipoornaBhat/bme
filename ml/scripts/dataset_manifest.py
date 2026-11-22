@@ -27,12 +27,39 @@ import subprocess
 import sys
 from pathlib import Path
 
+import numpy as np
+
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from seg2nifti import build_labelmap, read_segmentation  # noqa: E402
 from train_3d import load_worklist_metadata, volume_path  # noqa: E402
 
-RULE = "used = bone_marrow drawn, and on BME-class scans bme drawn too"
+# An annotation marked on fewer slices than this (all labels together) is a stray
+# mark, not an annotation. A single label may be small: edema on one slice is fine.
+MIN_MARKED_SLICES = 5
+RULE = (f"used = marked on at least {MIN_MARKED_SLICES} slices overall, bone_marrow drawn, "
+        f"and on BME-class scans bme drawn")
+
+
+def slices_with(lab: np.ndarray, value: int | None = None) -> int:
+    """Slices holding this label (or any label when value is None). The slice axis is the
+    shortest one (slices are 3-6 mm apart)."""
+    axis = int(np.argmin(lab.shape))
+    other = tuple(i for i in range(lab.ndim) if i != axis)
+    mask = lab > 0 if value is None else lab == value
+    return int(np.any(mask, axis=other).sum())
+
+
+def incomplete_reason(lab: np.ndarray, cls: str) -> str:
+    """Why this annotation is not complete yet, or "" when it can be trained on."""
+    if not np.any(lab == 1):
+        return "no bone_marrow drawn yet"
+    if cls == "bme" and not np.any(lab == 2):
+        return "BME scan with no edema drawn yet"
+    marked = slices_with(lab)
+    if marked < MIN_MARKED_SLICES:
+        return f"marked on only {marked} slice(s)"
+    return ""
 
 
 def sha256(path: Path) -> str:
@@ -61,7 +88,8 @@ def build(base: Path, keep_all: bool) -> dict:
         if not seg.exists():
             continue
         cls = classes.get(d.name) or ("bme" if d.name.startswith("BME-") else "non_bme")
-        row = {"id": d.name, "cls": cls, "seg_sha256": sha256(seg), "bone_voxels": 0, "bme_voxels": 0}
+        row = {"id": d.name, "cls": cls, "seg_sha256": sha256(seg), "bone_voxels": 0, "bme_voxels": 0,
+               "bone_slices": 0, "bme_slices": 0}
         reason = ""
         if not volume_path(base, d.name).exists():
             reason = "scan missing on this PC"
@@ -71,10 +99,10 @@ def build(base: Path, keep_all: bool) -> dict:
                 lab, _, _ = build_labelmap(data, segments)
                 row["bone_voxels"] = int((lab == 1).sum())
                 row["bme_voxels"] = int((lab == 2).sum())
-                if row["bone_voxels"] == 0:
-                    reason = "no bone_marrow drawn yet"
-                elif cls == "bme" and row["bme_voxels"] == 0:
-                    reason = "BME scan with no edema drawn yet"
+                row["bone_slices"] = slices_with(lab, 1)
+                row["bme_slices"] = slices_with(lab, 2)
+                row["marked_slices"] = slices_with(lab)
+                reason = incomplete_reason(lab, cls)
             except Exception as e:  # noqa: BLE001
                 reason = f"annotation unreadable ({type(e).__name__})"
         hard = reason in ("scan missing on this PC",) or reason.startswith("annotation unreadable")
