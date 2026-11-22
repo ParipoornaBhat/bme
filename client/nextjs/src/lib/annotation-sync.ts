@@ -435,7 +435,11 @@ async function executeSync(options: AnnotationSyncOptions): Promise<SyncReport> 
       // - local file exists, differs, and state.sha != loc.sha -> conflict
       // - no local file -> none
       let action: SyncAction;
-      if (rem?.deletedAt) {
+      if (rem?.deletedAt && rem.deletedReason === "superseded") {
+        // A reviewer's save never retires the team's file. Older code (an undeployed site, a
+        // teammate's PC) can still mark rows "superseded"; keep the file where it is.
+        action = "none";
+      } else if (rem?.deletedAt) {
         if (loc) {
           if (loc.sha256 === rem.sha256 || (stateEntry && stateEntry.sha === loc.sha256)) {
             action = "retire-local" as SyncAction;
