@@ -21,6 +21,7 @@ type Case = {
   plane: string;
   hasT1: boolean;
   annotated: boolean;
+  labels?: { bone: boolean; edema: boolean } | null;
   savedAt: string | null;
   sourceName: string | null;
   flag: FlagRecord | null;
@@ -377,7 +378,28 @@ function AnnotatePageContent() {
                         }`}
                       >
                         {c.annotated ? (
-                          <CheckCircle2 className="h-4 w-4 shrink-0 text-emerald-500" />
+                          <CheckCircle2
+                            className={`h-4 w-4 shrink-0 ${
+                              !c.labels || (c.labels.bone && c.labels.edema)
+                                ? "text-emerald-500"
+                                : c.labels.edema
+                                ? "text-red-500"
+                                : c.labels.bone
+                                ? "text-emerald-300/70"
+                                : "text-muted-foreground/60"
+                            }`}
+                            aria-label={
+                              !c.labels
+                                ? "Annotated"
+                                : c.labels.bone && c.labels.edema
+                                ? "Bone marrow and edema drawn"
+                                : c.labels.edema
+                                ? "Edema only, bone marrow not drawn yet"
+                                : c.labels.bone
+                                ? "Bone marrow only, no edema drawn"
+                                : "Saved but empty"
+                            }
+                          />
                         ) : !isReview && ledger[c.id] ? (
                           <Download className="h-4 w-4 shrink-0 text-amber-500" />
                         ) : (
@@ -474,6 +496,10 @@ function AnnotatePageContent() {
                 <p className="shrink-0 text-[11px] leading-snug text-muted-foreground">
                   <span className="mr-2 inline-block h-2 w-2 rounded-full bg-rose-500" />BME
                   <span className="ml-3 mr-2 inline-block h-2 w-2 rounded-full bg-slate-400" />No BME
+                  <br />
+                  <CheckCircle2 className="mr-1 inline h-3 w-3 text-emerald-500" />both drawn
+                  <CheckCircle2 className="ml-2 mr-1 inline h-3 w-3 text-red-500" />edema only
+                  <CheckCircle2 className="ml-2 mr-1 inline h-3 w-3 text-emerald-300/70" />bone only
                   <br />
                   <strong>Iso</strong> = thin slices, best for 3D. Annotate these first.
                   {!isReview && (

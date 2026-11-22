@@ -6,6 +6,7 @@ import { db, caseAnnotation, caseOwner, ownerForCase, caseReview } from "@bme/db
 import { isReviewMode } from "~/lib/app-mode";
 import { reviewAccount, reviewScan } from "~/lib/review-auth";
 import { readFlags } from "~/lib/flag-store";
+import { gzPresence, knownShaPresence, nrrdPresence, union } from "~/lib/label-presence";
 
 /**
  * Case list for the annotation workspace.
@@ -84,7 +85,7 @@ async function reviewHandler() {
   const scans = await db.select().from(reviewScan);
   // Only the columns the list needs; the annotation itself is large.
   const mainAnnotations = await db
-    .select({ caseId: caseAnnotation.caseId, updatedAt: caseAnnotation.updatedAt, createdAt: caseAnnotation.createdAt })
+    .select({ id: caseAnnotation.id, caseId: caseAnnotation.caseId, sha256: caseAnnotation.sha256, updatedAt: caseAnnotation.updatedAt, createdAt: caseAnnotation.createdAt })
     .from(caseAnnotation)
     .where(
       and(
@@ -94,6 +95,28 @@ async function reviewHandler() {
     );
 
   const mainMap = new Map(mainAnnotations.map((m) => [m.caseId, m]));
+
+  // Which labels each main annotation holds (decoded once per version, then cached by sha).
+  const presence = new Map<string, { bone: boolean; edema: boolean } | null>();
+  try {
+    const versions = await db
+      .select({ id: caseAnnotation.id, caseId: caseAnnotation.caseId, sha256: caseAnnotation.sha256 })
+      .from(caseAnnotation)
+      .where(isNull(caseAnnotation.deletedAt));
+    const unknown = versions.filter((m) => knownShaPresence(m.sha256) === undefined).map((m) => m.id);
+    if (unknown.length) {
+      const blobs = await db
+        .select({ id: caseAnnotation.id, sha256: caseAnnotation.sha256, labelsGzB64: caseAnnotation.labelsGzB64 })
+        .from(caseAnnotation)
+        .where(inArray(caseAnnotation.id, unknown));
+      for (const b of blobs) gzPresence(b.sha256, b.labelsGzB64);
+    }
+    const byCase = new Map<string, (ReturnType<typeof knownShaPresence>)[]>();
+    for (const v of versions) byCase.set(v.caseId, [...(byCase.get(v.caseId) || []), knownShaPresence(v.sha256)]);
+    for (const [caseId, list] of byCase) presence.set(caseId, union(list));
+  } catch {
+    /* ticks fall back to plain green */
+  }
 
   // A radiologist's save replaces the team annotation: the old one is marked
   // superseded and hers is the current one. The case is still annotated.
@@ -180,6 +203,7 @@ async function reviewHandler() {
       plane: "",
       hasT1: false,
       annotated,
+      labels: presence.get(id) ?? null,
       savedAt,
       flag: null,
       sourceName: null,
@@ -303,6 +327,14 @@ export async function GET() {
       plane: r.plane || "",
       hasT1: r.has_t1 === "True",
       annotated: hasSeg,
+      labels: hasSeg
+        ? union(
+            fs
+              .readdirSync(annDir)
+              .filter((f) => f.endsWith(".seg.nrrd"))
+              .map((f) => nrrdPresence(path.join(annDir, f))),
+          )
+        : null,
       savedAt,
       flag: flags[id] ?? null,
       // null unless the local flag is on
