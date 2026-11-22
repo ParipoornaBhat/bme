@@ -821,17 +821,29 @@ async function setup() {
   await checkEnv();
 }
 
-async function getResults() {
+async function getResults(args = []) {
   const r = await ssh(`cd ${REMOTE}/data 2>/dev/null && for d in ${RESULTS.join(" ")}; do [ -f $d/metrics.json ] && echo $d; done; true`);
   const ready = r.out.trim().split(/\r?\n/).filter(Boolean);
   if (!ready.length) {
     console.log("No finished results on this account yet. Check with: pnpm h200 status");
     return;
   }
-  ready.forEach((d, i) => console.log(`  ${i + 1}. ${d}`));
-  const pick = ready[Number(await ask(`Download which? [1-${ready.length}] `)) - 1];
-  if (!pick) return;
-  await download(`data/${pick}`, `data/${pick}`, pick);
+  // Named on the command line (the dashboard does this): no questions asked.
+  const noPrompt = process.env.BME_NO_PROMPT === "1";
+  let pick = args.find((a) => ready.includes(a));
+  if (!pick) {
+    if (noPrompt) fail("Name a finished result: one of " + ready.join(", "));
+    ready.forEach((d, i) => console.log(`  ${i + 1}. ${d}`));
+    pick = ready[Number(await ask(`Download which? [1-${ready.length}] `)) - 1];
+    if (!pick) return;
+  }
+  // Results only: scores, run record and per-fold status (a few KB). With the model: plus fold weights (large).
+  let choice = args.find((a) => ["results", "weights", "with-model"].includes(a));
+  if (!choice) {
+    if (noPrompt) fail("Say results or weights.");
+    choice = (await ask("Results only (a few KB) or with the model too (large)? [R/m] ")).trim().toLowerCase() === "m" ? "weights" : "results";
+  }
+  await download(`data/${pick}`, `data/${pick}`, pick, { weights: choice !== "results" });
 }
 
 async function checkEnv() {
@@ -846,9 +858,12 @@ async function checkEnv() {
 
 // ---------- results back ----------------------------------------------------
 
-async function download(remoteRel, localRel, label) {
+async function download(remoteRel, localRel, label, { weights = true } = {}) {
+  const pick = weights
+    ? "-name 'fold_*.pt' -o -name metrics.json -o -name run_status.json"
+    : "-name metrics.json -o -name run_status.json -o -name metrics_partial.json -o -name 'status_fold_*.json' -o -name dataset_manifest.json";
   const check = await ssh(
-    `cd ${REMOTE} && [ -f ${remoteRel}/metrics.json ] && find ${remoteRel} -maxdepth 1 -type f \\( -name 'fold_*.pt' -o -name metrics.json -o -name run_status.json \\) -printf '%s %f\\n'`,
+    `cd ${REMOTE} && [ -f ${remoteRel}/metrics.json ] && find ${remoteRel} -maxdepth 1 -type f \\( ${pick} \\) -printf '%s %f\\n'`,
   );
   if (check.code !== 0 || !check.out.includes("metrics.json")) {
     console.log(`${label} is not finished on the server yet (no ${remoteRel}/metrics.json).`);
@@ -857,11 +872,17 @@ async function download(remoteRel, localRel, label) {
   }
   const names = check.out.split(/\r?\n/).map((l) => l.split(" ")[1]).filter(Boolean);
   const bytes = check.out.split(/\r?\n/).reduce((s, l) => s + (Number(l.split(" ")[0]) || 0), 0);
-  console.log(`Downloading ${label}: ${names.length} file(s), ${fmt(bytes)}. Scans and annotations are not copied.`);
+  console.log(`Downloading ${label} (${weights ? "with the model" : "results only"}): ${names.length} file(s), ${fmt(bytes)}. Scans and annotations are not copied.`);
+  // The dashboard asks for this first, so its confirmation shows the exact size.
+  if (process.env.BME_PLAN === "1") {
+    console.log("PLAN " + JSON.stringify({ files: names.length, bytes, weights, remote: session.remote, label }));
+    return;
+  }
   if (session.remote && !(await internetOk(bytes, "download"))) return;
 
   const dest = path.join(root, localRel);
-  if (fs.existsSync(dest) && fs.readdirSync(dest).length) {
+  // Results only never moves what is already here (an earlier model download stays).
+  if (weights && fs.existsSync(dest) && fs.readdirSync(dest).length) {
     const keep = `${dest}_before_${new Date().toISOString().slice(0, 16).replace(/[-:T]/g, "")}`;
     fs.renameSync(dest, keep);
     console.log(`Your previous ${localRel} is kept as ${path.relative(root, keep)}`);

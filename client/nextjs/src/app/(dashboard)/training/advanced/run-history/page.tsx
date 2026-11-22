@@ -20,6 +20,7 @@ import {
 } from "lucide-react";
 import { toast } from "sonner";
 import { TrainingTabs } from "../components/TrainingTabs";
+import { ConfirmationModal } from "../components/ConfirmationModal";
 import { LogModal, TerminalBox, type LogTarget } from "../components/TerminalView";
 
 import type {
@@ -512,7 +513,7 @@ function RunsPageContent() {
                 const isSelected = activeRun?.id === run.id;
                 const statusBadge = statusPillClasses(run.status);
                 const dotColor = statusDotClass(run.status);
-                const diceScore = run.result?.bme_dice;
+                const diceScore = run.result?.bmeDice;
 
                 return (
                   <div
@@ -709,6 +710,11 @@ function RunsPageContent() {
                 )}
               </div>
 
+              {/* Download: results only, or with the model (both need a yes) */}
+              {activeRun.folder && activeRun.status === "finished" && activeRun.roll && (
+                <RunDownload roll={activeRun.roll} folder={activeRun.folder} label={activeRun.label} />
+              )}
+
               {/* Results Card */}
               {activeRun.result && (
                 <div className="rounded-2xl border border-emerald-500/30 bg-emerald-500/5 p-5 space-y-4 shadow-xs">
@@ -717,9 +723,9 @@ function RunsPageContent() {
                       <span className="h-2 w-2 rounded-full bg-emerald-500" />
                       <h3 className="text-sm font-bold text-foreground">Validation Results (Cross-Fold Mean ± Std)</h3>
                     </div>
-                    {activeRun.result.trained_at && (
+                    {activeRun.result.trainedAt && (
                       <span className="text-[11px] text-muted-foreground tabular-nums">
-                        Finished {formatDate(activeRun.result.trained_at)}
+                        Finished {formatDate(activeRun.result.trainedAt)}
                       </span>
                     )}
                   </div>
@@ -729,19 +735,19 @@ function RunsPageContent() {
                     <div className="rounded-xl border border-emerald-500/20 bg-background/80 p-3">
                       <span className="text-[11px] font-semibold text-muted-foreground">Edema Dice</span>
                       <p className="mt-1 text-xl font-bold font-mono tabular-nums text-emerald-600 dark:text-emerald-400">
-                        {fmtMetric(activeRun.result.bme_dice)}
+                        {fmtMetric(activeRun.result.bmeDice)}
                       </p>
                     </div>
                     <div className="rounded-xl border border-border bg-background/80 p-3">
                       <span className="text-[11px] font-semibold text-muted-foreground">Bone Dice</span>
                       <p className="mt-1 text-xl font-bold font-mono tabular-nums text-foreground">
-                        {fmtMetric(activeRun.result.bone_dice)}
+                        {fmtMetric(activeRun.result.boneDice)}
                       </p>
                     </div>
                     <div className="rounded-xl border border-border bg-background/80 p-3">
                       <span className="text-[11px] font-semibold text-muted-foreground">FP / Case</span>
                       <p className="mt-1 text-xl font-bold font-mono tabular-nums text-foreground">
-                        {fmtMetric(activeRun.result.fp_per_case, 2)}
+                        {fmtMetric(activeRun.result.fpPerCase, 2)}
                       </p>
                     </div>
                   </div>
@@ -749,9 +755,9 @@ function RunsPageContent() {
                   {/* Secondary Specs & Download Banner */}
                   <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 pt-2 text-xs text-muted-foreground">
                     <div className="flex items-center gap-4">
-                      {activeRun.result.n_cases && (
+                      {activeRun.result.nCases && (
                         <span>
-                          Cases: <strong className="text-foreground tabular-nums">{activeRun.result.n_cases}</strong>
+                          Cases: <strong className="text-foreground tabular-nums">{activeRun.result.nCases}</strong>
                         </span>
                       )}
                       {activeRun.result.folds && (
@@ -759,11 +765,11 @@ function RunsPageContent() {
                           Folds: <strong className="text-foreground tabular-nums">{activeRun.result.folds}</strong>
                         </span>
                       )}
-                      {activeRun.result.hours_taken != null && (
+                      {activeRun.result.hoursTaken != null && (
                         <span>
                           Compute:{" "}
                           <strong className="text-foreground tabular-nums">
-                            {activeRun.result.hours_taken.toFixed(1)} h
+                            {activeRun.result.hoursTaken.toFixed(1)} h
                           </strong>
                         </span>
                       )}
@@ -1039,5 +1045,109 @@ export default function RunsPage() {
     >
       <RunsPageContent />
     </Suspense>
+  );
+}
+
+type DownloadPlan = { files: number; bytes: number; weights: boolean; remote: boolean; label: string };
+function fmtBytes(b: number) {
+  if (b >= 1024 ** 3) return `${(b / 1024 ** 3).toFixed(2)} GB`;
+  if (b >= 1024 ** 2) return `${(b / 1024 ** 2).toFixed(1)} MB`;
+  return `${Math.max(1, Math.round(b / 1024))} KB`;
+}
+
+/** Copies a finished run from the H200 to this PC: results only, or with the model. */
+function RunDownload({ roll, folder, label }: { roll: string; folder: string; label: string }) {
+  const [busy, setBusy] = useState<"plan" | "copy" | null>(null);
+  const [pending, setPending] = useState<{ mode: "results" | "weights"; plan: DownloadPlan } | null>(null);
+
+  const askFor = async (mode: "results" | "weights") => {
+    setBusy("plan");
+    try {
+      const res = await fetch("/api/training-advanced/download", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ roll, folder, mode, plan: true }),
+      });
+      const json = await res.json();
+      if (!res.ok) throw new Error(json.error || "Could not check the download");
+      setPending({ mode, plan: json.plan });
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "Could not check the download");
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const copy = async () => {
+    if (!pending) return;
+    const { mode } = pending;
+    setBusy("copy");
+    setPending(null);
+    const id = toast.loading(`Copying ${label} to this PC...`);
+    try {
+      const res = await fetch("/api/training-advanced/download", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ roll, folder, mode, confirmed: true }),
+      });
+      const json = await res.json();
+      if (!res.ok) throw new Error(json.error || "Copy failed");
+      toast.success(`Copied ${label} to data/${folder}`, { id });
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "Copy failed", { id });
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const p = pending?.plan;
+  return (
+    <div className="rounded-2xl border border-border bg-card p-4 space-y-3">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <div>
+          <h3 className="text-sm font-bold text-foreground">Copy to this PC</h3>
+          <p className="text-[11px] text-muted-foreground">Scans and annotations are never copied. Nothing is copied until you confirm.</p>
+        </div>
+        <div className="flex gap-2">
+          <button
+            type="button"
+            disabled={busy !== null}
+            onClick={() => askFor("results")}
+            className="rounded-xl border border-border px-3 py-2 text-xs font-bold text-foreground hover:bg-accent transition-all cursor-pointer disabled:opacity-50"
+          >
+            {busy === "plan" ? "Checking..." : "Results only"}
+          </button>
+          <button
+            type="button"
+            disabled={busy !== null}
+            onClick={() => askFor("weights")}
+            className="rounded-xl bg-primary px-3 py-2 text-xs font-bold text-primary-foreground hover:bg-primary/90 transition-all cursor-pointer disabled:opacity-50"
+          >
+            With the model
+          </button>
+        </div>
+      </div>
+
+      <ConfirmationModal
+        open={pending !== null}
+        title={pending?.mode === "weights" ? `Copy ${label} with the model?` : `Copy the results of ${label}?`}
+        description={p ? `${p.files} file(s), ${fmtBytes(p.bytes)}, from H200 account ${roll}.` : undefined}
+        warnings={
+          p
+            ? [
+                pending?.mode === "weights"
+                  ? "This copies the fold weights: large. If this PC already has this folder, the old copy is kept as a backup, not deleted."
+                  : "Results only: scores, the run record and per-fold status. The model weights stay on the H200.",
+                p.remote
+                  ? `You are outside the college network: this uses about ${fmtBytes(p.bytes)} of your internet data.`
+                  : "On college WiFi: no internet data is used.",
+              ]
+            : []
+        }
+        actionLabel={pending?.mode === "weights" ? "Copy with the model" : "Copy results"}
+        onConfirm={copy}
+        onCancel={() => setPending(null)}
+      />
+    </div>
   );
 }
