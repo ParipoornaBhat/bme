@@ -3,7 +3,6 @@ import { isReviewMode } from "~/lib/app-mode";
 import { planPull, runPull } from "~/lib/data-pull";
 
 export const dynamic = "force-dynamic";
-export const maxDuration = 900;
 
 /** GET: which scans the database knows that this PC does not have (nothing is downloaded). */
 export async function GET() {
