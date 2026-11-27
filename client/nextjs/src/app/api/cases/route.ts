@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 import fs from "node:fs";
 import path from "node:path";
 import { eq, and, inArray, isNull, isNotNull } from "drizzle-orm";
-import { db, caseAnnotation, caseOwner, ownerForCase, caseReview } from "@bme/db";
+import { db, caseAnnotation, caseOwner, ownerForCase, caseReview, reviewEdit } from "@bme/db";
 import { isReviewMode } from "~/lib/app-mode";
 import { reviewAccount, reviewScan } from "~/lib/review-auth";
 import { readFlags } from "~/lib/flag-store";
@@ -113,6 +113,18 @@ async function reviewHandler() {
     }
     const byCase = new Map<string, (ReturnType<typeof knownShaPresence>)[]>();
     for (const v of versions) byCase.set(v.caseId, [...(byCase.get(v.caseId) || []), knownShaPresence(v.sha256)]);
+    try {
+      const edits = await db
+        .select({ id: reviewEdit.id, caseId: reviewEdit.caseId, updatedAt: reviewEdit.updatedAt, labelsGzB64: reviewEdit.labelsGzB64 })
+        .from(reviewEdit)
+        .where(inArray(reviewEdit.status, ["open", "applying"]));
+      for (const { id, caseId, updatedAt, labelsGzB64 } of edits) {
+        const key = `edit:${id}:${new Date(updatedAt).getTime()}`;
+        byCase.set(caseId, [...(byCase.get(caseId) || []), gzPresence(key, labelsGzB64)]);
+      }
+    } catch {
+      /* open edits skipped */
+    }
     for (const [caseId, list] of byCase) presence.set(caseId, union(list));
   } catch {
     /* ticks fall back to plain green */
