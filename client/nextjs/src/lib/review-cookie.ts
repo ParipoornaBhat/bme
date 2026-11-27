@@ -3,9 +3,11 @@
  * Cookie format: <username>.<expiresMs>.<hmacHex>
  */
 
+export const REVIEW_SESSION_MAX_AGE_SEC = 30 * 24 * 60 * 60;
+
 export async function verifyReviewCookie(
   value: string | undefined | null,
-): Promise<{ username: string } | null> {
+): Promise<{ username: string; expiresMs: number } | null> {
   if (!value) return null;
   const secret = process.env.REVIEW_SESSION_SECRET;
   if (!secret) return null;
@@ -44,7 +46,7 @@ export async function verifyReviewCookie(
     );
 
     if (!isValid) return null;
-    return { username };
+    return { username, expiresMs };
   } catch {
     return null;
   }

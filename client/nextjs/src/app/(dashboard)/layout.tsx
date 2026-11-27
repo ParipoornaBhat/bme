@@ -5,6 +5,7 @@ import { DashboardContext, type ProfileData } from "./dashboard-context";
 import { useRouter, usePathname } from "next/navigation";
 import { signOut, useSession } from "~/lib/auth-client";
 import { isReviewMode } from "~/lib/app-mode";
+import { ReviewSessionWatch } from "./ReviewSessionWatch";
 import { ThemeToggle } from "~/components/theme-toggle";
 import { SiteFooter } from "~/components/layout/SiteFooter";
 import { Breadcrumbs } from "~/components/ui/Breadcrumbs";
@@ -268,6 +269,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
       }
     >
       <AnnotationSummaryProvider>
+        {isReview && <ReviewSessionWatch />}
         <div className="h-[100dvh] flex flex-col bg-background overflow-hidden selection:bg-primary/30">
         {/* Top Navbar Header */}
         <header className="sticky top-0 z-40 w-full border-b border-border/40 bg-background/55 backdrop-blur-xl shrink-0">

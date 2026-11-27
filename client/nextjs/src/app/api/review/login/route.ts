@@ -9,6 +9,7 @@ import {
   recordLoginFailure,
   clearLoginFailures,
 } from "~/lib/review-auth";
+import { REVIEW_SESSION_MAX_AGE_SEC } from "~/lib/review-cookie";
 
 export const dynamic = "force-dynamic";
 
@@ -75,7 +76,7 @@ export async function POST(req: NextRequest) {
 
     clearLoginFailures(ip);
 
-    const maxAgeSec = 12 * 60 * 60; // 12 hours
+    const maxAgeSec = REVIEW_SESSION_MAX_AGE_SEC;
     const expiresMs = Date.now() + maxAgeSec * 1000;
     const cookieVal = await signReviewCookie(user.username, expiresMs, secret);
 

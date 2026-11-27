@@ -6,6 +6,18 @@ import { useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
 import { toast } from "sonner";
 
+function getRedirectTarget(): string {
+  if (typeof window === "undefined") return "/annotate";
+  try {
+    const params = new URLSearchParams(window.location.search);
+    const next = params.get("next");
+    if (next && next.startsWith("/annotate") && !next.startsWith("//") && !next.startsWith("/\\")) {
+      return next;
+    }
+  } catch {}
+  return "/annotate";
+}
+
 export default function ReviewLogin() {
   const router = useRouter();
   const [username, setUsername] = useState("");
@@ -20,7 +32,7 @@ export default function ReviewLogin() {
     fetch("/api/review/me", { cache: "no-store" })
       .then((res) => {
         if (res.ok && !cancelled) {
-          router.replace("/annotate");
+          router.replace(getRedirectTarget());
         }
       })
       .catch(() => {
@@ -60,7 +72,7 @@ export default function ReviewLogin() {
       }
 
       toast.success(data.user?.displayName ? `Welcome, ${data.user.displayName}` : "Signed in");
-      router.push("/annotate");
+      router.push(getRedirectTarget());
     } catch {
       toast.error("Network error. Please try again.");
     } finally {

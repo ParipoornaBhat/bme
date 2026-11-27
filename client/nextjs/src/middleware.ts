@@ -1,6 +1,10 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { isReviewMode } from "~/lib/app-mode";
-import { verifyReviewCookie } from "~/lib/review-cookie";
+import {
+  verifyReviewCookie,
+  signReviewCookie,
+  REVIEW_SESSION_MAX_AGE_SEC,
+} from "~/lib/review-cookie";
 
 /**
  * Every /api route in this app is denied unless a rule below lets it through.
@@ -194,21 +198,49 @@ async function reviewMiddleware(req: NextRequest, path: string, method: string) 
     return NextResponse.redirect(loginUrl);
   }
 
+  let renewedCookie: string | null = null;
+  const secret = process.env.REVIEW_SESSION_SECRET;
+  if (
+    secret &&
+    session.expiresMs - Date.now() < REVIEW_SESSION_MAX_AGE_SEC * 1000 - 24 * 60 * 60 * 1000
+  ) {
+    renewedCookie = await signReviewCookie(
+      session.username,
+      Date.now() + REVIEW_SESSION_MAX_AGE_SEC * 1000,
+      secret,
+    );
+  }
+
+  function withRenewedCookie<T extends NextResponse>(res: T): T {
+    if (renewedCookie) {
+      res.cookies.set({
+        name: "bme_review",
+        value: renewedCookie,
+        httpOnly: true,
+        secure: process.env.NODE_ENV === "production",
+        sameSite: "lax",
+        path: "/",
+        maxAge: REVIEW_SESSION_MAX_AGE_SEC,
+      });
+    }
+    return res;
+  }
+
   // Redirect root to /annotate when authenticated
   if (path === "/") {
     const annotateUrl = new URL("/annotate", req.url);
-    return NextResponse.redirect(annotateUrl);
+    return withRenewedCookie(NextResponse.redirect(annotateUrl));
   }
 
   // In review mode, allow only the contract paths; everything else 404s
   if (!isReviewContractRoute(path, method)) {
     if (path.startsWith("/api/")) {
-      return NextResponse.json({ error: "Not Found" }, { status: 404 });
+      return withRenewedCookie(NextResponse.json({ error: "Not Found" }, { status: 404 }));
     }
-    return new NextResponse("Not Found", { status: 404 });
+    return withRenewedCookie(new NextResponse("Not Found", { status: 404 }));
   }
 
-  return NextResponse.next();
+  return withRenewedCookie(NextResponse.next());
 }
 
 export async function middleware(req: NextRequest) {
